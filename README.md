@@ -14,7 +14,7 @@ A high-performance Rust library for intelligent extraction of thumbnails, subtit
 ## 📋 Supported Formats
 
 ### Container Formats
-- **MP4 Family**
+- **MP4 Family** (ISO/IEC 14496-12)
 
 ### Video Codecs
 - **H.264/AVC** (with OpenH264 decoder)
