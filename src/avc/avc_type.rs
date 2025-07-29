@@ -32,6 +32,7 @@ impl std::fmt::Display for NaluType {
 }
 
 impl NaluType {
+    /// From header byte function.
     pub fn from_header_byte(b: u8) -> Self {
         match b & 0x1f {
             1 => NaluType::NonIDR,
@@ -47,11 +48,13 @@ impl NaluType {
         }
     }
 
+    /// Is video function.
     pub fn is_video(&self) -> bool {
         matches!(self, NaluType::NonIDR | NaluType::IDR)
     }
 }
 
+/// Find nalu types function.
 pub fn find_nalu_types(sample: &[u8]) -> Vec<NaluType> {
     if sample.len() < 4 {
         return Vec::new();
@@ -76,6 +79,7 @@ pub fn find_nalu_types(sample: &[u8]) -> Vec<NaluType> {
     nalus
 }
 
+/// Has parameter sets function.
 pub fn has_parameter_sets(sample: &[u8]) -> bool {
     let types = find_nalu_types_up_to_first_video(sample);
     let mut has_sps = false;
@@ -94,6 +98,7 @@ pub fn has_parameter_sets(sample: &[u8]) -> bool {
     false
 }
 
+/// Find nalu types up to first video function.
 pub fn find_nalu_types_up_to_first_video(sample: &[u8]) -> Vec<NaluType> {
     if sample.len() < 4 {
         return Vec::new();
@@ -121,6 +126,7 @@ pub fn find_nalu_types_up_to_first_video(sample: &[u8]) -> Vec<NaluType> {
     nalus
 }
 
+/// Contains nalu type function.
 pub fn contains_nalu_type(sample: &[u8], ntype: NaluType) -> bool {
     let mut pos = 0usize;
     while pos + 4 <= sample.len() {
@@ -142,6 +148,7 @@ pub fn contains_nalu_type(sample: &[u8], ntype: NaluType) -> bool {
     false
 }
 
+/// Get parameter sets function.
 pub fn get_parameter_sets(sample: &[u8]) -> (Vec<Vec<u8>>, Vec<Vec<u8>>) {
     let mut sps = Vec::new();
     let mut pps = Vec::new();

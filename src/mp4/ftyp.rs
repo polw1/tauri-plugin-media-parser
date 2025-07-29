@@ -1,12 +1,15 @@
+use crate::errors::{MediaParserError, MediaParserResult, Mp4Error};
 use crate::metadata::ContainerFormat;
 use crate::streams::seekable_stream::SeekableStream;
-use std::io::{self, SeekFrom};
+use std::io::SeekFrom;
 
 /// Parse ftyp box and detect container format
-pub fn detect_format_from_ftyp<S: SeekableStream>(stream: &mut S) -> io::Result<ContainerFormat> {
+pub async fn detect_format_from_ftyp<S: SeekableStream>(
+    stream: &mut S,
+) -> MediaParserResult<ContainerFormat> {
     let mut header = [0u8; 32];
-    stream.seek(SeekFrom::Start(0))?;
-    stream.read_exact(&mut header)?;
+    stream.seek(SeekFrom::Start(0)).await?;
+    stream.read(&mut header).await?;
 
     // Check for MP3 format first (ID3v2 or frame sync)
     if &header[0..3] == b"ID3" || (header[0] == 0xFF && (header[1] & 0xE0) == 0xE0) {
@@ -20,10 +23,9 @@ pub fn detect_format_from_ftyp<S: SeekableStream>(stream: &mut S) -> io::Result<
 
             parse_ftyp_brand(major_brand)
         } else {
-            Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "Invalid ftyp box",
-            ))
+            Err(MediaParserError::Mp4(Mp4Error::Error {
+                message: "Invalid ftyp box: too short".to_string(),
+            }))
         }
     } else {
         // Check for other possible formats
@@ -31,16 +33,15 @@ pub fn detect_format_from_ftyp<S: SeekableStream>(stream: &mut S) -> io::Result<
             // Some QuickTime files
             Ok(ContainerFormat::MOV)
         } else {
-            Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "Unknown container format",
-            ))
+            Err(MediaParserError::Mp4(Mp4Error::Error {
+                message: "Unknown container format: no ftyp box found".to_string(),
+            }))
         }
     }
 }
 
 /// Parse ftyp major brand and return corresponding container format
-pub fn parse_ftyp_brand(major_brand: &str) -> io::Result<ContainerFormat> {
+pub fn parse_ftyp_brand(major_brand: &str) -> MediaParserResult<ContainerFormat> {
     match major_brand {
         "isom" | "mp41" | "mp42" | "iso2" | "iso4" | "iso5" | "iso6" => Ok(ContainerFormat::MP4),
         "M4V " | "M4VH" | "M4VP" => Ok(ContainerFormat::M4V),

@@ -13,6 +13,7 @@ pub enum ContainerFormat {
 }
 
 impl ContainerFormat {
+    /// Name function.
     pub fn name(&self) -> &str {
         match self {
             ContainerFormat::MP4 => "MP4",
@@ -25,6 +26,7 @@ impl ContainerFormat {
         }
     }
 
+    /// Is mp4 family function.
     pub fn is_mp4_family(&self) -> bool {
         matches!(
             self,
@@ -38,7 +40,7 @@ impl ContainerFormat {
 }
 
 /// Basic metadata extracted from a media file
-#[derive(Debug, Default, PartialEq, Serialize)]
+#[derive(Debug, Default, Serialize)]
 pub struct Metadata {
     pub title: Option<String>,
     pub artist: Option<String>,
@@ -47,6 +49,7 @@ pub struct Metadata {
     pub duration: Option<f64>,
     pub size: u64,
     pub format: Option<ContainerFormat>,
+    pub streams: Vec<StreamInfo>,
 }
 
 /// Stream information compatible with FFmpeg format
@@ -61,15 +64,6 @@ pub struct StreamInfo {
     pub height: Option<u32>,
     pub channels: Option<u16>,
     pub language: Option<String>,
-}
-
-/// Complete metadata with streams information
-#[derive(Serialize, Debug)]
-pub struct CompleteMetadata {
-    pub duration: f64,
-    pub title: Option<String>,
-    pub streams: Vec<StreamInfo>,
-    pub format: ContainerFormat,
 }
 
 /// Probe result containing basic file information

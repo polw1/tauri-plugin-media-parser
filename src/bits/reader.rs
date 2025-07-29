@@ -15,7 +15,11 @@ use std::io::{self, Read};
 
 /// Mask for the `n` least significant bits.
 pub fn mask(n: u32) -> u32 {
-    if n == 32 { u32::MAX } else { (1u32 << n) - 1 }
+    if n == 32 {
+        u32::MAX
+    } else {
+        (1u32 << n) - 1
+    }
 }
 
 /// Read one byte from a `Read` implementation.
@@ -190,7 +194,7 @@ impl<R: Read> BitReader<R> {
 
 #[cfg(test)]
 mod tests {
-    use super::{BitReader, mask};
+    use super::{mask, BitReader};
     use std::io::Cursor;
 
     #[test]

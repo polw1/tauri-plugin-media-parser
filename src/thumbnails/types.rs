@@ -23,7 +23,7 @@ pub struct VideoTrackInfo {
     pub avcc: Option<crate::mp4::AvccConfig>, // AVCC configuration if present
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct SampleRange {
     pub offset: u64,
     pub size: u32,

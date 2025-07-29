@@ -1,18 +1,21 @@
 use super::types::SubtitleTrackInfo;
+use crate::errors::MediaParserResult;
 use crate::mp4::r#box::{find_box, find_box_range};
 use crate::mp4::stco::parse_stco_or_co64_subtitles;
 use crate::mp4::stsc::parse_stsc_subtitles;
 use crate::mp4::stsz::parse_stsz_subtitles;
 use crate::mp4::stts::parse_stts_subtitles;
-use std::io;
+use log::{debug, info, warn};
 
 /// Analyze subtitle tracks from moov payload
-pub(crate) fn analyze_subtitle_tracks(moov_payload: &[u8]) -> io::Result<Vec<SubtitleTrackInfo>> {
+pub(crate) fn analyze_subtitle_tracks(
+    moov_payload: &[u8],
+) -> MediaParserResult<Vec<SubtitleTrackInfo>> {
     let mut tracks = Vec::new();
     let mut pos = 0;
     let mut track_count = 0;
 
-    println!("Analyzing moov payload ({} bytes)", moov_payload.len());
+    info!("Analyzing moov payload ({} bytes)", moov_payload.len());
 
     // Find all trak boxes with safety limits
     while pos < moov_payload.len() && track_count < 50 {
@@ -33,13 +36,13 @@ pub(crate) fn analyze_subtitle_tracks(moov_payload: &[u8]) -> io::Result<Vec<Sub
         // Only process trak boxes
         if box_type == "trak" {
             track_count += 1;
-            println!(
+            debug!(
                 "  Found trak box #{} at position {} (size: {})",
                 track_count, pos, box_size
             );
 
             if pos + box_size > moov_payload.len() {
-                println!("    Trak box extends beyond payload, skipping");
+                warn!("    Trak box extends beyond payload, skipping");
                 break;
             }
 
@@ -47,12 +50,12 @@ pub(crate) fn analyze_subtitle_tracks(moov_payload: &[u8]) -> io::Result<Vec<Sub
 
             // Check if this is a subtitle track
             if is_subtitle_track(trak_data) {
-                println!("    This is a subtitle track");
+                debug!("    This is a subtitle track");
                 if let Some(track_info) = parse_subtitle_track_info(trak_data) {
                     tracks.push(track_info);
                 }
             } else {
-                println!("    Not a subtitle track");
+                debug!("    Not a subtitle track");
             }
         }
 
@@ -70,10 +73,10 @@ pub(crate) fn analyze_subtitle_tracks(moov_payload: &[u8]) -> io::Result<Vec<Sub
     }
 
     if track_count >= 50 {
-        println!("Reached maximum track limit (50), stopping analysis");
+        warn!("Reached maximum track limit (50), stopping analysis");
     }
 
-    println!("Found {} subtitle tracks", tracks.len());
+    info!("Found {} subtitle tracks", tracks.len());
     Ok(tracks)
 }
 
@@ -89,7 +92,7 @@ pub(crate) fn is_subtitle_track(trak_data: &[u8]) -> bool {
 
             if hdlr_data.len() >= 12 {
                 let handler_type = std::str::from_utf8(&hdlr_data[8..12]).unwrap_or("????");
-                println!("    Handler type found: '{}'", handler_type);
+                debug!("    Handler type found: '{}'", handler_type);
                 if handler_type == "subt" || handler_type == "text" || handler_type == "sbtl" {
                     return true;
                 }
@@ -148,7 +151,7 @@ pub(crate) fn parse_subtitle_track_info(trak_data: &[u8]) -> Option<SubtitleTrac
                     mdhd_payload[timescale_offset + 2],
                     mdhd_payload[timescale_offset + 3],
                 ]);
-                println!("    mdhd version: {}, timescale: {}", version, ts);
+                debug!("    mdhd version: {}, timescale: {}", version, ts);
                 ts
             } else {
                 1000 // Default

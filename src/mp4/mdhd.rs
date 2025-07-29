@@ -1,23 +1,22 @@
+use crate::errors::{MediaParserError, MediaParserResult, Mp4Error};
 use crate::mp4::r#box::find_box;
-use std::io;
+use log::debug;
 
 /// Parse mdhd box to get timescale and duration
-pub fn parse_mdhd(mdhd: &[u8]) -> io::Result<(u32, u64)> {
+pub fn parse_mdhd(mdhd: &[u8]) -> MediaParserResult<(u32, u64)> {
     if mdhd.len() < 20 {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "mdhd box too small",
-        ));
+        return Err(MediaParserError::Mp4(Mp4Error::Error {
+            message: "mdhd box too small: expected at least 20 bytes".to_string(),
+        }));
     }
 
     let version = mdhd[0];
     if version == 1 {
         // Version 1: 64-bit values
         if mdhd.len() < 32 {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "mdhd v1 box too small",
-            ));
+            return Err(MediaParserError::Mp4(Mp4Error::Error {
+                message: "mdhd v1 box too small: expected at least 32 bytes".to_string(),
+            }));
         }
         let timescale = u32::from_be_bytes([mdhd[20], mdhd[21], mdhd[22], mdhd[23]]);
         let duration = u64::from_be_bytes([
@@ -56,7 +55,7 @@ pub fn extract_language_from_mdhd(mdia: &[u8]) -> Option<String> {
     let lang2 = char2 + 0x60;
     let lang3 = char3 + 0x60;
 
-    println!(
+    debug!(
         "Language code raw: 0x{:04x}, chars: {},{},{} -> {}{}{}",
         lang_code, char1, char2, char3, lang1 as char, lang2 as char, lang3 as char
     );

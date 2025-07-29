@@ -4,8 +4,8 @@ A high-performance Rust library for intelligent extraction of thumbnails, subtit
 
 ## 🎯 Key Features
 
-- **🖼️ Intelligent Thumbnail Extraction**: Keyframe-only processing with H.264 decoding
-- **📝 Smart Subtitle Extraction**: Multi-format support (TX3G, WebVTT, TTML) with SRT output
+- **🖼️ Thumbnail Extraction**: Keyframe-only processing with H.264 decoding
+- **📝 Subtitle Extraction**: Multi-format support (TX3G, WebVTT, TTML) with SRT output
 - **📊 Comprehensive Metadata**: Container analysis with stream information
 - **🌐 Remote File Support**: HTTP range requests for efficient streaming
 - **⚡ Performance Optimized**: Minimal memory usage and strategic data downloading
@@ -14,7 +14,7 @@ A high-performance Rust library for intelligent extraction of thumbnails, subtit
 ## 📋 Supported Formats
 
 ### Container Formats
-- **MP4 Family** (ISO/IEC 14496-12)
+- **MP4 Family**
 
 ### Video Codecs
 - **H.264/AVC** (with OpenH264 decoder)
@@ -34,24 +34,34 @@ Add to your `Cargo.toml`:
 mediaparser = "0.1.0"
 ```
 
+### Extract Metadata
+
+```rust 
+use mediaparser::extract_metadata;
+// Local file 
+let metadata = extract_metadata("video.mp4").await;
+// Remote file 
+let metadata = extract_metadata("https://example.com/video.mp4".to_string()).await;
+```
+
 ### Extract Thumbnails
 
 ```rust
-use mediaparser::{extract_local_thumbnails, extract_remote_thumbnails};
+use mediaparser::extract_thumbnails;
 
 // Local file
-let thumbnails = extract_local_thumbnails(
+let thumbnails = extract_thumbnails(
     "video.mp4", 
     5,        // count
     320,      // max_width  
     240       // max_height
-)?;
+).await;
 
 // Remote file
-let thumbnails = extract_remote_thumbnails(
+let thumbnails = extract_thumbnails(
     "https://example.com/video.mp4".to_string(),
     5, 320, 240
-)?;
+).await;
 
 for thumb in thumbnails {
     println!("Timestamp: {:.2}s, Size: {}x{}", 
@@ -63,15 +73,15 @@ for thumb in thumbnails {
 ### Extract Subtitles
 
 ```rust
-use mediaparser::{extract_local_subtitle_entries, extract_remote_subtitle_entries};
+use mediaparser::extract_subtitles;
 
 // Local file
-let subtitles = extract_local_subtitle_entries("video.mp4")?;
+let subtitles = extract_subtitles("video.mp4").await;
 
 // Remote file  
-let subtitles = extract_remote_subtitle_entries(
+let subtitles = extract_subtitles(
     "https://example.com/video.mp4".to_string()
-)?;
+).await;
 
 for entry in subtitles {
     println!("{}: {} -> {}", entry.index, entry.start, entry.end);

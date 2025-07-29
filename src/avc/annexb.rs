@@ -1,8 +1,8 @@
-use crate::NaluType;
 use crate::avc::nalus::{
-    Nalu, extract_nalus_from_bytestream as extract_nalus_from_bytestream_new,
-    extract_nalus_from_sample,
+    extract_nalus_from_bytestream as extract_nalus_from_bytestream_new, extract_nalus_from_sample,
+    Nalu,
 };
+use crate::NaluType;
 
 /// Convert a bytestream with Annex B start codes to a sample using 4-byte lengths.
 /// The conversion is performed in a new buffer which is returned.
@@ -88,6 +88,7 @@ pub enum AvcFormat {
     since = "1.0.0",
     note = "Use FormatConverter::extract_first_video_nalu instead"
 )]
+/// Get first video nalu from bytestream function.
 pub fn get_first_video_nalu_from_bytestream(stream: &[u8]) -> Option<Vec<u8>> {
     FormatConverter::extract_first_video_nalu(stream, AvcFormat::AnnexB).map(|nalu| nalu.data)
 }
@@ -107,6 +108,7 @@ pub fn extract_nalus_from_bytestream(data: &[u8]) -> Vec<Vec<u8>> {
     since = "1.0.0",
     note = "Use FormatConverter::extract_nalus_of_type instead"
 )]
+/// Extract nalus of type from bytestream function.
 pub fn extract_nalus_of_type_from_bytestream(
     n_type: NaluType,
     data: &[u8],

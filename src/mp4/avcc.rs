@@ -2,6 +2,7 @@
 //! Parses SPS and PPS NAL units for H.264 streams in AVCC format.
 
 use crate::avc::nalus::extract_parameter_sets;
+use crate::errors::{MediaParserError, MediaParserResult, Mp4Error};
 
 /// Represents the parsed AVCDecoderConfigurationRecord (avcC) configuration.
 #[derive(Debug, Clone)]
@@ -26,10 +27,12 @@ impl AvccConfig {
     /// Parse AVCDecoderConfigurationRecord as defined in ISO/IEC 14496-15.
     ///
     /// data: full contents of the avcC box (excluding header).
-    pub fn parse(data: &[u8]) -> Result<Self, String> {
+    pub fn parse(data: &[u8]) -> MediaParserResult<Self> {
         let mut pos = 0;
         if data.len() < 7 {
-            return Err("avcC data too short".into());
+            return Err(MediaParserError::Mp4(Mp4Error::Error {
+                message: "avcC data too short".to_string(),
+            }));
         }
         // configurationVersion
         let configuration_version = data[pos];
@@ -52,31 +55,41 @@ impl AvccConfig {
         let mut sps = Vec::with_capacity(num_sps as usize);
         for _ in 0..num_sps {
             if pos + 2 > data.len() {
-                return Err("Unexpected EOF parsing SPS length".into());
+                return Err(MediaParserError::Mp4(Mp4Error::Error {
+                    message: "Unexpected EOF while reading SPS length".to_string(),
+                }));
             }
             let len = u16::from_be_bytes([data[pos], data[pos + 1]]) as usize;
             pos += 2;
             if pos + len > data.len() {
-                return Err("Unexpected EOF parsing SPS data".into());
+                return Err(MediaParserError::Mp4(Mp4Error::Error {
+                    message: "Unexpected EOF while reading SPS data".to_string(),
+                }));
             }
             sps.push(data[pos..pos + len].to_vec());
             pos += len;
         }
         // numOfPictureParameterSets
         if pos >= data.len() {
-            return Err("Unexpected EOF parsing PPS count".into());
+            return Err(MediaParserError::Mp4(Mp4Error::Error {
+                message: "Unexpected EOF while reading PPS count".to_string(),
+            }));
         }
         let num_pps = data[pos];
         pos += 1;
         let mut pps = Vec::with_capacity(num_pps as usize);
         for _ in 0..num_pps {
             if pos + 2 > data.len() {
-                return Err("Unexpected EOF parsing PPS length".into());
+                return Err(MediaParserError::Mp4(Mp4Error::Error {
+                    message: "Unexpected EOF while reading PPS length".to_string(),
+                }));
             }
             let len = u16::from_be_bytes([data[pos], data[pos + 1]]) as usize;
             pos += 2;
             if pos + len > data.len() {
-                return Err("Unexpected EOF parsing PPS data".into());
+                return Err(MediaParserError::Mp4(Mp4Error::Error {
+                    message: "Unexpected EOF while reading PPS data".to_string(),
+                }));
             }
             pps.push(data[pos..pos + len].to_vec());
             pos += len;
@@ -101,12 +114,38 @@ impl AvccConfig {
         if is_avcc_format {
             // Parse as AVCC format
             let config = Self::parse(data)?;
+            if config.sps.is_empty() {
+                return Err(MediaParserError::Mp4(Mp4Error::Error {
+                    message: "No SPS found in AVCC format".to_string(),
+                }));
+            }
+            if config.pps.is_empty() {
+                return Err(MediaParserError::Mp4(Mp4Error::Error {
+                    message: "No PPS found in AVCC format".to_string(),
+                }));
+            }
             Ok((config.sps, config.pps))
         } else {
             // Extract from NALU stream
             let (sps_nalus, pps_nalus) = extract_parameter_sets(data, false);
-            let sps = sps_nalus.into_iter().map(|nalu| nalu.data).collect();
-            let pps = pps_nalus.into_iter().map(|nalu| nalu.data).collect();
+            let sps = sps_nalus
+                .into_iter()
+                .map(|nalu| nalu.data)
+                .collect::<Vec<_>>();
+            let pps = pps_nalus
+                .into_iter()
+                .map(|nalu| nalu.data)
+                .collect::<Vec<_>>();
+            if sps.is_empty() {
+                return Err(MediaParserError::Mp4(Mp4Error::Error {
+                    message: "No SPS found in NALU stream".to_string(),
+                }));
+            }
+            if pps.is_empty() {
+                return Err(MediaParserError::Mp4(Mp4Error::Error {
+                    message: "No PPS found in NALU stream".to_string(),
+                }));
+            }
             Ok((sps, pps))
         }
     }
@@ -144,8 +183,24 @@ impl ParameterSetExtractor {
     /// Extract parameter sets from sample format (4-byte lengths)
     pub fn from_sample(data: &[u8]) -> ParameterSetsResult {
         let (sps_nalus, pps_nalus) = extract_parameter_sets(data, true);
-        let sps = sps_nalus.into_iter().map(|nalu| nalu.data).collect();
-        let pps = pps_nalus.into_iter().map(|nalu| nalu.data).collect();
+        let sps = sps_nalus
+            .into_iter()
+            .map(|nalu| nalu.data)
+            .collect::<Vec<_>>();
+        let pps = pps_nalus
+            .into_iter()
+            .map(|nalu| nalu.data)
+            .collect::<Vec<_>>();
+        if sps.is_empty() {
+            return Err(MediaParserError::Mp4(Mp4Error::Error {
+                message: "No SPS found in sample format".to_string(),
+            }));
+        }
+        if pps.is_empty() {
+            return Err(MediaParserError::Mp4(Mp4Error::Error {
+                message: "No PPS found in sample format".to_string(),
+            }));
+        }
         Ok((sps, pps))
     }
 
@@ -167,4 +222,4 @@ impl ParameterSetExtractor {
 }
 
 /// Type alias for parameter set extraction results
-pub type ParameterSetsResult = Result<(Vec<Vec<u8>>, Vec<Vec<u8>>), String>;
+pub type ParameterSetsResult = MediaParserResult<(Vec<Vec<u8>>, Vec<Vec<u8>>)>;

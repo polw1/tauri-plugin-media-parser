@@ -170,9 +170,9 @@ moov.trak.mdia.minf.stbl.stco/co64
 
 ### Local File Extraction
 ```rust
-use mediaparser::thumbnails::extract_local_thumbnails;
+use mediaparser::thumbnails::extract_thumbnails;
 
-let thumbnails = extract_local_thumbnails("video.mp4", 5, 320, 240)?;
+let thumbnails = extract_thumbnails("video.mp4", 5, 320, 240).await;
 for thumbnail in thumbnails {
     println!("Thumbnail at {:.2}s: {}x{}", 
              thumbnail.timestamp, thumbnail.width, thumbnail.height);
@@ -181,12 +181,12 @@ for thumbnail in thumbnails {
 
 ### Remote File Extraction
 ```rust
-use mediaparser::thumbnails::extract_remote_thumbnails;
+use mediaparser::thumbnails::extract_thumbnails;
 
-let thumbnails = extract_remote_thumbnails(
+let thumbnails = extract_thumbnails(
     "https://example.com/video.mp4".to_string(), 
     3, 640, 480
-)?;
+).await;
 println!("Extracted {} thumbnails", thumbnails.len());
 ```
 

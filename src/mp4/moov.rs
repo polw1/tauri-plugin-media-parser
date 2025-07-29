@@ -1,16 +1,16 @@
 use super::r#box::find_box;
-use crate::metadata::{CompleteMetadata, ContainerFormat, Metadata};
+use crate::errors::MediaParserResult;
+use crate::metadata::{ContainerFormat, Metadata};
 use crate::mp4::mvhd::extract_duration_from_mvhd;
 use crate::mp4::trak::extract_stream_info_from_trak;
 use crate::mp4::udta::{extract_tags_from_udta, extract_title_from_udta};
-use std::io;
 
 /// Extract basic metadata from moov box data
 pub fn extract_mp4_metadata_from_moov(
     moov_data: &[u8],
     file_size: u64,
     format: ContainerFormat,
-) -> io::Result<Metadata> {
+) -> MediaParserResult<Metadata> {
     let mut metadata = Metadata {
         title: None,
         artist: None,
@@ -19,6 +19,7 @@ pub fn extract_mp4_metadata_from_moov(
         format: Some(format),
         duration: None,
         size: file_size,
+        streams: Vec::new(),
     };
 
     // Look for mvhd box for duration
@@ -35,30 +36,6 @@ pub fn extract_mp4_metadata_from_moov(
         if metadata.title.is_none() {
             metadata.title = extract_title_from_udta(udta);
         }
-    }
-
-    Ok(metadata)
-}
-
-/// Extract complete metadata from moov box data
-pub fn extract_complete_mp4_metadata_from_moov(
-    moov_data: &[u8],
-    format: ContainerFormat,
-) -> io::Result<CompleteMetadata> {
-    let mut duration = 0.0;
-    let mut title = None;
-    let mut streams = Vec::new();
-
-    // Look for mvhd box for duration
-    if let Some(mvhd) = find_box(moov_data, "mvhd") {
-        if let Some(d) = extract_duration_from_mvhd(mvhd) {
-            duration = d;
-        }
-    }
-
-    // Look for udta box for title
-    if let Some(udta) = find_box(moov_data, "udta") {
-        title = extract_title_from_udta(udta);
     }
 
     // Parse tracks for stream information
@@ -80,7 +57,7 @@ pub fn extract_complete_mp4_metadata_from_moov(
         if box_type == b"trak" {
             let trak_data = &moov_data[pos + 8..pos + box_size];
             if let Some(stream_info) = extract_stream_info_from_trak(trak_data, track_index) {
-                streams.push(stream_info);
+                metadata.streams.push(stream_info);
                 track_index += 1;
             }
         }
@@ -88,15 +65,10 @@ pub fn extract_complete_mp4_metadata_from_moov(
         pos += box_size;
     }
 
-    Ok(CompleteMetadata {
-        duration,
-        title,
-        streams,
-        format,
-    })
+    Ok(metadata)
 }
 
-// Legacy function for backward compatibility - uses the new modular approach
+/// Legacy function for backward compatibility - uses the new modular approach
 pub fn parse_moov(
     data: &[u8],
     title: &mut Option<String>,
@@ -104,7 +76,7 @@ pub fn parse_moov(
     album: &mut Option<String>,
     copyright: &mut Option<String>,
     duration: &mut Option<f64>,
-) -> io::Result<()> {
+) -> MediaParserResult<()> {
     // Use the new modular approach
     if let Some(mvhd) = find_box(data, "mvhd") {
         if let Some(d) = extract_duration_from_mvhd(mvhd) {
@@ -122,6 +94,7 @@ pub fn parse_moov(
             format: None,
             duration: None,
             size: 0,
+            streams: Vec::new(),
         };
 
         extract_tags_from_udta(udta, &mut temp_metadata);

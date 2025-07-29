@@ -3,8 +3,6 @@ pub mod nalus;
 
 pub mod avc_type;
 
-// pub mod simple;
-
 // Export specific functions to avoid conflicts
 pub use annexb::{convert_bytestream_to_nalu_sample, convert_sample_to_bytestream};
 pub use avc_type::NaluType;
@@ -16,4 +14,3 @@ pub use nalus::{
 // Re-export main types for convenience
 pub use annexb::{AvcFormat, FormatConverter};
 pub use nalus::Nalu;
-// pub use simple::decode_idr_to_rgb;

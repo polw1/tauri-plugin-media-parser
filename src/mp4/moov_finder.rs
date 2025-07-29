@@ -1,5 +1,6 @@
+use crate::errors::{MediaParserError, MediaParserResult, Mp4Error};
 use crate::streams::seekable_stream::SeekableStream;
-use std::io::{self, SeekFrom};
+use std::io::SeekFrom;
 
 /// Initial search window in bytes (8KB)
 const INITIAL_SEARCH_SIZE: usize = 8192;
@@ -17,11 +18,13 @@ pub struct MoovBoxInfo {
 
 /// Find the moov box efficiently by checking beginning and end of file
 /// Returns position and size of the moov box
-pub fn find_moov_box_efficiently<S: SeekableStream>(stream: &mut S) -> io::Result<MoovBoxInfo> {
+pub async fn find_moov_box_efficiently<S: SeekableStream>(
+    stream: &mut S,
+) -> MediaParserResult<MoovBoxInfo> {
     // Try to find moov box at the beginning (first 8KB)
-    stream.seek(SeekFrom::Start(0))?;
+    stream.seek(SeekFrom::Start(0)).await?;
     let mut buffer = vec![0u8; INITIAL_SEARCH_SIZE];
-    let bytes_read = stream.read(&mut buffer)?;
+    let bytes_read = stream.read(&mut buffer).await?;
 
     // Look for moov box in the first chunk
     for i in 0..bytes_read.saturating_sub(8) {
@@ -36,13 +39,13 @@ pub fn find_moov_box_efficiently<S: SeekableStream>(stream: &mut S) -> io::Resul
     }
 
     // If not found at beginning, try the end of the file (last 8KB)
-    let file_size = stream.seek(SeekFrom::End(0))?;
+    let file_size = stream.seek(SeekFrom::End(0)).await?;
     if file_size > INITIAL_SEARCH_SIZE as u64 {
         let search_start = file_size - INITIAL_SEARCH_SIZE as u64;
-        stream.seek(SeekFrom::Start(search_start))?;
+        stream.seek(SeekFrom::Start(search_start)).await?;
         buffer.clear();
         buffer.resize(INITIAL_SEARCH_SIZE, 0);
-        let bytes_read = stream.read(&mut buffer)?;
+        let bytes_read = stream.read(&mut buffer).await?;
 
         for i in 0..bytes_read.saturating_sub(8) {
             if &buffer[i + 4..i + 8] == b"moov" {
@@ -61,12 +64,12 @@ pub fn find_moov_box_efficiently<S: SeekableStream>(stream: &mut S) -> io::Resul
     let search_limit = std::cmp::min(file_size as usize, FALLBACK_SEARCH_LIMIT);
     let mut offset = INITIAL_SEARCH_SIZE as u64;
     while offset < search_limit as u64 {
-        stream.seek(SeekFrom::Start(offset))?;
+        stream.seek(SeekFrom::Start(offset)).await?;
         buffer.clear();
         let remaining = search_limit as u64 - offset;
         let read_size = INITIAL_SEARCH_SIZE.min(remaining as usize);
         buffer.resize(read_size, 0);
-        let bytes_read = stream.read(&mut buffer)?;
+        let bytes_read = stream.read(&mut buffer).await?;
         for i in 0..bytes_read.saturating_sub(8) {
             if &buffer[i + 4..i + 8] == b"moov" {
                 let size =
@@ -88,12 +91,12 @@ pub fn find_moov_box_efficiently<S: SeekableStream>(stream: &mut S) -> io::Resul
     let trailer_start = file_size.saturating_sub(TRAILER_SEARCH_LIMIT as u64);
     let mut offset = file_size.saturating_sub(INITIAL_SEARCH_SIZE as u64);
     loop {
-        stream.seek(SeekFrom::Start(offset))?;
+        stream.seek(SeekFrom::Start(offset)).await?;
         buffer.clear();
         let remaining = file_size - offset;
         let read_size = INITIAL_SEARCH_SIZE.min(remaining as usize);
         buffer.resize(read_size, 0);
-        let bytes_read = stream.read(&mut buffer)?;
+        let bytes_read = stream.read(&mut buffer).await?;
         for i in 0..bytes_read.saturating_sub(8) {
             if &buffer[i + 4..i + 8] == b"moov" {
                 let size =
@@ -111,21 +114,22 @@ pub fn find_moov_box_efficiently<S: SeekableStream>(stream: &mut S) -> io::Resul
         offset = offset.saturating_sub(INITIAL_SEARCH_SIZE as u64);
     }
 
-    Err(io::Error::new(
-        io::ErrorKind::NotFound,
-        "moov box not found",
-    ))
+    Err(MediaParserError::Mp4(Mp4Error::Error {
+        message: "moov box not found in file".to_string(),
+    }))
 }
 
 /// Find moov box and read its payload data
 /// Returns the moov box payload (without the 8-byte header)
-pub fn find_and_read_moov_box<S: SeekableStream>(stream: &mut S) -> io::Result<Vec<u8>> {
-    let moov_info = find_moov_box_efficiently(stream)?;
+pub async fn find_and_read_moov_box<S: SeekableStream>(
+    stream: &mut S,
+) -> MediaParserResult<Vec<u8>> {
+    let moov_info = find_moov_box_efficiently(stream).await?;
 
     // Seek to the moov box and read it
-    stream.seek(SeekFrom::Start(moov_info.position))?;
+    stream.seek(SeekFrom::Start(moov_info.position)).await?;
     let mut moov_data = vec![0u8; moov_info.size as usize];
-    stream.read_exact(&mut moov_data)?;
+    stream.read(&mut moov_data).await?;
 
     // Return payload without the 8-byte header (size + type)
     Ok(moov_data[8..].to_vec())

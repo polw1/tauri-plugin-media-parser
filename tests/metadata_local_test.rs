@@ -1,13 +1,13 @@
-use mediaparser::metadata::read_local_metadata;
+use mediaparser::extract_metadata;
 
-#[test]
-fn test_read_local_metadata() {
+#[tokio::test]
+async fn test_read_local_metadata() {
     // Test reading metadata from a local MP4 file
     let path = concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/tests/testdata/big_buck_bunny.mp4"
     );
-    let metadata = read_local_metadata(path);
+    let metadata = extract_metadata(path.to_string()).await;
 
     assert!(
         metadata.is_ok(),

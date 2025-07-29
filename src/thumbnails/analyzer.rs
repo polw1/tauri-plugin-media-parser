@@ -1,30 +1,27 @@
 use super::types::VideoTrackInfo;
-use crate::mp4::r#box::{find_box, parse_box_header};
+use crate::errors::{MediaParserResult, ThumbnailError};
 use crate::mp4::mdhd::parse_mdhd;
+use crate::mp4::r#box::{find_box, parse_box_header};
 use crate::mp4::stco::parse_stco_or_co64_thumbnails;
 use crate::mp4::stsc::parse_stsc_thumbnails;
 use crate::mp4::stss::parse_stss_thumbnails;
 use crate::mp4::stsz::parse_stsz_thumbnails;
 use crate::mp4::stts::parse_stts_thumbnails;
-use std::io;
+use crate::mp4::AvccConfig;
 
 /// Analyze the video track from moov payload to extract all timing and location information
-pub(crate) fn analyze_video_track(moov_payload: &[u8]) -> io::Result<VideoTrackInfo> {
+pub(crate) fn analyze_video_track(moov_payload: &[u8]) -> MediaParserResult<VideoTrackInfo> {
     // Find the first video track
-    let video_trak = find_video_trak(moov_payload)
-        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "No video track found"))?;
+    let video_trak =
+        find_video_trak(moov_payload).ok_or_else(|| ThumbnailError::new("No video track"))?;
 
-    let mdia = find_box(video_trak, "mdia")
-        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "No mdia box found"))?;
+    let mdia = find_box(video_trak, "mdia").ok_or_else(|| ThumbnailError::new("No mdia box"))?;
 
-    let mdhd = find_box(mdia, "mdhd")
-        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "No mdhd box found"))?;
+    let mdhd = find_box(mdia, "mdhd").ok_or_else(|| ThumbnailError::new("No mdhd box"))?;
 
-    let minf = find_box(mdia, "minf")
-        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "No minf box found"))?;
+    let minf = find_box(mdia, "minf").ok_or_else(|| ThumbnailError::new("No minf box"))?;
 
-    let stbl = find_box(minf, "stbl")
-        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "No stbl box found"))?;
+    let stbl = find_box(minf, "stbl").ok_or_else(|| ThumbnailError::new("No stbl box"))?;
 
     // Extract timing information from mdhd
     let (timescale, duration) = parse_mdhd(mdhd)?;
@@ -89,7 +86,7 @@ fn find_video_trak(moov_payload: &[u8]) -> Option<&[u8]> {
 }
 
 /// Extract AVCC configuration from stsd box
-fn extract_avcc_from_stsd(stsd: &[u8]) -> Option<crate::mp4::AvccConfig> {
+fn extract_avcc_from_stsd(stsd: &[u8]) -> Option<AvccConfig> {
     if stsd.len() < 8 {
         return None;
     }
@@ -128,7 +125,7 @@ fn extract_avcc_from_stsd(stsd: &[u8]) -> Option<crate::mp4::AvccConfig> {
 }
 
 /// Search for avcC box within a sample entry
-fn search_avcc_in_entry(entry_data: &[u8]) -> Option<crate::mp4::AvccConfig> {
+fn search_avcc_in_entry(entry_data: &[u8]) -> Option<AvccConfig> {
     // Skip the sample entry header and video-specific fields
     let mut pos = 8 + 6 + 2 + 70; // size+type + reserved + data_ref + video fields
 
@@ -142,7 +139,7 @@ fn search_avcc_in_entry(entry_data: &[u8]) -> Option<crate::mp4::AvccConfig> {
 
             if name == "avcC" {
                 // Found avcC box, try to parse it
-                if let Ok(config) = crate::mp4::AvccConfig::parse(payload) {
+                if let Ok(config) = AvccConfig::parse(payload) {
                     return Some(config);
                 }
             }

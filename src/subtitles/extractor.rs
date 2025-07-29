@@ -1,51 +1,35 @@
 use super::analyzer::analyze_subtitle_tracks;
 use super::parser::parse_subtitle_sample_data;
 use super::types::{SubtitleEntry, SubtitleSampleRange, SubtitleTrackInfo};
-use super::utils::{find_moov_box_efficiently, get_samples_in_chunk, group_nearby_subtitle_ranges};
-use crate::metadata::{ContainerFormat, detect_format};
-use crate::mp4::build_sample_timestamps;
-use crate::seekable_http_stream::SeekableHttpStream;
-use crate::seekable_stream::{LocalSeekableStream, SeekableStream};
-use std::io::{self, SeekFrom};
-use std::time::{Duration, Instant};
+use super::utils::{get_samples_in_chunk, group_nearby_subtitle_ranges};
+use crate::errors::MediaParserResult;
+use crate::metadata::{detect_format, ContainerFormat};
+use crate::mp4::{build_sample_timestamps, find_moov_box_efficiently};
+use crate::seekable_stream::SeekableStream;
+use log::info;
+use std::io::SeekFrom;
 
-const EXTRACTION_TIMEOUT: Duration = Duration::from_secs(60); // 60 seconds timeout
-
-/// Extract subtitles efficiently by downloading only necessary subtitle data
-pub fn extract_remote_subtitle_entries(url: String) -> io::Result<Vec<SubtitleEntry>> {
-    let stream = SeekableHttpStream::new(url)?;
-    extract_subtitle_entries(stream)
-}
-
-/// Open local file and extract subtitles intelligently
-pub fn extract_local_subtitle_entries<P: AsRef<std::path::Path>>(
-    path: P,
-) -> io::Result<Vec<SubtitleEntry>> {
-    let stream = LocalSeekableStream::open(path)?;
-    extract_subtitle_entries(stream)
-}
-
-/// Core intelligent subtitle extraction for any SeekableStream
-fn extract_subtitle_entries<S: SeekableStream>(mut stream: S) -> io::Result<Vec<SubtitleEntry>> {
-    let start_time = Instant::now();
-    println!("Subtitle Extraction...");
-    println!("Timeout set to {} seconds", EXTRACTION_TIMEOUT.as_secs());
+/// Core smart subtitle extraction for any SeekableStream
+pub async fn extract_subtitle_entries<S: SeekableStream>(
+    mut stream: S,
+) -> MediaParserResult<Vec<SubtitleEntry>> {
+    info!("Subtitle Extraction...");
 
     // Step 0: Detect file format first
-    match detect_format(&mut stream) {
+    match detect_format(&mut stream).await {
         Ok(ContainerFormat::MP3) => {
-            println!("MP3 file detected - no subtitle extraction needed");
+            info!("MP3 file detected - no subtitle extraction needed");
             stream.print_stats();
             return Ok(Vec::new());
         }
         Ok(format) if format.is_mp4_family() => {
-            println!(
+            info!(
                 "{} format detected - proceeding with subtitle extraction",
                 format.name()
             );
         }
         Ok(format) => {
-            println!(
+            info!(
                 "Unsupported format: {} - only MP4 family formats support subtitles",
                 format.name()
             );
@@ -53,7 +37,7 @@ fn extract_subtitle_entries<S: SeekableStream>(mut stream: S) -> io::Result<Vec<
             return Ok(Vec::new());
         }
         Err(e) => {
-            println!(
+            info!(
                 "Format detection failed: {} - attempting MP4 extraction anyway",
                 e
             );
@@ -61,86 +45,61 @@ fn extract_subtitle_entries<S: SeekableStream>(mut stream: S) -> io::Result<Vec<
     }
 
     // Step 1: Find and read moov box
-    let (moov_pos, moov_size) = find_moov_box_efficiently(&mut stream)?;
-    stream.seek(SeekFrom::Start(moov_pos))?;
+    let moov_info = find_moov_box_efficiently(&mut stream).await?;
+    let (moov_pos, moov_size) = (moov_info.position, moov_info.size);
+    stream.seek(SeekFrom::Start(moov_pos)).await?;
     let mut moov_buffer = vec![0u8; moov_size as usize];
-    stream.read_exact(&mut moov_buffer)?;
-    println!("Read moov box: {} bytes", moov_size);
+    stream.read(&mut moov_buffer).await?;
+    info!("Read moov box: {} bytes", moov_size);
 
     // Step 2: Analyze subtitle tracks
     let subtitle_tracks = analyze_subtitle_tracks(&moov_buffer[8..])?;
     if subtitle_tracks.is_empty() {
-        println!("No subtitle tracks found");
+        info!("No subtitle tracks found");
         stream.print_stats();
         return Ok(Vec::new());
     }
-    println!("Found {} subtitle tracks", subtitle_tracks.len());
+    info!("Found {} subtitle tracks", subtitle_tracks.len());
 
     // Step 3: Use first track for extraction
     let first_track = &subtitle_tracks[0];
-    let entries =
-        extract_subtitles_with_intelligent_downloading(&mut stream, first_track, start_time)?;
-    println!("Extracted {} subtitle entries", entries.len());
+    let entries = extract_subtitles_with_intelligent_downloading(&mut stream, first_track).await?;
+    info!("Extracted {} subtitle entries", entries.len());
     stream.print_stats();
     Ok(entries)
 }
 
 /// Extract subtitles using intelligent downloading (similar to thumbnails approach)
-fn extract_subtitles_with_intelligent_downloading<S: SeekableStream>(
+async fn extract_subtitles_with_intelligent_downloading<S: SeekableStream>(
     stream: &mut S,
     track: &SubtitleTrackInfo,
-    start_time: Instant,
-) -> io::Result<Vec<SubtitleEntry>> {
-    // Check timeout
-    if start_time.elapsed() > EXTRACTION_TIMEOUT {
-        return Err(io::Error::new(
-            io::ErrorKind::TimedOut,
-            "Subtitle extraction timed out",
-        ));
-    }
-
+) -> MediaParserResult<Vec<SubtitleEntry>> {
     // Calculate subtitle sample ranges for targeted downloading
     let sample_ranges = calculate_optimized_subtitle_ranges(track)?;
-    println!("Calculated {} subtitle sample ranges", sample_ranges.len());
+    info!("Calculated {} subtitle sample ranges", sample_ranges.len());
 
     if sample_ranges.is_empty() {
-        println!("No subtitle sample ranges found");
+        info!("No subtitle sample ranges found");
         return Ok(Vec::new());
-    }
-
-    // Check timeout
-    if start_time.elapsed() > EXTRACTION_TIMEOUT {
-        return Err(io::Error::new(
-            io::ErrorKind::TimedOut,
-            "Subtitle extraction timed out while calculating ranges",
-        ));
     }
 
     // Group nearby ranges to minimize HTTP requests (similar to thumbnails), check this with Matthew**
     let optimized_ranges = group_nearby_subtitle_ranges(&sample_ranges, 4 * 1024); // 4KB grouping threshold
-    println!("Optimized to {} download ranges", optimized_ranges.len());
+    info!("Optimized to {} download ranges", optimized_ranges.len());
 
     // Download subtitle data in optimized chunks
     let mut subtitle_entries = Vec::new();
 
     for range_group in optimized_ranges {
-        // Check timeout before each download
-        if start_time.elapsed() > EXTRACTION_TIMEOUT {
-            return Err(io::Error::new(
-                io::ErrorKind::TimedOut,
-                "Subtitle extraction timed out while downloading",
-            ));
-        }
-
         let start_offset = range_group.first().unwrap().offset;
         let end_offset =
             range_group.last().unwrap().offset + range_group.last().unwrap().size as u64;
         let total_size = end_offset - start_offset;
 
         // Download the chunk
-        stream.seek(SeekFrom::Start(start_offset))?;
+        stream.seek(SeekFrom::Start(start_offset)).await?;
         let mut chunk_data = vec![0u8; total_size as usize];
-        stream.read_exact(&mut chunk_data)?;
+        stream.read(&mut chunk_data).await?;
 
         // Extract subtitle entries from this chunk
         for range in range_group {
@@ -169,7 +128,7 @@ fn extract_subtitles_with_intelligent_downloading<S: SeekableStream>(
 /// Calculate optimized subtitle sample ranges
 fn calculate_optimized_subtitle_ranges(
     track: &SubtitleTrackInfo,
-) -> io::Result<Vec<SubtitleSampleRange>> {
+) -> MediaParserResult<Vec<SubtitleSampleRange>> {
     let mut ranges = Vec::new();
     let mut sample_index = 0;
 

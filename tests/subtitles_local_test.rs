@@ -1,12 +1,12 @@
-use mediaparser::subtitles::extract_local_subtitle_entries as subext;
+use mediaparser::extract_subtitles;
 
-#[test]
-fn test_read_local_subtitles() {
+#[tokio::test]
+async fn test_read_local_subtitles() {
     let path = concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/tests/testdata/output_with_subs.mp4"
     );
-    let subtitles = subext(path);
+    let subtitles = extract_subtitles(path.to_string()).await;
 
     assert!(
         subtitles.is_ok(),

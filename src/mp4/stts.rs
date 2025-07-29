@@ -1,5 +1,5 @@
 use super::r#box::find_box;
-use std::io;
+use crate::errors::{MediaParserError, MediaParserResult, Mp4Error};
 
 #[derive(Debug, PartialEq)]
 pub struct SttsEntry {
@@ -8,41 +8,55 @@ pub struct SttsEntry {
 }
 
 /// Parse stts (sample timing) box - unified function
-pub fn parse_stts(stbl: &[u8]) -> io::Result<Vec<SttsEntry>> {
-    let stts = find_box(stbl, "stts")
-        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "stts box not found"))?;
+pub fn parse_stts(stbl: &[u8]) -> MediaParserResult<Vec<SttsEntry>> {
+    let stts = find_box(stbl, "stts").ok_or_else(|| {
+        MediaParserError::Mp4(Mp4Error::Error {
+            message: "stts box not found in stbl box".to_string(),
+        })
+    })?;
 
     if stts.len() < 8 {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "stts box too small",
-        ));
+        return Err(MediaParserError::Mp4(Mp4Error::Error {
+            message: "stts box too small: expected at least 8 bytes".to_string(),
+        }));
     }
 
     let entry_count = u32::from_be_bytes([stts[4], stts[5], stts[6], stts[7]]);
-    let mut entries = Vec::new();
+
+    // Verify that the box has enough space for all entries
+    let required_size = 8 + (entry_count as usize * 8);
+    if required_size > stts.len() {
+        return Err(MediaParserError::Mp4(Mp4Error::Error {
+            message: format!(
+                "stts box too small for {} entries: expected {} bytes, got {}",
+                entry_count,
+                required_size,
+                stts.len()
+            ),
+        }));
+    }
+
+    let mut entries = Vec::with_capacity(entry_count as usize);
 
     for i in 0..entry_count {
         let entry_pos = 8 + (i * 8) as usize;
-        if entry_pos + 8 <= stts.len() {
-            let sample_count = u32::from_be_bytes([
-                stts[entry_pos],
-                stts[entry_pos + 1],
-                stts[entry_pos + 2],
-                stts[entry_pos + 3],
-            ]);
-            let sample_delta = u32::from_be_bytes([
-                stts[entry_pos + 4],
-                stts[entry_pos + 5],
-                stts[entry_pos + 6],
-                stts[entry_pos + 7],
-            ]);
+        let sample_count = u32::from_be_bytes([
+            stts[entry_pos],
+            stts[entry_pos + 1],
+            stts[entry_pos + 2],
+            stts[entry_pos + 3],
+        ]);
+        let sample_delta = u32::from_be_bytes([
+            stts[entry_pos + 4],
+            stts[entry_pos + 5],
+            stts[entry_pos + 6],
+            stts[entry_pos + 7],
+        ]);
 
-            entries.push(SttsEntry {
-                sample_count,
-                sample_delta,
-            });
-        }
+        entries.push(SttsEntry {
+            sample_count,
+            sample_delta,
+        });
     }
 
     Ok(entries)

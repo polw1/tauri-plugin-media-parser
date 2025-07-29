@@ -1,6 +1,5 @@
 use super::types::SubtitleSampleRange;
 use crate::mp4::stsc::SampleToChunkEntry;
-use std::io;
 
 /// Format timestamp in SRT format
 pub fn format_timestamp(seconds: f64) -> String {
@@ -17,14 +16,6 @@ pub fn format_timestamp(seconds: f64) -> String {
     let hours = total_minutes / 60;
 
     format!("{:02}:{:02}:{:02},{:03}", hours, minutes, secs, millis)
-}
-
-/// Find moov box position efficiently - wrapper for backward compatibility  
-pub(crate) fn find_moov_box_efficiently<S: crate::streams::seekable_stream::SeekableStream>(
-    stream: &mut S,
-) -> io::Result<(u64, u32)> {
-    let moov_info = crate::mp4::find_moov_box_efficiently(stream)?;
-    Ok((moov_info.position, moov_info.size as u32))
 }
 
 /// Get the number of samples in a specific chunk

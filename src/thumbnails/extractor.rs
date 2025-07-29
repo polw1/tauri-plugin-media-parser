@@ -1,59 +1,43 @@
 use super::analyzer::analyze_video_track;
 use super::decoder::{extract_nalus_from_sample_bytes, generate_thumbnails_from_nalus};
 use super::types::{SampleRange, ThumbnailData, VideoTrackInfo};
-use crate::metadata::{ContainerFormat, detect_format};
+use crate::errors::{MediaParserError, MediaParserResult, ThumbnailError};
+use crate::metadata::{detect_format, ContainerFormat};
 use crate::mp4::{build_sample_timestamps, find_moov_box_efficiently};
-use crate::seekable_http_stream::SeekableHttpStream;
-use crate::seekable_stream::{LocalSeekableStream, SeekableStream};
+use crate::seekable_stream::SeekableStream;
+use log::{debug, info, warn};
 use std::collections::HashMap;
 use std::io::{self, SeekFrom};
 
-/// Extract thumbnails efficiently by analyzing headers first, then downloading only specific frame data
-pub fn extract_remote_thumbnails(
-    url: String,
-    count: usize,
-    max_width: u32,
-    max_height: u32,
-) -> io::Result<Vec<ThumbnailData>> {
-    let stream = SeekableHttpStream::new(url)?;
-    extract_thumbnails(stream, count, max_width, max_height)
-}
+// Maximum allowed size for moov box to prevent OOM exceptions
+// 50MB should handle most cases - typical 1080p hour-long videos: 5-20MB
+// 4K movies (2+ hours) could be 50-200MB but we may need to make this adaptive in the future
+const MAX_MOOV_SIZE: usize = 50 * 1024 * 1024; // 50MB limit
 
-/// Open local file and extract thumbnails
-pub fn extract_local_thumbnails<P: AsRef<std::path::Path>>(
-    path: P,
-    count: usize,
-    max_width: u32,
-    max_height: u32,
-) -> io::Result<Vec<ThumbnailData>> {
-    let stream = LocalSeekableStream::open(path)?;
-    extract_thumbnails(stream, count, max_width, max_height)
-}
-
-/// Core thumbnail extraction using any seekable stream
-pub fn extract_thumbnails<S: SeekableStream>(
+// Core thumbnail extraction using any seekable stream
+pub async fn extract_thumbnails_generic<S: SeekableStream>(
     mut stream: S,
     count: usize,
     max_width: u32,
     max_height: u32,
-) -> io::Result<Vec<ThumbnailData>> {
-    println!("Thumbnail Extraction");
+) -> MediaParserResult<Vec<ThumbnailData>> {
+    info!("Thumbnail Extraction");
 
     // Step 0: Detect file format first
-    match detect_format(&mut stream) {
+    match detect_format(&mut stream).await {
         Ok(ContainerFormat::MP3) => {
-            println!("MP3 file detected - no subtitle extraction needed");
+            info!("MP3 file detected - no subtitle extraction needed");
             stream.print_stats();
             return Ok(Vec::new());
         }
         Ok(format) if format.is_mp4_family() => {
-            println!(
+            info!(
                 "{} format detected - proceeding with subtitle extraction",
                 format.name()
             );
         }
         Ok(format) => {
-            println!(
+            warn!(
                 "Unsupported format: {} - only MP4 family formats support subtitles",
                 format.name()
             );
@@ -61,7 +45,7 @@ pub fn extract_thumbnails<S: SeekableStream>(
             return Ok(Vec::new());
         }
         Err(e) => {
-            println!(
+            warn!(
                 "Format detection failed: {} - attempting MP4 extraction anyway",
                 e
             );
@@ -69,58 +53,67 @@ pub fn extract_thumbnails<S: SeekableStream>(
     }
 
     // 1: moov
-    let moov_info = find_moov_box_efficiently(&mut stream)?;
+    let moov_info = find_moov_box_efficiently(&mut stream).await?;
     let (moov_pos, moov_size) = (moov_info.position, moov_info.size);
-    stream.seek(SeekFrom::Start(moov_pos))?;
+
+    // Guard against extremely large moov boxes to prevent OOM
+    if moov_size as usize > MAX_MOOV_SIZE {
+        return Err(MediaParserError::Thumbnail(ThumbnailError::new(format!(
+            "moov box too large: {} bytes (max allowed: {} bytes)",
+            moov_size, MAX_MOOV_SIZE
+        ))));
+    }
+
+    stream.seek(SeekFrom::Start(moov_pos)).await?;
     let mut moov_buffer = vec![0u8; moov_size as usize];
-    stream.read_exact(&mut moov_buffer)?;
-    println!("Read moov box: {} bytes", moov_size);
+    stream.read(&mut moov_buffer).await?;
+    info!("Read moov box: {} bytes", moov_size);
 
     // 2: analyze
     let video_track_info = analyze_video_track(&moov_buffer[8..])?;
-    println!(
+    info!(
         "Found video track: {} samples, timescale: {}",
         video_track_info.sample_count, video_track_info.timescale
     );
 
     // 3: target
     let target_samples = calculate_target_samples_internal(&video_track_info, count);
-    println!(
+    info!(
         "Target samples for {} thumbnails: {:?}",
         count, target_samples
     );
 
     // 4: ranges
     let sample_ranges = find_sample_byte_ranges(&video_track_info, &target_samples)?;
-    println!(
+    info!(
         "Sample byte ranges calculated: {} ranges",
         sample_ranges.len()
     );
 
     // 5: download
-    let sample_data = download_sample_ranges(&mut stream, &sample_ranges)?;
-    println!("Downloaded {} bytes of sample data", sample_data.len());
+    let sample_data = download_sample_ranges(&mut stream, &sample_ranges).await?;
+    info!("Downloaded {} bytes of sample data", sample_data.len());
 
     // Extract parameter sets
     let parameter_sets = if let Some(avcc) = &video_track_info.avcc {
-        println!("Using AVCC configuration for parameter sets");
+        info!("Using AVCC configuration for parameter sets");
         let mut map = HashMap::new();
 
         // Add SPS (type 7)
         for sps in &avcc.sps {
             map.insert(7u8, sps.clone());
-            println!("  Added SPS: {} bytes", sps.len());
+            debug!("  Added SPS: {} bytes", sps.len());
         }
 
         // Add PPS (type 8)
         for pps in &avcc.pps {
             map.insert(8u8, pps.clone());
-            println!("  Added PPS: {} bytes", pps.len());
+            debug!("  Added PPS: {} bytes", pps.len());
         }
 
         map
     } else {
-        println!("No AVCC config found, extracting parameter sets from samples");
+        info!("No AVCC config found, extracting parameter sets from samples");
         extract_parameter_sets_from_samples(&sample_data, &sample_ranges)?
     };
 
@@ -133,7 +126,7 @@ pub fn extract_thumbnails<S: SeekableStream>(
         max_width,
         max_height,
     )?;
-    println!(
+    info!(
         "Generated {} thumbnails using direct NALU approach",
         thumbnails.len()
     );
@@ -143,26 +136,102 @@ pub fn extract_thumbnails<S: SeekableStream>(
     Ok(thumbnails)
 }
 
-/// Download specific byte ranges
-fn download_sample_ranges<S: SeekableStream>(
+/// Download specific byte ranges with batching optimization for adjacent ranges
+async fn download_sample_ranges<S: SeekableStream>(
     stream: &mut S,
     ranges: &[SampleRange],
 ) -> io::Result<Vec<u8>> {
     let mut all_data = Vec::new();
 
-    for range in ranges {
-        stream.seek(SeekFrom::Start(range.offset))?;
-        let mut sample_data = vec![0u8; range.size as usize];
-        stream.read_exact(&mut sample_data)?;
-        all_data.extend(sample_data);
+    // Sort ranges by offset for optimal batching
+    let mut sorted_ranges = ranges.to_vec();
+    sorted_ranges.sort_by_key(|r| r.offset);
 
-        println!(
-            "  Downloaded sample {} ({} bytes) from offset {} at {:.2}s",
-            range.sample_index, range.size, range.offset, range.timestamp
-        );
+    // Merge adjacent ranges to reduce HTTP requests
+    let merged_ranges = merge_adjacent_ranges(&sorted_ranges);
+
+    debug!(
+        "Downloading {} sample ranges (merged into {} batches)",
+        ranges.len(),
+        merged_ranges.len()
+    );
+
+    for (batch_idx, batch) in merged_ranges.iter().enumerate() {
+        stream.seek(SeekFrom::Start(batch.start_offset)).await?;
+        let mut batch_data = vec![0u8; batch.total_size as usize];
+        let _ = stream.read(&mut batch_data).await;
+
+        // Extract individual sample data from the batch
+        for sample_range in &batch.sample_ranges {
+            let sample_start = (sample_range.offset - batch.start_offset) as usize;
+            let sample_end = sample_start + sample_range.size as usize;
+            let sample_data = &batch_data[sample_start..sample_end];
+            all_data.extend_from_slice(sample_data);
+
+            debug!(
+                "  Downloaded sample {} ({} bytes) from offset {} at {:.2}s (batch {})",
+                sample_range.sample_index,
+                sample_range.size,
+                sample_range.offset,
+                sample_range.timestamp,
+                batch_idx
+            );
+        }
     }
 
     Ok(all_data)
+}
+
+/// Represents a batch of adjacent sample ranges that can be downloaded in a single request
+#[derive(Debug)]
+struct SampleRangeBatch {
+    start_offset: u64,
+    total_size: u64,
+    sample_ranges: Vec<SampleRange>,
+}
+
+/// Merge adjacent sample ranges to optimize HTTP requests
+fn merge_adjacent_ranges(ranges: &[SampleRange]) -> Vec<SampleRangeBatch> {
+    if ranges.is_empty() {
+        return Vec::new();
+    }
+
+    let mut batches = Vec::new();
+    let mut current_batch = SampleRangeBatch {
+        start_offset: ranges[0].offset,
+        total_size: ranges[0].size as u64,
+        sample_ranges: vec![ranges[0].clone()],
+    };
+
+    for range in &ranges[1..] {
+        let current_end = current_batch.start_offset + current_batch.total_size;
+
+        // Check if this range is adjacent to the current batch
+        // We allow a small gap (up to 1KB) to still consider ranges as "adjacent"
+        const MAX_GAP: u64 = 1024;
+        if range.offset <= current_end + MAX_GAP {
+            // Extend the current batch
+            let new_end = range.offset + range.size as u64;
+            let batch_end = current_batch.start_offset + current_batch.total_size;
+            let additional_size = new_end.saturating_sub(batch_end);
+
+            current_batch.total_size += additional_size;
+            current_batch.sample_ranges.push(range.clone());
+        } else {
+            // Start a new batch
+            batches.push(current_batch);
+            current_batch = SampleRangeBatch {
+                start_offset: range.offset,
+                total_size: range.size as u64,
+                sample_ranges: vec![range.clone()],
+            };
+        }
+    }
+
+    // Don't forget the last batch
+    batches.push(current_batch);
+
+    batches
 }
 
 /// Calculate which samples we need for thumbnails (prefer I-frames)
@@ -195,7 +264,7 @@ fn calculate_target_samples_internal(
 fn find_sample_byte_ranges(
     track_info: &VideoTrackInfo,
     target_samples: &[u32],
-) -> io::Result<Vec<SampleRange>> {
+) -> MediaParserResult<Vec<SampleRange>> {
     let mut ranges = Vec::new();
 
     // Calculate sample timestamps
@@ -224,7 +293,10 @@ fn find_sample_byte_ranges(
 }
 
 /// Calculate the byte offset of a specific sample
-fn calculate_sample_offset(track_info: &VideoTrackInfo, sample_number: u32) -> io::Result<u64> {
+fn calculate_sample_offset(
+    track_info: &VideoTrackInfo,
+    sample_number: u32,
+) -> MediaParserResult<u64> {
     // Find which chunk contains this sample
     let mut current_sample = 0u32;
     let mut _chunk_index = 0usize;
@@ -263,17 +335,16 @@ fn calculate_sample_offset(track_info: &VideoTrackInfo, sample_number: u32) -> i
         current_sample += samples_in_this_group;
     }
 
-    Err(io::Error::new(
-        io::ErrorKind::InvalidData,
-        "Sample not found",
-    ))
+    Err(MediaParserError::Thumbnail(ThumbnailError::new(
+        "Sample range calculation failed",
+    )))
 }
 
 /// Extract parameter sets (SPS/PPS) from sample data
 fn extract_parameter_sets_from_samples(
     sample_data: &[u8],
     sample_ranges: &[SampleRange],
-) -> io::Result<HashMap<u8, Vec<u8>>> {
+) -> MediaParserResult<HashMap<u8, Vec<u8>>> {
     let mut parameter_sets = HashMap::new();
     let mut data_offset = 0;
 
@@ -300,7 +371,7 @@ fn extract_parameter_sets_from_samples(
                 if nalu_type == 7 || nalu_type == 8 {
                     // SPS or PPS
                     parameter_sets.insert(nalu_type, nalu);
-                    println!(
+                    debug!(
                         "  Found {} in sample {}",
                         if nalu_type == 7 { "SPS" } else { "PPS" },
                         i
@@ -311,4 +382,57 @@ fn extract_parameter_sets_from_samples(
     }
 
     Ok(parameter_sets)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::thumbnails::types::SampleRange;
+
+    #[test]
+    fn test_merge_adjacent_ranges() {
+        // Create sample ranges that should be merged
+        let ranges = vec![
+            SampleRange {
+                offset: 1000,
+                size: 100,
+                sample_index: 1,
+                timestamp: 0.0,
+            },
+            SampleRange {
+                offset: 1100, // Adjacent to first
+                size: 150,
+                sample_index: 2,
+                timestamp: 1.0,
+            },
+            SampleRange {
+                offset: 1300, // Small gap (50 bytes) - should still be merged
+                size: 200,
+                sample_index: 3,
+                timestamp: 2.0,
+            },
+            SampleRange {
+                offset: 3000, // Large gap (1500 bytes) - should start new batch
+                size: 100,
+                sample_index: 4,
+                timestamp: 3.0,
+            },
+        ];
+
+        let merged = merge_adjacent_ranges(&ranges);
+
+        // Should have 2 batches: [1000-1500] and [3000-3100]
+        assert_eq!(merged.len(), 2);
+
+        // First batch should contain 3 samples
+        assert_eq!(merged[0].sample_ranges.len(), 3);
+        assert_eq!(merged[0].start_offset, 1000);
+        // Total size should be from start (1000) to end of last sample (1300 + 200 = 1500)
+        assert_eq!(merged[0].total_size, 500); // 1500 - 1000 = 500
+
+        // Second batch should contain 1 sample
+        assert_eq!(merged[1].sample_ranges.len(), 1);
+        assert_eq!(merged[1].start_offset, 3000);
+        assert_eq!(merged[1].total_size, 100);
+    }
 }

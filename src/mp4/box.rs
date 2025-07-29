@@ -1,4 +1,5 @@
-use std::io::{self, Cursor, Read, Seek, SeekFrom};
+use crate::errors::{MediaParserError, MediaParserResult, Mp4Error};
+use std::io::{Cursor, Read, Seek, SeekFrom};
 
 use crate::bits::reader::{read_u32, read_u32_be, read_u64, read_u64_be};
 
@@ -12,14 +13,26 @@ pub struct BoxHeader {
 }
 
 /// Read a box header from an io source
-pub fn read_box_header<R: Read>(r: &mut R) -> io::Result<BoxHeader> {
-    let size32 = read_u32_be(r)?;
+pub fn read_box_header<R: Read>(r: &mut R) -> MediaParserResult<BoxHeader> {
+    let size32 = read_u32_be(r).map_err(|e| {
+        MediaParserError::Mp4(Mp4Error::Error {
+            message: format!("Failed to read box size: {}", e),
+        })
+    })?;
     let mut name_buf = [0u8; 4];
-    r.read_exact(&mut name_buf)?;
+    r.read_exact(&mut name_buf).map_err(|e| {
+        MediaParserError::Mp4(Mp4Error::Error {
+            message: format!("Failed to read box name: {}", e),
+        })
+    })?;
     let mut size = size32 as u64;
     let mut header_size = 8u64;
     if size32 == 1 {
-        size = read_u64_be(r)?;
+        size = read_u64_be(r).map_err(|e| {
+            MediaParserError::Mp4(Mp4Error::Error {
+                message: format!("Failed to read extended box size: {}", e),
+            })
+        })?;
         header_size = 16;
     }
     Ok(BoxHeader {
@@ -104,7 +117,8 @@ pub fn find_box_range(data: &[u8], name: &str) -> Option<(usize, usize, usize)> 
     None
 }
 
-pub fn parse_name_box(data: &[u8], dest: &mut Option<String>) -> io::Result<()> {
+/// Parse name box function.
+pub fn parse_name_box(data: &[u8], dest: &mut Option<String>) -> MediaParserResult<()> {
     let mut cursor = Cursor::new(data);
     let len = data.len() as u64;
     let mut pos = 0u64;
@@ -112,15 +126,29 @@ pub fn parse_name_box(data: &[u8], dest: &mut Option<String>) -> io::Result<()> 
         let header = read_box_header(&mut cursor)?;
         let payload = header.size.saturating_sub(header.header_size);
         if &header.name_bytes == b"data" {
-            cursor.seek(SeekFrom::Current(8))?; // type and locale
+            cursor.seek(SeekFrom::Current(8)).map_err(|e| {
+                MediaParserError::Mp4(Mp4Error::Error {
+                    message: format!("Failed to seek past type and locale in data box: {}", e),
+                })
+            })?;
             let mut buf = vec![0u8; (payload - 8) as usize];
-            cursor.read_exact(&mut buf)?;
+            cursor.read_exact(&mut buf).map_err(|e| {
+                MediaParserError::Mp4(Mp4Error::Error {
+                    message: format!("Failed to read data box content: {}", e),
+                })
+            })?;
             if let Ok(s) = String::from_utf8(buf) {
                 *dest = Some(s);
             }
             break;
         } else {
-            cursor.seek(SeekFrom::Current(payload as i64))?;
+            cursor
+                .seek(SeekFrom::Current(payload as i64))
+                .map_err(|e| {
+                    MediaParserError::Mp4(Mp4Error::Error {
+                        message: format!("Failed to skip box {}: {}", header.name, e),
+                    })
+                })?;
         }
         pos += header.size;
     }

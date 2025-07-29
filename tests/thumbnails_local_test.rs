@@ -1,9 +1,9 @@
-use mediaparser::thumbnails::extract_local_thumbnails;
+use mediaparser::extract_thumbnails;
 
-#[test]
-fn test_extract_local_thumbnail() {
+#[tokio::test]
+async fn test_extract_local_thumbnail() {
     let path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/testdata/sample.mp4");
-    let thumbnails = extract_local_thumbnails(path, 1, 100, 56);
+    let thumbnails = extract_thumbnails(path.to_string(), 1, 100, 56).await;
 
     assert!(
         thumbnails.is_ok(),

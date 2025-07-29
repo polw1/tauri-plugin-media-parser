@@ -154,9 +154,9 @@ The system identifies subtitle tracks through multiple methods:
 
 ### Local File Extraction
 ```rust
-use mediaparser::subtitles::extract_local_subtitle_entries;
+use mediaparser::subtitles::extract_subtitles;
 
-let entries = extract_local_subtitle_entries("video.mp4")?;
+let entries = extract_subtitles("video.mp4").await;
 for entry in entries {
     println!("{} --> {}", entry.start, entry.end);
     println!("{}", entry.text);
@@ -165,9 +165,9 @@ for entry in entries {
 
 ### Remote File Extraction
 ```rust
-use mediaparser::subtitles::extract_remote_subtitle_entries;
+use mediaparser::subtitles::extract_subtitles;
 
-let entries = extract_remote_subtitle_entries("https://example.com/video.mp4".to_string())?;
+let entries = extract_subtitles("https://example.com/video.mp4".to_string()).await;
 println!("Extracted {} subtitle entries", entries.len());
 ```
 
@@ -176,7 +176,7 @@ println!("Extracted {} subtitle entries", entries.len());
 use mediaparser::subtitles::{parse_subtitle_sample_data, format_timestamp};
 
 let sample_data = b"\x00\x0AHello World";
-let entries = parse_subtitle_sample_data(sample_data, 5.0, "tx3g")?;
+let entries = parse_subtitle_sample_data(sample_data, 5.0, "tx3g").await;
 // Returns: SubtitleEntry { start: "00:00:05,000", end: "00:00:07,000", text: "Hello World" }
 ```
 
