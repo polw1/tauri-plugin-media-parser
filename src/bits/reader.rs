@@ -11,7 +11,8 @@
  - BitReader: Bit-precise reading with error accumulation for codec parsing
 */
 
-use std::io::{self, Read};
+use crate::errors::{BitReaderError, MediaParserError, MediaParserResult};
+use std::io::Read;
 
 /// Mask for the `n` least significant bits.
 pub fn mask(n: u32) -> u32 {
@@ -23,30 +24,46 @@ pub fn mask(n: u32) -> u32 {
 }
 
 /// Read one byte from a `Read` implementation.
-pub fn read_u8<R: Read>(r: &mut R) -> io::Result<u8> {
+pub fn read_u8<R: Read>(r: &mut R) -> MediaParserResult<u8> {
     let mut buf = [0u8; 1];
-    r.read_exact(&mut buf)?;
+    r.read_exact(&mut buf).map_err(|e| {
+        MediaParserError::BitReader(BitReaderError::ReadError {
+            message: format!("Failed to read byte: {}", e),
+        })
+    })?;
     Ok(buf[0])
 }
 
 /// Read a 24-bit big endian value from `r`.
-pub fn read_u24<R: Read>(r: &mut R) -> io::Result<u32> {
+pub fn read_u24<R: Read>(r: &mut R) -> MediaParserResult<u32> {
     let mut buf = [0u8; 3];
-    r.read_exact(&mut buf)?;
+    r.read_exact(&mut buf).map_err(|e| {
+        MediaParserError::BitReader(BitReaderError::ReadError {
+            message: format!("Failed to read 24-bit value: {}", e),
+        })
+    })?;
     Ok(((buf[0] as u32) << 16) | ((buf[1] as u32) << 8) | buf[2] as u32)
 }
 
 /// Read a 32-bit big endian value from `r`.
-pub fn read_u32_be<R: Read>(r: &mut R) -> io::Result<u32> {
+pub fn read_u32_be<R: Read>(r: &mut R) -> MediaParserResult<u32> {
     let mut buf = [0u8; 4];
-    r.read_exact(&mut buf)?;
+    r.read_exact(&mut buf).map_err(|e| {
+        MediaParserError::BitReader(BitReaderError::ReadError {
+            message: format!("Failed to read 32-bit value: {}", e),
+        })
+    })?;
     Ok(u32::from_be_bytes(buf))
 }
 
 /// Read a 64-bit big endian value from `r`.
-pub fn read_u64_be<R: Read>(r: &mut R) -> io::Result<u64> {
+pub fn read_u64_be<R: Read>(r: &mut R) -> MediaParserResult<u64> {
     let mut buf = [0u8; 8];
-    r.read_exact(&mut buf)?;
+    r.read_exact(&mut buf).map_err(|e| {
+        MediaParserError::BitReader(BitReaderError::ReadError {
+            message: format!("Failed to read 64-bit value: {}", e),
+        })
+    })?;
     Ok(u64::from_be_bytes(buf))
 }
 
@@ -84,7 +101,7 @@ pub fn read_u64(data: &[u8], pos: &mut usize) -> Option<u64> {
 #[derive(Debug)]
 pub struct BitReader<R: Read> {
     rd: R,
-    err: Option<io::Error>,
+    err: Option<MediaParserError>,
     n: u32,
     value: u64,
     pos: i64,
@@ -103,7 +120,7 @@ impl<R: Read> BitReader<R> {
     }
 
     /// Return the accumulated error if any.
-    pub fn acc_error(&self) -> Option<&io::Error> {
+    pub fn acc_error(&self) -> Option<&MediaParserError> {
         self.err.as_ref()
     }
 
@@ -122,7 +139,9 @@ impl<R: Read> BitReader<R> {
                     self.n += 8;
                 }
                 Err(e) => {
-                    self.err = Some(e);
+                    self.err = Some(MediaParserError::BitReader(BitReaderError::ReadError {
+                        message: format!("Failed to read bits: {}", e),
+                    }));
                     return 0;
                 }
             }
@@ -158,15 +177,19 @@ impl<R: Read> BitReader<R> {
             return None;
         }
         if self.n != 0 {
-            self.err = Some(io::Error::other(format!(
-                "{} bit instead of byte alignment when reading remaining bytes",
-                self.n
-            )));
+            self.err = Some(MediaParserError::BitReader(BitReaderError::AlignmentError {
+                message: format!(
+                    "{} bit instead of byte alignment when reading remaining bytes",
+                    self.n
+                ),
+            }));
             return None;
         }
         let mut rest = Vec::new();
         if let Err(e) = self.rd.read_to_end(&mut rest) {
-            self.err = Some(e);
+            self.err = Some(MediaParserError::BitReader(BitReaderError::ReadError {
+                message: format!("Failed to read remaining bytes: {}", e),
+            }));
             return None;
         }
         Some(rest)

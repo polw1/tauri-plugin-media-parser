@@ -10,6 +10,7 @@ pub enum MediaParserError {
     Metadata(MetadataError),
     Stream(StreamError),
     Mp4(Mp4Error),
+    BitReader(BitReaderError),
     Other(io::Error),
 }
 
@@ -79,6 +80,14 @@ pub enum Mp4Error {
     Error { message: String },
 }
 
+/// Bit reader specific errors
+#[derive(Debug)]
+pub enum BitReaderError {
+    ReadError { message: String },
+    AlignmentError { message: String },
+    EndOfData { message: String },
+}
+
 impl fmt::Display for MediaParserError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -88,6 +97,7 @@ impl fmt::Display for MediaParserError {
             MediaParserError::Metadata(err) => write!(f, "Metadata error: {}", err),
             MediaParserError::Stream(err) => write!(f, "Stream error: {}", err),
             MediaParserError::Mp4(err) => write!(f, "MP4 error: {}", err),
+            MediaParserError::BitReader(err) => write!(f, "Bit reader error: {}", err),
         }
     }
 }
@@ -124,12 +134,23 @@ impl fmt::Display for Mp4Error {
     }
 }
 
+impl fmt::Display for BitReaderError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            BitReaderError::ReadError { message } => write!(f, "Bit read error: {}", message),
+            BitReaderError::AlignmentError { message } => write!(f, "Bit alignment error: {}", message),
+            BitReaderError::EndOfData { message } => write!(f, "End of data error: {}", message),
+        }
+    }
+}
+
 impl Error for MediaParserError {}
 impl Error for ThumbnailError {}
 impl Error for SubtitleError {}
 impl Error for MetadataError {}
 impl Error for StreamError {}
 impl Error for Mp4Error {}
+impl Error for BitReaderError {}
 
 // Conversion implementations
 impl From<io::Error> for MediaParserError {
@@ -168,6 +189,12 @@ impl From<Mp4Error> for MediaParserError {
     }
 }
 
+impl From<BitReaderError> for MediaParserError {
+    fn from(err: BitReaderError) -> Self {
+        MediaParserError::BitReader(err)
+    }
+}
+
 // Conversion to io::Error for backward compatibility
 impl From<MediaParserError> for io::Error {
     fn from(err: MediaParserError) -> Self {
@@ -201,6 +228,12 @@ impl From<StreamError> for io::Error {
 
 impl From<Mp4Error> for io::Error {
     fn from(err: Mp4Error) -> Self {
+        io::Error::other(err)
+    }
+}
+
+impl From<BitReaderError> for io::Error {
+    fn from(err: BitReaderError) -> Self {
         io::Error::other(err)
     }
 }
