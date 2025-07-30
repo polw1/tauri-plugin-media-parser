@@ -41,7 +41,7 @@ use mediaparser::extract_metadata;
 // Local file 
 let metadata = extract_metadata("video.mp4").await;
 // Remote file 
-let metadata = extract_metadata("https://example.com/video.mp4".to_string()).await;
+let metadata = extract_metadata("https://example.com/video.mp4").await;
 ```
 
 ### Extract Thumbnails
@@ -59,7 +59,7 @@ let thumbnails = extract_thumbnails(
 
 // Remote file
 let thumbnails = extract_thumbnails(
-    "https://example.com/video.mp4".to_string(),
+    "https://example.com/video.mp4",
     5, 320, 240
 ).await;
 
@@ -80,7 +80,7 @@ let subtitles = extract_subtitles("video.mp4").await;
 
 // Remote file  
 let subtitles = extract_subtitles(
-    "https://example.com/video.mp4".to_string()
+    "https://example.com/video.mp4"
 ).await;
 
 for entry in subtitles {

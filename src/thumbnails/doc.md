@@ -181,10 +181,10 @@ for thumbnail in thumbnails {
 
 ### Remote File Extraction
 ```rust
-use mediaparser::thumbnails::extract_thumbnails;
+use mediaparser::extract_thumbnails;
 
 let thumbnails = extract_thumbnails(
-    "https://example.com/video.mp4".to_string(), 
+    "https://example.com/video.mp4", 
     3, 640, 480
 ).await;
 println!("Extracted {} thumbnails", thumbnails.len());

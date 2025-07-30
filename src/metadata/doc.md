@@ -145,31 +145,16 @@ moov.trak.mdia.minf.stbl.stsd
 
 ### Basic Metadata Extraction
 ```rust
-use mediaparser::metadata::{read_local_metadata, read_remote_metadata};
+use mediaparser::extract_metadata;
 
 // Local file
-let metadata = read_local_metadata("video.mp4")?;
+let metadata = extract_metadata("video.mp4")?;
 println!("Title: {:?}", metadata.title);
 println!("Duration: {:.2}s", metadata.duration.unwrap_or(0.0));
 
 // Remote file
-let metadata = read_remote_metadata("https://example.com/video.mp4".to_string())?;
+let metadata = extract_metadata("https://example.com/video.mp4")?;
 println!("Format: {}", metadata.format.unwrap().name());
-```
-
-### Complete Metadata with Streams
-```rust
-use mediaparser::metadata::read_local_complete_metadata;
-
-let complete = read_local_complete_metadata("video.mp4")?;
-println!("Duration: {:.2}s", complete.duration);
-println!("Streams: {}", complete.streams.len());
-
-for stream in &complete.streams {
-    println!("Stream {}: {} {}x{}", 
-             stream.index, stream.kind, 
-             stream.width.unwrap_or(0), stream.height.unwrap_or(0));
-}
 ```
 
 ### Format Detection and Probing

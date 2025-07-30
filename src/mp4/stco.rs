@@ -1,15 +1,14 @@
 use super::r#box::find_box;
-use std::io::{self, Error, ErrorKind};
+use crate::errors::{MediaParserError, MediaParserResult, Mp4Error};
 
 /// Parse stco (chunk offset) or co64 box - unified function
-pub fn parse_stco_or_co64(stbl: &[u8]) -> io::Result<Vec<u64>> {
+pub fn parse_stco_or_co64(stbl: &[u8]) -> MediaParserResult<Vec<u64>> {
     // Try stco first (32-bit offsets)
     if let Some(stco) = find_box(stbl, "stco") {
         if stco.len() < 8 {
-            return Err(Error::new(
-                ErrorKind::InvalidData,
-                "stco box too small: expected at least 8 bytes",
-            ));
+            return Err(MediaParserError::Mp4(Mp4Error::Error {
+                message: "stco box too small: expected at least 8 bytes".to_string(),
+            }));
         }
         let entry_count = u32::from_be_bytes([stco[4], stco[5], stco[6], stco[7]]);
         let mut offsets = Vec::new();
@@ -32,10 +31,9 @@ pub fn parse_stco_or_co64(stbl: &[u8]) -> io::Result<Vec<u64>> {
     // Try co64 (64-bit offsets)
     if let Some(co64) = find_box(stbl, "co64") {
         if co64.len() < 8 {
-            return Err(Error::new(
-                ErrorKind::InvalidData,
-                "co64 box too small: expected at least 8 bytes",
-            ));
+            return Err(MediaParserError::Mp4(Mp4Error::Error {
+                message: "co64 box too small: expected at least 8 bytes".to_string(),
+            }));
         }
         let entry_count = u32::from_be_bytes([co64[4], co64[5], co64[6], co64[7]]);
         let mut offsets = Vec::new();
@@ -59,10 +57,9 @@ pub fn parse_stco_or_co64(stbl: &[u8]) -> io::Result<Vec<u64>> {
         return Ok(offsets);
     }
 
-    Err(Error::new(
-        ErrorKind::NotFound,
-        "No chunk offset box found: missing both stco and co64",
-    ))
+    Err(MediaParserError::Mp4(Mp4Error::Error {
+        message: "No chunk offset box found: missing both stco and co64".to_string(),
+    }))
 }
 
 // Parse stco/co64 for thumbnails (strict error handling)

@@ -154,7 +154,7 @@ The system identifies subtitle tracks through multiple methods:
 
 ### Local File Extraction
 ```rust
-use mediaparser::subtitles::extract_subtitles;
+use mediaparser::extract_subtitles;
 
 let entries = extract_subtitles("video.mp4").await;
 for entry in entries {
@@ -165,9 +165,9 @@ for entry in entries {
 
 ### Remote File Extraction
 ```rust
-use mediaparser::subtitles::extract_subtitles;
+use mediaparser::extract_subtitles;
 
-let entries = extract_subtitles("https://example.com/video.mp4".to_string()).await;
+let entries = extract_subtitles("https://example.com/video.mp4").await;
 println!("Extracted {} subtitle entries", entries.len());
 ```
 

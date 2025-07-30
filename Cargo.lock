@@ -956,10 +956,12 @@ checksum = "13dc2df351e3202783a1fe0d44375f7295ffb4049267b0f3018346dc122a1d94"
 
 [[package]]
 name = "mediaparser"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
+ "async-trait",
  "base64 0.21.7",
  "image",
+ "log",
  "mockall",
  "openh264",
  "proptest",

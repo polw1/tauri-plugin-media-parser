@@ -28,31 +28,32 @@ pub use errors::{
 };
 
 macro_rules! with_seekable_stream {
-    ($source:expr, $body:expr) => {
-        if $source.starts_with("http://") || $source.starts_with("https://") {
-            let stream = SeekableHttpStream::new($source).await?;
+    ($source:expr, $body:expr) => {{
+        let source_str = $source.as_ref();
+        if source_str.starts_with("http://") || source_str.starts_with("https://") {
+            let stream = SeekableHttpStream::new(source_str.to_string()).await?;
             $body(stream).await
         } else {
-            let stream = LocalSeekableStream::open($source).await?;
+            let stream = LocalSeekableStream::open(source_str).await?;
             $body(stream).await
         }
-    };
+    }};
 }
 
-pub async fn extract_metadata(source: String) -> MediaParserResult<Metadata> {
+pub async fn extract_metadata<S: AsRef<str>>(source: S) -> MediaParserResult<Metadata> {
     with_seekable_stream!(source, |stream| {
         crate::metadata::extract_metadata_generic(stream)
     })
 }
 
-pub async fn extract_subtitles(source: String) -> MediaParserResult<Vec<SubtitleEntry>> {
+pub async fn extract_subtitles<S: AsRef<str>>(source: S) -> MediaParserResult<Vec<SubtitleEntry>> {
     with_seekable_stream!(source, |stream| {
         crate::subtitles::extract_subtitle_entries(stream)
     })
 }
 
-pub async fn extract_thumbnails(
-    source: String,
+pub async fn extract_thumbnails<S: AsRef<str>>(
+    source: S,
     count: usize,
     max_width: u32,
     max_height: u32,
