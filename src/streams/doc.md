@@ -77,7 +77,7 @@ use mediaparser::streams::{SeekableStream, LocalSeekableStream};
 #[tokio::main]
 async fn main() -> io::Result<()> {
     let mut stream = LocalSeekableStream::open("video.mp4").await?;
-    let mut buffer = [0u8; 1024];
+let mut buffer = [0u8; 1024];
     stream.read(&mut buffer).await?;
     stream.seek(SeekFrom::Start(0)).await?;
     Ok(())
@@ -91,10 +91,10 @@ use mediaparser::streams::{SeekableStream, SeekableHttpStream};
 #[tokio::main]
 async fn main() -> io::Result<()> {
     let mut stream = SeekableHttpStream::new("https://example.com/video.mp4".to_string()).await?;
-    let mut buffer = [0u8; 1024];
+let mut buffer = [0u8; 1024];
     stream.read(&mut buffer).await?;
     stream.seek(SeekFrom::Start(8192)).await?;
-    stream.print_stats(); // Show HTTP statistics
+stream.print_stats(); // Show HTTP statistics
     Ok(())
 }
 ```
@@ -136,14 +136,14 @@ async fn main() -> io::Result<()> {
 ```rust
 #[tokio::main]
 async fn main() -> MediaParserResult<()> {
-    // MP4 parsing
+// MP4 parsing
     let mut stream = SeekableHttpStream::new(url).await?;
     let metadata = extract_mp4_metadata(&mut stream, ContainerFormat::MP4).await?;
 
-    // Thumbnail extraction
+// Thumbnail extraction
     let thumbnails = extract_thumbnails_from_stream(&mut stream).await?;
 
-    // Subtitle extraction
+// Subtitle extraction
     let subtitles = extract_subtitles_from_stream(&mut stream).await?;
     Ok(())
 }

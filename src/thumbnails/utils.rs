@@ -22,6 +22,17 @@ pub(crate) fn resize_image(image: RgbImage, max_width: u32, max_height: u32) -> 
         new_height,
         image::imageops::FilterType::Lanczos3,
     )
+
+    // if image.width() == width && image.height() == height {
+    //     return image;
+    // }
+
+    // image::imageops::resize(
+    //     &image,
+    //     width,
+    //     height,
+    //     image::imageops::FilterType::Lanczos3,
+    // )
 }
 
 /// Convert image to base64 helper

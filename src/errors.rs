@@ -138,7 +138,9 @@ impl fmt::Display for BitReaderError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             BitReaderError::ReadError { message } => write!(f, "Bit read error: {}", message),
-            BitReaderError::AlignmentError { message } => write!(f, "Bit alignment error: {}", message),
+            BitReaderError::AlignmentError { message } => {
+                write!(f, "Bit alignment error: {}", message)
+            }
             BitReaderError::EndOfData { message } => write!(f, "End of data error: {}", message),
         }
     }

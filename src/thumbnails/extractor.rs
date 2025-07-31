@@ -14,49 +14,63 @@ use std::io::{self, SeekFrom};
 // 4K movies (2+ hours) could be 50-200MB but we may need to make this adaptive in the future
 const MAX_MOOV_SIZE: usize = 50 * 1024 * 1024; // 50MB limit
 
-// Core thumbnail extraction using any seekable stream
-pub async fn extract_thumbnails_generic<S: SeekableStream>(
-    mut stream: S,
-    count: usize,
-    max_width: u32,
-    max_height: u32,
-) -> MediaParserResult<Vec<ThumbnailData>> {
-    info!("Thumbnail Extraction");
-
-    // Step 0: Detect file format first
-    match detect_format(&mut stream).await {
+/// Detect container format and return whether to proceed with thumbnail extraction.
+/// When `error_on_unsupported` is true, an unsupported format results in an error.
+async fn check_thumbnail_format<S: SeekableStream>(
+    stream: &mut S,
+    error_on_unsupported: bool,
+) -> MediaParserResult<bool> {
+    match detect_format(stream).await {
         Ok(ContainerFormat::MP3) => {
-            info!("MP3 file detected - no subtitle extraction needed");
+            info!("MP3 file detected - no thumbnail extraction needed");
             stream.print_stats();
-            return Ok(Vec::new());
+            if error_on_unsupported {
+                Err(MediaParserError::Thumbnail(ThumbnailError::new(
+                    "MP3 files do not support thumbnails",
+                )))
+            } else {
+                Ok(false)
+            }
         }
         Ok(format) if format.is_mp4_family() => {
             info!(
-                "{} format detected - proceeding with subtitle extraction",
+                "{} format detected - proceeding with thumbnail extraction",
                 format.name()
             );
+            Ok(true)
         }
         Ok(format) => {
             warn!(
-                "Unsupported format: {} - only MP4 family formats support subtitles",
+                "Unsupported format: {} - only MP4 family formats support thumbnails",
                 format.name()
             );
             stream.print_stats();
-            return Ok(Vec::new());
+            if error_on_unsupported {
+                Err(MediaParserError::Thumbnail(ThumbnailError::new(format!(
+                    "Unsupported format: {}",
+                    format.name()
+                ))))
+            } else {
+                Ok(false)
+            }
         }
         Err(e) => {
             warn!(
                 "Format detection failed: {} - attempting MP4 extraction anyway",
                 e
             );
+            Ok(true)
         }
     }
+}
 
-    // 1: moov
-    let moov_info = find_moov_box_efficiently(&mut stream).await?;
+/// Read the moov box and analyze the video track.
+async fn read_video_track_info<S: SeekableStream>(
+    stream: &mut S,
+) -> MediaParserResult<VideoTrackInfo> {
+    let moov_info = find_moov_box_efficiently(stream).await?;
     let (moov_pos, moov_size) = (moov_info.position, moov_info.size);
 
-    // Guard against extremely large moov boxes to prevent OOM
     if moov_size as usize > MAX_MOOV_SIZE {
         return Err(MediaParserError::Thumbnail(ThumbnailError::new(format!(
             "moov box too large: {} bytes (max allowed: {} bytes)",
@@ -69,12 +83,54 @@ pub async fn extract_thumbnails_generic<S: SeekableStream>(
     stream.read(&mut moov_buffer).await?;
     info!("Read moov box: {} bytes", moov_size);
 
-    // 2: analyze
-    let video_track_info = analyze_video_track(&moov_buffer[8..])?;
+    let info = analyze_video_track(&moov_buffer[8..])?;
     info!(
         "Found video track: {} samples, timescale: {}",
-        video_track_info.sample_count, video_track_info.timescale
+        info.sample_count, info.timescale
     );
+
+    Ok(info)
+}
+
+fn gather_parameter_sets(
+    video_track_info: &VideoTrackInfo,
+    sample_data: &[u8],
+    sample_ranges: &[SampleRange],
+) -> MediaParserResult<HashMap<u8, Vec<u8>>> {
+    if let Some(avcc) = &video_track_info.avcc {
+        info!("Using AVCC configuration for parameter sets");
+        let mut map = HashMap::new();
+        for sps in &avcc.sps {
+            map.insert(7u8, sps.clone());
+            debug!("  Added SPS: {} bytes", sps.len());
+        }
+        for pps in &avcc.pps {
+            map.insert(8u8, pps.clone());
+            debug!("  Added PPS: {} bytes", pps.len());
+        }
+        Ok(map)
+    } else {
+        info!("No AVCC config found, extracting parameter sets from samples");
+        extract_parameter_sets_from_samples(sample_data, sample_ranges)
+    }
+}
+
+// Core thumbnail extraction using any seekable stream
+pub async fn extract_thumbnails_generic<S: SeekableStream>(
+    mut stream: S,
+    count: usize,
+    max_width: u32,
+    max_height: u32,
+) -> MediaParserResult<Vec<ThumbnailData>> {
+    info!("Thumbnail Extraction");
+
+    // Step 0: Detect file format first
+    if !check_thumbnail_format(&mut stream, false).await? {
+        return Ok(Vec::new());
+    }
+
+    // 1: read moov and analyze track
+    let video_track_info = read_video_track_info(&mut stream).await?;
 
     // 3: target
     let target_samples = calculate_target_samples_internal(&video_track_info, count);
@@ -95,27 +151,7 @@ pub async fn extract_thumbnails_generic<S: SeekableStream>(
     info!("Downloaded {} bytes of sample data", sample_data.len());
 
     // Extract parameter sets
-    let parameter_sets = if let Some(avcc) = &video_track_info.avcc {
-        info!("Using AVCC configuration for parameter sets");
-        let mut map = HashMap::new();
-
-        // Add SPS (type 7)
-        for sps in &avcc.sps {
-            map.insert(7u8, sps.clone());
-            debug!("  Added SPS: {} bytes", sps.len());
-        }
-
-        // Add PPS (type 8)
-        for pps in &avcc.pps {
-            map.insert(8u8, pps.clone());
-            debug!("  Added PPS: {} bytes", pps.len());
-        }
-
-        map
-    } else {
-        info!("No AVCC config found, extracting parameter sets from samples");
-        extract_parameter_sets_from_samples(&sample_data, &sample_ranges)?
-    };
+    let parameter_sets = gather_parameter_sets(&video_track_info, &sample_data, &sample_ranges)?;
 
     // 6: generate
     let thumbnails = generate_thumbnails_from_nalus(
@@ -134,6 +170,97 @@ pub async fn extract_thumbnails_generic<S: SeekableStream>(
     // stats
     stream.print_stats();
     Ok(thumbnails)
+}
+
+/// Extract a single thumbnail at a specific timestamp (in seconds)
+pub async fn extract_thumbnails_at_timestamp<S: SeekableStream>(
+    mut stream: S,
+    second: f64,
+    max_width: u32,
+    max_height: u32,
+) -> MediaParserResult<ThumbnailData> {
+    info!("Thumbnail Extraction at {} seconds", second);
+
+    // Step 0: Detect file format first
+    check_thumbnail_format(&mut stream, true).await?;
+
+    // 1: read moov and analyze track
+    let video_track_info = read_video_track_info(&mut stream).await?;
+
+    // Calculate video duration in seconds
+    let duration_seconds = video_track_info._duration as f64 / video_track_info.timescale as f64;
+
+    // Check if requested timestamp is within video duration
+    if second >= duration_seconds {
+        return Err(MediaParserError::Thumbnail(ThumbnailError::new(format!(
+            "Requested timestamp {} seconds exceeds video duration of {:.2} seconds",
+            second, duration_seconds
+        ))));
+    }
+
+    // Calculate sample timestamps
+    let sample_timestamps =
+        build_sample_timestamps(video_track_info.timescale, &video_track_info.stts_entries);
+
+    // Find the closest sample to the requested timestamp
+    let target_second = second;
+    let mut closest_sample_idx = 0;
+    let mut closest_diff = f64::MAX;
+
+    for (idx, &timestamp) in sample_timestamps.iter().enumerate() {
+        let diff = (timestamp - target_second).abs();
+        if diff < closest_diff {
+            closest_diff = diff;
+            closest_sample_idx = idx;
+        }
+    }
+
+    // If we have I-frames info, find the closest I-frame
+    if !video_track_info.stss_entries.is_empty() {
+        let mut closest_iframe_idx = closest_sample_idx;
+        let mut min_distance = u64::MAX;
+
+        for &iframe_sample in &video_track_info.stss_entries {
+            let distance = (iframe_sample as i64 - closest_sample_idx as i64).unsigned_abs();
+            if distance < min_distance {
+                min_distance = distance;
+                closest_iframe_idx = (iframe_sample - 1) as usize; // Convert from 1-based to 0-based
+            }
+        }
+
+        closest_sample_idx = closest_iframe_idx;
+    }
+
+    // Create a single sample range for the target frame
+    let sample_ranges = find_sample_byte_ranges(&video_track_info, &[closest_sample_idx as u32])?;
+
+    // Download the sample data
+    let sample_data = download_sample_ranges(&mut stream, &sample_ranges).await?;
+    info!("Downloaded {} bytes of sample data", sample_data.len());
+
+    // Extract parameter sets
+    let parameter_sets = gather_parameter_sets(&video_track_info, &sample_data, &sample_ranges)?;
+
+    // Generate the thumbnail
+    let thumbnails = generate_thumbnails_from_nalus(
+        &sample_data,
+        &sample_ranges,
+        &parameter_sets,
+        1, // We only want one thumbnail
+        max_width,
+        max_height,
+    )?;
+
+    // Return the single thumbnail or error if none was generated
+    if let Some(thumbnail) = thumbnails.into_iter().next() {
+        info!("Generated thumbnail at {:.2} seconds", thumbnail.timestamp);
+        stream.print_stats();
+        Ok(thumbnail)
+    } else {
+        Err(MediaParserError::Thumbnail(ThumbnailError::new(
+            "Failed to generate thumbnail",
+        )))
+    }
 }
 
 /// Download specific byte ranges with batching optimization for adjacent ranges

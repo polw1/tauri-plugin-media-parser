@@ -31,7 +31,7 @@ Intelligent keyframe extraction from MP4 files targeting sync samples (I-frames)
 - OpenH264 decoder integration for YUV→RGB→JPEG conversion
 
 **`utils.rs`**: Image processing utilities
-- `resize_image()`: Lanczos3 resizing with aspect ratio preservation
+- `resize_image()`: Lanczos3 resizing to exact dimensions
 - `image_to_base64()`: JPEG quality=85 with data URL format
 
 ## MP4 Container Navigation
@@ -205,6 +205,6 @@ pub struct ThumbnailData {
 ### Image Specifications
 - **Format**: JPEG quality=85
 - **Encoding**: Base64 with data URL prefix
-- **Resizing**: Lanczos3 with aspect ratio preservation
-- **Dimensions**: Respects max_width/max_height constraints
+- **Resizing**: Lanczos3 to the exact requested dimensions
+- **Dimensions**: Always uses the `max_width` and `max_height` values
 

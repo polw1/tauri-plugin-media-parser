@@ -31,7 +31,7 @@ A high-performance Rust library for intelligent extraction of thumbnails, subtit
 Add to your `Cargo.toml`:
 ```toml
 [dependencies]
-mediaparser = "0.1.0"
+mediaparser = "1.0.0"
 ```
 
 ### Extract Metadata
@@ -47,28 +47,48 @@ let metadata = extract_metadata("https://example.com/video.mp4").await;
 ### Extract Thumbnails
 
 ```rust
-use mediaparser::extract_thumbnails;
+use mediaparser::{extract_thumbnail, extract_thumbnails};
 
-// Local file
+// Extract multiple thumbnails evenly distributed throughout the video
 let thumbnails = extract_thumbnails(
     "video.mp4", 
     5,        // count
     320,      // max_width  
     240       // max_height
-).await;
+).await?;
 
-// Remote file
-let thumbnails = extract_thumbnails(
-    "https://example.com/video.mp4",
-    5, 320, 240
-).await;
-
+// Process multiple thumbnails
 for thumb in thumbnails {
     println!("Timestamp: {:.2}s, Size: {}x{}", 
              thumb.timestamp, thumb.width, thumb.height);
-    // thumb.base64 contains the JPEG data
+    // thumb.base64 contains the JPEG data as base64 string
 }
+
+// Extract a single thumbnail at a specific timestamp
+let thumbnail = extract_thumbnail(
+    "video.mp4",
+    2.5,      // timestamp in seconds (supports subsecond precision)
+    320,      // max_width
+    240       // max_height
+).await?;
+
+// Remote files are also supported
+let thumbnail = extract_thumbnail(
+    "https://example.com/video.mp4",
+    5.0, 320, 240
+).await?;
+
+println!("Extracted thumbnail at {:.2}s, Size: {}x{}", 
+         thumbnail.timestamp, thumbnail.width, thumbnail.height);
 ```
+
+The thumbnail extraction process:
+- Uses I-frames (keyframes) for optimal quality
+- Maintains aspect ratio during resizing
+- Returns base64-encoded JPEG data
+- For timestamp-based extraction, uses the nearest I-frame
+- Supports both local files and HTTP(S) URLs with range requests
+- Provides actual timestamp of extracted frame (may differ slightly from requested time)
 
 ### Extract Subtitles
 

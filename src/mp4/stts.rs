@@ -75,7 +75,7 @@ pub fn build_sample_timestamps(timescale: u32, entries: &[SttsEntry]) -> Vec<f64
     for entry in entries {
         for _ in 0..entry.sample_count {
             timestamps.push(time_offset as f64 / timescale as f64);
-            time_offset += entry.sample_delta as u64;
+            time_offset = time_offset.saturating_add(entry.sample_delta as u64);
         }
     }
 

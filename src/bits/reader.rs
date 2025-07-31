@@ -177,12 +177,14 @@ impl<R: Read> BitReader<R> {
             return None;
         }
         if self.n != 0 {
-            self.err = Some(MediaParserError::BitReader(BitReaderError::AlignmentError {
-                message: format!(
-                    "{} bit instead of byte alignment when reading remaining bytes",
-                    self.n
-                ),
-            }));
+            self.err = Some(MediaParserError::BitReader(
+                BitReaderError::AlignmentError {
+                    message: format!(
+                        "{} bit instead of byte alignment when reading remaining bytes",
+                        self.n
+                    ),
+                },
+            ));
             return None;
         }
         let mut rest = Vec::new();
