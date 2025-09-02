@@ -4,7 +4,9 @@
       "check-node-version": "check-node-version --npm 10.5.0",
       "commitlint": "commitlint --from 3c4cb7c",
       "markdownlint": "markdownlint-cli2",
-      "standards": "npm run commitlint && npm run markdownlint"
+      "rust:lint": "cargo lint-clippy && cargo lint-fmt",
+      "rust:lint:fix": "cargo fix-clippy && cargo fix-fmt",
+      "standards": "npm run commitlint && npm run markdownlint && npm run rust:lint"
    },
    "repository": {
       "type": "git",
