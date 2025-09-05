@@ -1,26 +1,18 @@
-use mediaparser::extract_metadata;
+use media_parser::{FileStreamReader, MediaParser};
 
 #[tokio::test]
 async fn test_read_local_metadata() {
-    // Test reading metadata from a local MP4 file
-    let path = concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/tests/testdata/big_buck_bunny.mp4"
-    );
-    let metadata = extract_metadata(path.to_string()).await;
+   // Test reading metadata from a local MP4 file
+   let path = concat!(
+      env!("CARGO_MANIFEST_DIR"),
+      "/tests/testdata/big_buck_bunny.mp4"
+   );
+   let reader = FileStreamReader::new(path).expect("failed to open test video");
+   let mut parser = MediaParser::new(reader);
+   let metadata = parser.metadata().await.expect("metadata read failed");
 
-    assert!(
-        metadata.is_ok(),
-        "Erro ao ler metadata: {:?}",
-        metadata.err()
-    );
-
-    let metadata = metadata.unwrap();
-
-    assert_eq!(metadata.title, Some("Big Buck Bunny".to_string()));
-    assert_eq!(metadata.artist, Some("Blender Foundation".to_string()));
-    assert!(metadata.album.is_none());
-    assert!(metadata.duration.unwrap_or(0.0) > 0.0);
-    assert_eq!(metadata.size, 9671638);
-    assert_eq!(metadata.format.unwrap().name(), "MP4");
+   assert_eq!(metadata.title, Some("Big Buck Bunny".to_string()));
+   assert_eq!(metadata.artist, Some("Blender Foundation".to_string()));
+   assert!(metadata.album.is_none());
+   assert!(metadata.duration.as_secs_f64() > 0.0);
 }

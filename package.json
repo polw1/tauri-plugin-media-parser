@@ -1,0 +1,22 @@
+{
+   "name": "media-parser",
+   "scripts": {
+      "check-node-version": "check-node-version --npm 10.5.0",
+      "commitlint": "commitlint --from HEAD~1 --to HEAD",
+      "markdownlint": "markdownlint-cli2",
+      "standards": "npm run commitlint && npm run markdownlint && cargo lint-clippy && cargo lint-fmt"
+   },
+   "repository": {
+      "type": "git",
+      "url": "git+https://github.com/silvermine/media-parser.git"
+   },
+   "author": "Jeremy Thomerson",
+   "license": "MIT",
+   "bugs": {
+      "url": "https://github.com/silvermine/media-parser/issues"
+   },
+   "homepage": "https://github.com/silvermine/media-parser#readme",
+   "devDependencies": {
+      "@silvermine/standardization": "github:silvermine/standardization#55d8b668abe5c63d4ea9a8184424eb3d2b7b55db"
+   }
+}
