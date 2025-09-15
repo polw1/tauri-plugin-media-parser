@@ -238,17 +238,26 @@ pub fn extract_track_tables(trak: &[u8]) -> Option<TrackTables> {
 /// Returns Some(Vec, version) where version is 0 (unsigned offsets) or 1 (signed offsets).
 pub fn extract_ctts_pairs(trak: &[u8]) -> Option<Vec<(u32, i32)>> {
    let ctts = trak.nav(&mp4_path!(Mdia, Minf, Stbl, Ctts))?;
-   if ctts.len() < 8 { return None; }
+   if ctts.len() < 8 {
+      return None;
+   }
    let version = ctts[0];
    // flags = ctts[1..4]
    let count = u32::from_be_bytes([ctts[4], ctts[5], ctts[6], ctts[7]]) as usize;
    let mut out: Vec<(u32, i32)> = Vec::with_capacity(count);
    let mut off = 8usize;
    for _ in 0..count {
-      if off + 8 > ctts.len() { break; }
-      let sample_count = u32::from_be_bytes([ctts[off], ctts[off+1], ctts[off+2], ctts[off+3]]);
-      let raw = u32::from_be_bytes([ctts[off+4], ctts[off+5], ctts[off+6], ctts[off+7]]);
-      let sample_offset = if version == 0 { raw as i32 } else { i32::from_be_bytes([ctts[off+4], ctts[off+5], ctts[off+6], ctts[off+7]]) };
+      if off + 8 > ctts.len() {
+         break;
+      }
+      let sample_count =
+         u32::from_be_bytes([ctts[off], ctts[off + 1], ctts[off + 2], ctts[off + 3]]);
+      let raw = u32::from_be_bytes([ctts[off + 4], ctts[off + 5], ctts[off + 6], ctts[off + 7]]);
+      let sample_offset = if version == 0 {
+         raw as i32
+      } else {
+         i32::from_be_bytes([ctts[off + 4], ctts[off + 5], ctts[off + 6], ctts[off + 7]])
+      };
       out.push((sample_count, sample_offset));
       off += 8;
    }
@@ -258,7 +267,9 @@ pub fn extract_ctts_pairs(trak: &[u8]) -> Option<Vec<(u32, i32)>> {
 /// Slice `ctts` timing pairs to a selected sample range [start, end) and
 /// return a compacted list of `(count, offset)` covering somente esse subconjunto.
 pub fn slice_ctts_pairs(pairs: &[(u32, i32)], start: usize, end: usize) -> Vec<(u32, i32)> {
-   if start >= end { return Vec::new(); }
+   if start >= end {
+      return Vec::new();
+   }
    let mut out: Vec<(u32, i32)> = Vec::new();
    let mut idx: usize = 0;
    for &(count, offset) in pairs {
@@ -279,7 +290,9 @@ pub fn slice_ctts_pairs(pairs: &[(u32, i32)], start: usize, end: usize) -> Vec<(
          }
       }
       idx = run_end;
-      if idx >= end { break; }
+      if idx >= end {
+         break;
+      }
    }
    out
 }
@@ -330,13 +343,17 @@ pub fn enumerate_samples(tables: &TrackTables) -> Vec<SampleInfo> {
 pub fn extract_sync_samples(trak: &[u8]) -> Vec<u32> {
    if let Some(stss) = trak.nav(&mp4_path!(Mdia, Minf, Stbl, Stss)) {
       // stss payload: version+flags (4) + entry_count (4) + entries (u32 each)
-      if stss.len() < 8 { return Vec::new(); }
+      if stss.len() < 8 {
+         return Vec::new();
+      }
       let count = u32::from_be_bytes([stss[4], stss[5], stss[6], stss[7]]) as usize;
       let mut out = Vec::with_capacity(count);
       let mut off = 8usize;
       for _ in 0..count {
-         if off + 4 > stss.len() { break; }
-         let v = u32::from_be_bytes([stss[off], stss[off+1], stss[off+2], stss[off+3]]);
+         if off + 4 > stss.len() {
+            break;
+         }
+         let v = u32::from_be_bytes([stss[off], stss[off + 1], stss[off + 2], stss[off + 3]]);
          out.push(v);
          off += 4;
       }
@@ -406,7 +423,9 @@ pub fn select_samples_by_time(
          let mut sync_idx = 0usize;
          let mut found = false;
          for &n in stss {
-            if n == 0 { continue; }
+            if n == 0 {
+               continue;
+            }
             let z = (n - 1) as usize;
             if z <= idx_at_or_before_start {
                sync_idx = z;
@@ -423,9 +442,8 @@ pub fn select_samples_by_time(
 
    // Include all samples with start < end.
    let mut end_index = start_index;
-   for i in start_index..samples.len() {
-      let (s, _d) = samples[i];
-      if s < end {
+   for (i, (s, _d)) in samples.iter().enumerate().skip(start_index) {
+      if *s < end {
          end_index = i;
       } else {
          break;
@@ -545,14 +563,13 @@ pub async fn read_sample(
 /// The input slice should be the payload of the `moov` box (use `moov_payload`).
 pub fn find_first_video_trak(moov_pl: &[u8]) -> Option<&[u8]> {
    for (typ, payload) in iter_boxes(moov_pl) {
-      if typ == Mp4Box::Trak.bytes() {
-         if let Some(mdia) = payload.nav(&crate::mp4_path!(Mdia)) {
-            if let Some(hdlr) = mdia.nav(&crate::mp4_path!(Hdlr)) {
-               if hdlr.len() >= 12 && &hdlr[8..12] == b"vide" {
-                  return Some(payload);
-               }
-            }
-         }
+      if typ == Mp4Box::Trak.bytes()
+         && let Some(mdia) = payload.nav(&crate::mp4_path!(Mdia))
+         && let Some(hdlr) = mdia.nav(&crate::mp4_path!(Hdlr))
+         && hdlr.len() >= 12
+         && &hdlr[8..12] == b"vide"
+      {
+         return Some(payload);
       }
    }
    None
@@ -562,7 +579,9 @@ pub fn find_first_video_trak(moov_pl: &[u8]) -> Option<&[u8]> {
 #[allow(dead_code)]
 pub fn find_video_trak_by_id(moov_pl: &[u8], track_id: u32) -> Option<&[u8]> {
    for (typ, payload) in iter_boxes(moov_pl) {
-      if typ != Mp4Box::Trak.bytes() { continue; }
+      if typ != Mp4Box::Trak.bytes() {
+         continue;
+      }
       let id = payload
          .nav(&crate::mp4_path!(Tkhd))
          .and_then(track_id_from_tkhd)
@@ -572,7 +591,9 @@ pub fn find_video_trak_by_id(moov_pl: &[u8], track_id: u32) -> Option<&[u8]> {
             .nav(&crate::mp4_path!(Mdia, Hdlr))
             .map(|h| h.len() >= 12 && &h[8..12] == b"vide")
             .unwrap_or(false);
-         if is_video { return Some(payload); }
+         if is_video {
+            return Some(payload);
+         }
       }
    }
    None
@@ -581,7 +602,9 @@ pub fn find_video_trak_by_id(moov_pl: &[u8], track_id: u32) -> Option<&[u8]> {
 /// Slice `stts` timing pairs to a selected sample range [start, end) and
 /// return a compacted list of `(count, delta)` covering only that subset.
 pub fn slice_stts_pairs(pairs: &[(u32, u32)], start: usize, end: usize) -> Vec<(u32, u32)> {
-   if start >= end { return Vec::new(); }
+   if start >= end {
+      return Vec::new();
+   }
    let mut out: Vec<(u32, u32)> = Vec::new();
    let mut idx: usize = 0;
    for &(count, delta) in pairs {
@@ -604,7 +627,9 @@ pub fn slice_stts_pairs(pairs: &[(u32, u32)], start: usize, end: usize) -> Vec<(
          }
       }
       idx = run_end;
-      if idx >= end { break; }
+      if idx >= end {
+         break;
+      }
    }
    out
 }
@@ -619,22 +644,34 @@ pub struct AvcInfo {
 }
 
 fn parse_avcc_sps_pps(data: &[u8]) -> Option<(Vec<u8>, Vec<u8>)> {
-   if data.len() < 7 { return None; }
+   if data.len() < 7 {
+      return None;
+   }
    let mut pos = 6;
    let num_sps = data.get(5).copied().unwrap_or(0) & 0x1f;
-   if num_sps == 0 || pos + 2 > data.len() { return None; }
+   if num_sps == 0 || pos + 2 > data.len() {
+      return None;
+   }
    let sps_len = u16::from_be_bytes([data[pos], data[pos + 1]]) as usize;
    pos += 2;
-   if pos + sps_len > data.len() { return None; }
+   if pos + sps_len > data.len() {
+      return None;
+   }
    let sps = data[pos..pos + sps_len].to_vec();
    pos += sps_len;
-   if pos >= data.len() { return None; }
+   if pos >= data.len() {
+      return None;
+   }
    let num_pps = data[pos] as usize;
    pos += 1;
-   if num_pps == 0 || pos + 2 > data.len() { return None; }
+   if num_pps == 0 || pos + 2 > data.len() {
+      return None;
+   }
    let pps_len = u16::from_be_bytes([data[pos], data[pos + 1]]) as usize;
    pos += 2;
-   if pos + pps_len > data.len() { return None; }
+   if pos + pps_len > data.len() {
+      return None;
+   }
    let pps = data[pos..pos + pps_len].to_vec();
    Some((sps, pps))
 }
@@ -642,22 +679,31 @@ fn parse_avcc_sps_pps(data: &[u8]) -> Option<(Vec<u8>, Vec<u8>)> {
 /// Extract avcC payload, SPS/PPS and dimensions from a video `trak`.
 pub fn extract_avc_from_trak(trak: &[u8]) -> Option<AvcInfo> {
    let stsd = trak.nav(&crate::mp4_path!(Mdia, Minf, Stbl, Stsd))?;
-   if stsd.len() < 16 { return None; }
+   if stsd.len() < 16 {
+      return None;
+   }
    // First entry
    let entry_size = u32::from_be_bytes([stsd[8], stsd[9], stsd[10], stsd[11]]) as usize;
    let entry_type = &stsd[12..16];
-   if entry_type != b"avc1" && entry_type != b"avc3" { return None; }
-   let entry = &stsd[16..16+entry_size-8];
-   if entry.len() < 78 { return None; }
+   if entry_type != b"avc1" && entry_type != b"avc3" {
+      return None;
+   }
+   let entry = &stsd[16..16 + entry_size - 8];
+   if entry.len() < 78 {
+      return None;
+   }
    let width = u16::from_be_bytes([entry[24], entry[25]]);
    let height = u16::from_be_bytes([entry[26], entry[27]]);
    // Scan child boxes inside entry for avcC
    let mut off = 78usize; // skip VisualSampleEntry fields
    while off + 8 <= entry.len() {
-      let sz = u32::from_be_bytes([entry[off], entry[off+1], entry[off+2], entry[off+3]]) as usize;
-      if sz < 8 || off + sz > entry.len() { break; }
-      if &entry[off+4..off+8] == b"avcC" {
-         let avcc = &entry[off+8..off+sz];
+      let sz =
+         u32::from_be_bytes([entry[off], entry[off + 1], entry[off + 2], entry[off + 3]]) as usize;
+      if sz < 8 || off + sz > entry.len() {
+         break;
+      }
+      if &entry[off + 4..off + 8] == b"avcC" {
+         let avcc = &entry[off + 8..off + sz];
          if let Some((sps, pps)) = parse_avcc_sps_pps(avcc) {
             return Some(AvcInfo {
                avcc_payload: avcc.to_vec(),
@@ -700,18 +746,22 @@ pub fn select_video_trak<'a>(moov_pl: &'a [u8], selector: &TrackSelector) -> Opt
       TrackSelector::ByCodec(want) => {
          let want_lc = want.to_lowercase();
          for (typ, payload) in iter_boxes(moov_pl) {
-            if typ != Mp4Box::Trak.bytes() { continue; }
+            if typ != Mp4Box::Trak.bytes() {
+               continue;
+            }
             let is_video = payload
                .nav(&mp4_path!(Mdia, Hdlr))
                .map(|h| h.len() >= 12 && &h[8..12] == b"vide")
                .unwrap_or(false);
-            if !is_video { continue; }
-            if let Some(stsd) = payload.nav(&mp4_path!(Mdia, Minf, Stbl, Stsd)) {
-               if let Some(fourcc) = stsd_entry_types(stsd).first() {
-                  if let Ok(code) = std::str::from_utf8(fourcc) {
-                     if code.trim_matches('\0').to_lowercase() == want_lc { return Some(payload); }
-                  }
-               }
+            if !is_video {
+               continue;
+            }
+            if let Some(stsd) = payload.nav(&mp4_path!(Mdia, Minf, Stbl, Stsd))
+               && let Some(fourcc) = stsd_entry_types(stsd).first()
+               && let Ok(code) = std::str::from_utf8(fourcc)
+               && code.trim_matches('\0').to_lowercase() == want_lc
+            {
+               return Some(payload);
             }
          }
          None
@@ -719,18 +769,24 @@ pub fn select_video_trak<'a>(moov_pl: &'a [u8], selector: &TrackSelector) -> Opt
       TrackSelector::ByLanguage(lang) => {
          let want_lc = lang.to_lowercase();
          for (typ, payload) in iter_boxes(moov_pl) {
-            if typ != Mp4Box::Trak.bytes() { continue; }
+            if typ != Mp4Box::Trak.bytes() {
+               continue;
+            }
             let is_video = payload
                .nav(&mp4_path!(Mdia, Hdlr))
                .map(|h| h.len() >= 12 && &h[8..12] == b"vide")
                .unwrap_or(false);
-            if !is_video { continue; }
+            if !is_video {
+               continue;
+            }
             let lang = payload
                .nav(&mp4_path!(Mdia, Mdhd))
                .and_then(language_from_mdhd)
                .unwrap_or_else(|| "und".to_string())
                .to_lowercase();
-            if lang == want_lc { return Some(payload); }
+            if lang == want_lc {
+               return Some(payload);
+            }
          }
          None
       }
@@ -839,7 +895,7 @@ mod tests {
       stss_payload.extend_from_slice(&u32::to_be_bytes(9));
 
       // Wrap into a box chain: stss under mdia->minf->stbl
-      fn box_with(typ: &[u8;4], payload: &[u8]) -> Vec<u8> {
+      fn box_with(typ: &[u8; 4], payload: &[u8]) -> Vec<u8> {
          let mut out = Vec::with_capacity(8 + payload.len());
          out.extend_from_slice(&u32::to_be_bytes((8 + payload.len()) as u32));
          out.extend_from_slice(typ);
@@ -854,7 +910,7 @@ mod tests {
       // Our navigation helpers expect a box payload slice (not including the
       // 8-byte size+type header). Pass only the trak payload here.
       let entries = extract_sync_samples(&trak[8..]);
-      assert_eq!(entries, vec![1,5,9]);
+      assert_eq!(entries, vec![1, 5, 9]);
    }
 
    #[test]

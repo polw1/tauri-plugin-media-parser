@@ -8,14 +8,14 @@
 //!
 //! IO is abstracted behind [`StreamReader`], so the same parsing can run on
 //! local files or over HTTP range requests.
+mod clip;
 mod helpers;
 mod metadata;
+mod mp4_writer;
 mod stream_reader;
 mod subtitles;
 mod thumbnails;
 mod tracks;
-mod mp4_writer;
-mod clip;
 
 use helpers::*;
 use std::time::Duration;
@@ -204,16 +204,18 @@ impl<R: stream_reader::StreamReader> MediaParser<R> {
    }
 }
 
+pub use clip::{
+   ClipSelectionCore,
+   plan_clip_core,
+   // clip_h264_from_url_to_writer,
+   stream_clip_to_writer,
+};
 pub use metadata::{MediaMetadata, Meta};
+pub use mp4_writer::{
+   VideoMoovParams, build_ftyp_isom, build_moov_video, build_segment_headers, stream_mdat_payload,
+};
+pub use stream_reader::open_source;
 pub use stream_reader::{FileStreamReader, HttpStreamReader, StreamReader};
 pub use subtitles::{Subtitle, SubtitleQuery};
 pub use thumbnails::{PixelFormat, RawFrame};
 pub use tracks::{Track, TrackType};
-pub use mp4_writer::{build_ftyp_isom, build_moov_video, VideoMoovParams, stream_mdat_payload, build_segment_headers};
-pub use clip::{
-   // clip_h264_from_url_to_writer,
-   stream_clip_to_writer,
-   plan_clip_core,
-   ClipSelectionCore,
-};
-pub use stream_reader::open_source;

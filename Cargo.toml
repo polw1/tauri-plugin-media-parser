@@ -10,11 +10,14 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 base64 = "0.21"
 openh264 = { version = "0.8.1", features = ["source"], default-features = false }
-reqwest = { version = "0.11" }
+reqwest = { version = "0.11", default-features = false, features = ["rustls-tls"] }
 thiserror = "1.0"
 image = { version = "0.24", default-features = false, features = ["jpeg"] }
 tokio = { version = "1", features = ["fs", "io-util", "macros", "rt-multi-thread"] }
 async-trait = "0.1"
+hyper = { version = "0.14", features = ["server", "http1", "tcp"], default-features = false }
+http = "0.2"
+bytes = "1"
 
 [dev-dependencies]
 wiremock = "0.6"

@@ -4,12 +4,8 @@ use crate::mp4_path;
 use crate::{
    Result,
    helpers::{
-      enumerate_samples,
-      extract_track_tables,
-      iter_boxes,
-      track_id_from_tkhd,
-      extract_avc_from_trak,
-      extract_sync_samples,
+      enumerate_samples, extract_avc_from_trak, extract_sync_samples, extract_track_tables,
+      iter_boxes, track_id_from_tkhd,
    },
    stream_reader::StreamReader,
 };
@@ -82,17 +78,20 @@ impl RawFrame {
 
       // Convert to an ImageBuffer based on supported formats.
       let rgb_image: RgbImage = match self.format {
-         PixelFormat::Rgb24 => {
-            RgbImage::from_raw(self.width, self.height, self.data.clone())
-               .ok_or_else(|| std::io::Error::other("invalid RGB24 buffer dimensions"))?
+         PixelFormat::Rgb24 => RgbImage::from_raw(self.width, self.height, self.data.clone())
+            .ok_or_else(|| std::io::Error::other("invalid RGB24 buffer dimensions"))?,
+         _ => {
+            return Err(std::io::Error::other(
+               "unsupported pixel format for JPEG encoding",
+            ));
          }
-         _ => return Err(std::io::Error::other("unsupported pixel format for JPEG encoding")),
       };
 
       // Scale down if wider than max_width while preserving aspect ratio.
       let mut img = DynamicImage::ImageRgb8(rgb_image);
       if max_width > 0 && self.width > max_width {
-         let new_height = ((self.height as f32) * (max_width as f32 / self.width as f32)).round() as u32;
+         let new_height =
+            ((self.height as f32) * (max_width as f32 / self.width as f32)).round() as u32;
          img = img.resize_exact(max_width, new_height.max(1), FilterType::Triangle);
       }
 
@@ -141,9 +140,7 @@ impl ThumbnailExtractor for [u8] {
    fn extract_track_data(&self, track: &[u8]) -> Option<TrackData> {
       let tables = extract_track_tables(track)?;
       let avc = extract_avc_from_trak(track);
-      let (sps, pps) = avc
-         .map(|a| (a.sps, a.pps))
-         .unwrap_or_default();
+      let (sps, pps) = avc.map(|a| (a.sps, a.pps)).unwrap_or_default();
       let keyframes = {
          let stss = extract_sync_samples(track);
          if stss.is_empty() {

@@ -1,36 +1,32 @@
 /*
- * cutting specific time segments 
+ * cutting specific time segments
  * analyzes video metadata, calculates required data chunks,
  * and assembles a new valid MP4 file containing only the desired segment.
- * 
+ *
  * general idea:
  * 1. Reads video metadata (moov box) to understand structure
  * 2. Calculates which samples (frames) are in the desired time range
  * 3. Aligns with keyframes when possible to avoid breaking decoding
  * 4. Rebuilds timing tables for the new file
  * 5. Streams only necessary bytes from the original file
- * 
+ *
  *  low qualitys works fine but 720 are freezing
- * todo: add ctts 
+ * todo: add ctts
  */
 
-use crate::helpers::{
-   extract_track_tables,
-   language_from_mdhd,
-   moov_payload,
-   enumerate_samples,
-   extract_sync_samples,
-   find_first_video_trak,
-   slice_stts_pairs,
-   extract_avc_from_trak,
-   Mp4Nav,
-};
-use crate::helpers::moov::find_and_read_moov_box;
-use crate::mp4_writer::{stream_mp4_segment, SampleRef, VideoMoovParams};
-use crate::{mp4_path, stream_reader::{StreamReader, open_source}, Mp4Box};
-use tokio::io::AsyncWrite;
-use crate::Result;
 use crate::MediaParserError;
+use crate::Result;
+use crate::helpers::moov::find_and_read_moov_box;
+use crate::helpers::{
+   Mp4Nav, enumerate_samples, extract_avc_from_trak, extract_sync_samples, extract_track_tables,
+   find_first_video_trak, language_from_mdhd, moov_payload, slice_stts_pairs,
+};
+use crate::mp4_writer::{SampleRef, VideoMoovParams, stream_mp4_segment};
+use crate::{
+   Mp4Box, mp4_path,
+   stream_reader::{StreamReader, open_source},
+};
+use tokio::io::AsyncWrite;
 
 #[derive(Debug, Clone)]
 pub struct ClipSelectionCore {
@@ -52,17 +48,23 @@ pub async fn plan_clip_core(
    start_sec: f64,
    end_sec: f64,
 ) -> Result<ClipSelectionCore> {
-   if !(end_sec > start_sec && start_sec >= 0.0) { return Err(MediaParserError::InvalidFormat("invalid time range".into())); }
+   if !(end_sec > start_sec && start_sec >= 0.0) {
+      return Err(MediaParserError::InvalidFormat("invalid time range".into()));
+   }
 
    // Read moov (partial through range searches)
    let moov = find_and_read_moov_box(reader).await?;
    let moov_p = moov_payload(&moov);
-   let trak = find_first_video_trak(moov_p).ok_or_else(|| MediaParserError::InvalidFormat("no video track".into()))?;
+   let trak = find_first_video_trak(moov_p)
+      .ok_or_else(|| MediaParserError::InvalidFormat("no video track".into()))?;
 
    // Parse tables
-   let tables = extract_track_tables(trak).ok_or_else(|| MediaParserError::InvalidFormat("invalid track tables".into()))?;
+   let tables = extract_track_tables(trak)
+      .ok_or_else(|| MediaParserError::InvalidFormat("invalid track tables".into()))?;
    let all_samples = enumerate_samples(&tables);
-   if all_samples.is_empty() { return Err(MediaParserError::InvalidFormat("no samples".into())); }
+   if all_samples.is_empty() {
+      return Err(MediaParserError::InvalidFormat("no samples".into()));
+   }
 
    // Determine selection indices by time, aligned to keyframes when available
    let stss = extract_sync_samples(trak);
@@ -72,7 +74,8 @@ pub async fn plan_clip_core(
       if stss.is_empty() { None } else { Some(&stss) },
       start_sec,
       end_sec,
-   ).map_err(|e| MediaParserError::InvalidFormat(e.into()))?;
+   )
+   .map_err(|e| MediaParserError::InvalidFormat(e.into()))?;
 
    let start = sel.start_index;
    let end = sel.end_index + 1; // inclusive -> exclusive
@@ -82,7 +85,10 @@ pub async fn plan_clip_core(
    let mut refs = Vec::with_capacity(chosen.len());
    let mut sizes = Vec::with_capacity(chosen.len());
    for s in chosen {
-      refs.push(SampleRef { src_offset: s.offset, size: s.size as u32 });
+      refs.push(SampleRef {
+         src_offset: s.offset,
+         size: s.size as u32,
+      });
       sizes.push(s.size as u32);
    }
 
@@ -90,25 +96,34 @@ pub async fn plan_clip_core(
    let mut sync_rel: Vec<u32> = Vec::new();
    if !stss.is_empty() {
       for &n1 in &stss {
-         if n1 == 0 { continue; }
+         if n1 == 0 {
+            continue;
+         }
          let idx0 = (n1 - 1) as usize;
          if idx0 >= start && idx0 < end {
             sync_rel.push((idx0 - start + 1) as u32); // 1-based
          }
       }
-      if sync_rel.is_empty() { sync_rel.push(1); }
+      if sync_rel.is_empty() {
+         sync_rel.push(1);
+      }
    } else {
       sync_rel.push(1);
    }
 
    // Extract avcC and dimensions
-   let avc = extract_avc_from_trak(trak).ok_or_else(|| MediaParserError::UnsupportedCodec("missing avcC".into()))?;
-   let lang = language_from_mdhd(trak.nav(&mp4_path!(Mdia, Mdhd)).unwrap_or(&[])).unwrap_or_else(|| "und".to_string());
+   let avc = extract_avc_from_trak(trak)
+      .ok_or_else(|| MediaParserError::UnsupportedCodec("missing avcC".into()))?;
+   let lang = language_from_mdhd(trak.nav(&mp4_path!(Mdia, Mdhd)).unwrap_or(&[]))
+      .unwrap_or_else(|| "und".to_string());
 
    // Compute STTS pairs only for the selected sample range so that mdhd/tkhd/mvhd
    // durations reflect the clip length (not the full source duration).
    let stts_clip = slice_stts_pairs(&tables.timing, start, end);
-   let ctts_clip = tables.ctts.as_ref().map(|pairs| crate::helpers::slice_ctts_pairs(pairs, start, end));
+   let ctts_clip = tables
+      .ctts
+      .as_ref()
+      .map(|pairs| crate::helpers::slice_ctts_pairs(pairs, start, end));
 
    Ok(ClipSelectionCore {
       track_timescale: tables.timescale,
@@ -155,14 +170,13 @@ pub async fn stream_clip_to_writer(
    Ok(())
 }
 
-
 #[cfg(test)]
 mod tests {
    use super::*;
    use crate::mp4_writer::{build_ftyp_isom, build_moov_video, compute_offsets};
    use std::io;
-   use wiremock::matchers::{method, header_exists};
-   use wiremock::{Mock, MockServer, ResponseTemplate, Request};
+   use wiremock::matchers::{header_exists, method};
+   use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 
    fn build_source_mp4(samples: &[&[u8]], timescale: u32, delta: u32) -> Vec<u8> {
       // Build a full MP4 buffer for the source using our writer for moov
@@ -189,7 +203,10 @@ mod tests {
       let ftyp = build_ftyp_isom();
       let moov_tmp = build_moov_video(&provisional);
       let mdat_base = (ftyp.len() as u64) + (moov_tmp.len() as u64) + 8u64;
-      let params = VideoMoovParams { mdat_base_offset: mdat_base, ..provisional };
+      let params = VideoMoovParams {
+         mdat_base_offset: mdat_base,
+         ..provisional
+      };
       let moov = build_moov_video(&params);
       let offs = compute_offsets(mdat_base, &sizes);
       // Build mdat header and payload
@@ -214,7 +231,9 @@ mod tests {
    #[tokio::test]
    async fn clips_subset_via_http_range() {
       // Build a tiny source mp4 with 3 samples of 1s
-      let s1 = b"AAAA"; let s2 = b"BBBBBB"; let s3 = b"CCC";
+      let s1 = b"AAAA";
+      let s2 = b"BBBBBB";
+      let s3 = b"CCC";
       let source = build_source_mp4(&[s1.as_ref(), s2.as_ref(), s3.as_ref()], 1000, 1000);
       let total_len = source.len() as u64;
 
@@ -228,27 +247,45 @@ mod tests {
          .await;
 
       // GET with Range returns the slice
-      Mock::given(method("GET")).and(header_exists("Range"))
+      Mock::given(method("GET"))
+         .and(header_exists("Range"))
          .respond_with(move |req: &Request| {
             let mut tpl = ResponseTemplate::new(206);
-            let range = req.headers.get("Range").and_then(|v| v.to_str().ok()).unwrap_or("");
+            let range = req
+               .headers
+               .get("Range")
+               .and_then(|v| v.to_str().ok())
+               .unwrap_or("");
             // Parse bytes=start-end
-            let mut start = 0u64; let mut end = total_len - 1;
+            let mut start = 0u64;
+            let mut end = total_len - 1;
             if let Some(idx) = range.find('=') {
-               let spec = &range[idx+1..];
+               let spec = &range[idx + 1..];
                if let Some(dash) = spec.find('-') {
                   let a = &spec[..dash];
-                  let b = &spec[dash+1..];
-                  if !a.is_empty() { start = a.parse::<u64>().unwrap_or(0); }
-                  if !b.is_empty() { end = b.parse::<u64>().unwrap_or(end); }
+                  let b = &spec[dash + 1..];
+                  if !a.is_empty() {
+                     start = a.parse::<u64>().unwrap_or(0);
+                  }
+                  if !b.is_empty() {
+                     end = b.parse::<u64>().unwrap_or(end);
+                  }
                }
             }
-            if end >= total_len { end = total_len - 1; }
-            if start > end { start = end; }
-            let s = start as usize; let e = end as usize;
+            if end >= total_len {
+               end = total_len - 1;
+            }
+            if start > end {
+               start = end;
+            }
+            let s = start as usize;
+            let e = end as usize;
             let body = source[s..=e].to_vec();
             tpl = tpl.set_body_bytes(body);
-            tpl = tpl.insert_header("Content-Range", format!("bytes {}-{}/{}", start, end, total_len));
+            tpl = tpl.insert_header(
+               "Content-Range",
+               format!("bytes {}-{}/{}", start, end, total_len),
+            );
             tpl
          })
          .mount(&server)
@@ -257,27 +294,56 @@ mod tests {
       // Request a clip that should include samples 2 and 3 (times [1.0, 3.0))
       let url = server.uri();
       // Instead of sink(), collect into a buffer using a simple Vec sink
-      struct Collect { buf: Vec<u8> }
-      impl Collect { fn new() -> Self { Self { buf: Vec::new() } } }
-      impl AsyncWrite for Collect {
-         fn poll_write(mut self: std::pin::Pin<&mut Self>, _cx: &mut std::task::Context<'_>, buf: &[u8]) -> std::task::Poll<io::Result<usize>> {
-            self.buf.extend_from_slice(buf); std::task::Poll::Ready(Ok(buf.len()))
+      struct Collect {
+         buf: Vec<u8>,
+      }
+      impl Collect {
+         fn new() -> Self {
+            Self { buf: Vec::new() }
          }
-         fn poll_flush(self: std::pin::Pin<&mut Self>, _cx: &mut std::task::Context<'_>) -> std::task::Poll<io::Result<()>> { std::task::Poll::Ready(Ok(())) }
-         fn poll_shutdown(self: std::pin::Pin<&mut Self>, _cx: &mut std::task::Context<'_>) -> std::task::Poll<io::Result<()>> { std::task::Poll::Ready(Ok(())) }
+      }
+      impl AsyncWrite for Collect {
+         fn poll_write(
+            mut self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+            buf: &[u8],
+         ) -> std::task::Poll<io::Result<usize>> {
+            self.buf.extend_from_slice(buf);
+            std::task::Poll::Ready(Ok(buf.len()))
+         }
+         fn poll_flush(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+         ) -> std::task::Poll<io::Result<()>> {
+            std::task::Poll::Ready(Ok(()))
+         }
+         fn poll_shutdown(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+         ) -> std::task::Poll<io::Result<()>> {
+            std::task::Poll::Ready(Ok(()))
+         }
       }
       let mut collect = Collect::new();
 
-      stream_clip_to_writer(&url, 1.0, 3.0, &mut collect).await.unwrap();
+      stream_clip_to_writer(&url, 1.0, 3.0, &mut collect)
+         .await
+         .unwrap();
       let out = collect.buf;
 
       // Validate basic structure
       assert_eq!(&out[4..8], b"ftyp");
       let moov_off = u32::from_be_bytes([out[0], out[1], out[2], out[3]]) as usize;
-      assert_eq!(&out[moov_off+4..moov_off+8], b"moov");
-      let mdat_off = moov_off + u32::from_be_bytes([out[moov_off], out[moov_off+1], out[moov_off+2], out[moov_off+3]]) as usize;
-      assert_eq!(&out[mdat_off+4..mdat_off+8], b"mdat");
-      let payload = &out[mdat_off+8..];
+      assert_eq!(&out[moov_off + 4..moov_off + 8], b"moov");
+      let mdat_off = moov_off
+         + u32::from_be_bytes([
+            out[moov_off],
+            out[moov_off + 1],
+            out[moov_off + 2],
+            out[moov_off + 3],
+         ]) as usize;
+      assert_eq!(&out[mdat_off + 4..mdat_off + 8], b"mdat");
+      let payload = &out[mdat_off + 8..];
 
       // v1 aligns start to previous keyframe; with only keyframe at sample 1, output includes s1+s2+s3
       let expected = [s1.as_slice(), s2.as_slice(), s3.as_slice()].concat();

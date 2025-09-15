@@ -117,7 +117,9 @@ impl HttpStreamReader {
 #[async_trait]
 impl StreamReader for HttpStreamReader {
    async fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-      if buf.is_empty() { return Ok(0); }
+      if buf.is_empty() {
+         return Ok(0);
+      }
 
       let mut total_copied = 0usize;
       // const FETCH: usize = 1 * 1024 * 1024; // 2 MiB read-ahead for high-bitrate content
@@ -135,11 +137,15 @@ impl StreamReader for HttpStreamReader {
             self.cache_pos += take;
             self.position += take as u64;
             total_copied += take;
-            if total_copied == buf.len() { return Ok(total_copied); }
+            if total_copied == buf.len() {
+               return Ok(total_copied);
+            }
          }
 
          // If at EOF, return what we have
-         if self.position >= self.length { return Ok(total_copied); }
+         if self.position >= self.length {
+            return Ok(total_copied);
+         }
 
          // Fetch a new chunk into cache starting at current position
          let remaining = (self.length - self.position) as usize;
@@ -148,13 +154,19 @@ impl StreamReader for HttpStreamReader {
          let end = start + to_fetch as u64 - 1;
          let range_header = format!("bytes={}-{}", start, end);
          let mut req = self.client.get(&self.url).header(RANGE, range_header);
-         for (k, v) in &self.headers { req = req.header(k, v); }
+         for (k, v) in &self.headers {
+            req = req.header(k, v);
+         }
          let resp = req.send().await.map_err(io::Error::other)?;
          let bytes = resp.bytes().await.map_err(io::Error::other)?;
          // Reset cache with the new data
          let b = bytes.as_ref();
-         if b.is_empty() { return Ok(total_copied); }
-         if self.cache.len() < b.len() { self.cache.resize(b.len(), 0); }
+         if b.is_empty() {
+            return Ok(total_copied);
+         }
+         if self.cache.len() < b.len() {
+            self.cache.resize(b.len(), 0);
+         }
          self.cache[..b.len()].copy_from_slice(b);
          self.cache_start = start;
          self.cache_len = b.len();

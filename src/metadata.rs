@@ -6,7 +6,11 @@
 use super::Mp4Box;
 use super::Mp4Nav;
 use super::mp4_path;
-use crate::{Result, helpers::{iter_boxes, moov::find_and_read_moov_box}, stream_reader::StreamReader};
+use crate::{
+   Result,
+   helpers::{iter_boxes, moov::find_and_read_moov_box},
+   stream_reader::StreamReader,
+};
 use std::io::SeekFrom;
 use std::time::Duration;
 
@@ -50,62 +54,89 @@ impl MediaMetadata {
       let duration = data.dur().unwrap_or(0.0);
       let mut items = Vec::new();
 
-      if let Some(meta) = data.nav(&mp4_path!(Moov, Udta, Meta)) {
-         if let Some(ilst) = meta[4..].nav(&mp4_path!(Ilst)) {
-            for (fourcc, payload) in iter_boxes(ilst) {
-               // Read <tag>/data
-               if let Some(data_box) = payload.nav(&mp4_path!(Data)) {
-                  if data_box.len() >= 8 {
-                     let dtype = u32::from_be_bytes([data_box[0], data_box[1], data_box[2], data_box[3]]);
-                     let raw = &data_box[8..];
+      if let Some(meta) = data.nav(&mp4_path!(Moov, Udta, Meta))
+         && let Some(ilst) = meta[4..].nav(&mp4_path!(Ilst))
+      {
+         for (fourcc, payload) in iter_boxes(ilst) {
+            // Read <tag>/data
+            if let Some(data_box) = payload.nav(&mp4_path!(Data))
+               && data_box.len() >= 8
+            {
+               let dtype = u32::from_be_bytes([data_box[0], data_box[1], data_box[2], data_box[3]]);
+               let raw = &data_box[8..];
 
-                     let maybe_text = match dtype {
-                        1 => { // UTF-8
-                           let s = String::from_utf8_lossy(raw).to_string();
-                           Some(s)
-                        }
-                        2 => { // UTF-16 (assume BE unless BOM says LE)
-                           if raw.len() < 2 { None } else {
-                              let (is_le, start) = if raw.len() >= 2 {
-                                 let bom = u16::from_be_bytes([raw[0], raw[1]]);
-                                 if bom == 0xFEFF { (false, 2) } // BE BOM
-                                 else if bom == 0xFFFE { (true, 2) } // LE BOM
-                                 else { (false, 0) }
-                              } else { (false, 0) };
-                              let mut units = Vec::with_capacity((raw.len() - start) / 2);
-                              let mut i = start;
-                              while i + 1 < raw.len() {
-                                 let u = if is_le { u16::from_le_bytes([raw[i], raw[i+1]]) } else { u16::from_be_bytes([raw[i], raw[i+1]]) };
-                                 units.push(u);
-                                 i += 2;
-                              }
-                              if let Ok(s) = String::from_utf16(&units) { Some(s) } else { None }
+               let maybe_text = match dtype {
+                  1 => {
+                     // UTF-8
+                     let s = String::from_utf8_lossy(raw).to_string();
+                     Some(s)
+                  }
+                  2 => {
+                     // UTF-16 (assume BE unless BOM says LE)
+                     if raw.len() < 2 {
+                        None
+                     } else {
+                        let (is_le, start) = if raw.len() >= 2 {
+                           let bom = u16::from_be_bytes([raw[0], raw[1]]);
+                           if bom == 0xFEFF {
+                              (false, 2)
                            }
+                           // BE BOM
+                           else if bom == 0xFFFE {
+                              (true, 2)
+                           }
+                           // LE BOM
+                           else {
+                              (false, 0)
+                           }
+                        } else {
+                           (false, 0)
+                        };
+                        let mut units = Vec::with_capacity((raw.len() - start) / 2);
+                        let mut i = start;
+                        while i + 1 < raw.len() {
+                           let u = if is_le {
+                              u16::from_le_bytes([raw[i], raw[i + 1]])
+                           } else {
+                              u16::from_be_bytes([raw[i], raw[i + 1]])
+                           };
+                           units.push(u);
+                           i += 2;
                         }
-                        _ => None, // Non-text types (e.g., images) are ignored
-                     };
-
-                     if let Some(s0) = maybe_text {
-                        let s = s0.trim_matches(char::from(0)).trim().to_string();
-                        if !s.is_empty() {
-                           let key = fourcc_to_key(fourcc);
-                           let name = map_name(&key).to_string();
-                           items.push(Meta { key, name, value: s });
-                        }
+                        String::from_utf16(&units).ok()
                      }
+                  }
+                  _ => None, // Non-text types (e.g., images) are ignored
+               };
+
+               if let Some(s0) = maybe_text {
+                  let s = s0.trim_matches(char::from(0)).trim().to_string();
+                  if !s.is_empty() {
+                     let key = fourcc_to_key(fourcc);
+                     let name = map_name(&key).to_string();
+                     items.push(Meta {
+                        key,
+                        name,
+                        value: s,
+                     });
                   }
                }
             }
          }
       }
 
-      Self { items, duration: Duration::from_secs_f64(duration) }
+      Self {
+         items,
+         duration: Duration::from_secs_f64(duration),
+      }
    }
 
    /// Return first value for a given logical name (e.g., "title") or key (e.g., "@nam").
    pub fn get(&self, query: &str) -> Option<String> {
       let q = query.trim();
-      if q.is_empty() { return None; }
+      if q.is_empty() {
+         return None;
+      }
 
       // Try friendly name (case-insensitive)
       if let Some(m) = self.items.iter().find(|m| m.name.eq_ignore_ascii_case(q)) {
@@ -117,14 +148,17 @@ impl MediaMetadata {
       }
       // Try mapping query to a canonical friendly name
       let mapped = map_name_from_query(q);
-      self.items
+      self
+         .items
          .iter()
          .find(|m| m.name.eq_ignore_ascii_case(&mapped))
          .map(|m| m.value.clone())
    }
 
    /// Return all items.
-   pub fn get_all(&self) -> &[Meta] { &self.items }
+   pub fn get_all(&self) -> &[Meta] {
+      &self.items
+   }
 }
 
 trait Mp4Duration {
@@ -155,7 +189,6 @@ impl Mp4Duration for [u8] {
    }
 }
 
-
 pub(crate) async fn extract_from_stream(stream: &mut dyn StreamReader) -> Result<MediaMetadata> {
    stream.seek(SeekFrom::Start(0)).await?; // ensure start
    let moov = find_and_read_moov_box(stream).await?;
@@ -165,8 +198,11 @@ pub(crate) async fn extract_from_stream(stream: &mut dyn StreamReader) -> Result
 fn fourcc_to_key(fourcc: [u8; 4]) -> String {
    let mut s = String::with_capacity(4);
    for &b in &fourcc {
-      if b == 0xA9 { s.push('@'); }
-      else { s.push(b as char); }
+      if b == 0xA9 {
+         s.push('@');
+      } else {
+         s.push(b as char);
+      }
    }
    s
 }

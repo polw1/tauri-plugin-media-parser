@@ -1,9 +1,15 @@
 use crate::Mp4Box;
 use tokio::io::{self, AsyncWrite, AsyncWriteExt};
 
-fn be_u16(v: u16) -> [u8; 2] { v.to_be_bytes() }
-fn be_u32(v: u32) -> [u8; 4] { v.to_be_bytes() }
-fn be_u64(v: u64) -> [u8; 8] { v.to_be_bytes() }
+fn be_u16(v: u16) -> [u8; 2] {
+   v.to_be_bytes()
+}
+fn be_u32(v: u32) -> [u8; 4] {
+   v.to_be_bytes()
+}
+fn be_u64(v: u64) -> [u8; 8] {
+   v.to_be_bytes()
+}
 
 fn make_box(typ: [u8; 4], payload: &[u8]) -> Vec<u8> {
    let mut out = Vec::with_capacity(8 + payload.len());
@@ -14,14 +20,32 @@ fn make_box(typ: [u8; 4], payload: &[u8]) -> Vec<u8> {
 }
 
 // Lightweight writer to build box payloads with chained methods
-struct BoxWriter { buf: Vec<u8> }
+struct BoxWriter {
+   buf: Vec<u8>,
+}
 impl BoxWriter {
-   fn new() -> Self { Self { buf: Vec::new() } }
-   fn u16(&mut self, v: u16) -> &mut Self { self.buf.extend_from_slice(&be_u16(v)); self }
-   fn u32(&mut self, v: u32) -> &mut Self { self.buf.extend_from_slice(&be_u32(v)); self }
-   fn u64(&mut self, v: u64) -> &mut Self { self.buf.extend_from_slice(&be_u64(v)); self }
-   fn bytes(&mut self, b: &[u8]) -> &mut Self { self.buf.extend_from_slice(b); self }
-   fn into_box(self, fourcc: [u8; 4]) -> Vec<u8> { make_box(fourcc, &self.buf) }
+   fn new() -> Self {
+      Self { buf: Vec::new() }
+   }
+   fn u16(&mut self, v: u16) -> &mut Self {
+      self.buf.extend_from_slice(&be_u16(v));
+      self
+   }
+   fn u32(&mut self, v: u32) -> &mut Self {
+      self.buf.extend_from_slice(&be_u32(v));
+      self
+   }
+   fn u64(&mut self, v: u64) -> &mut Self {
+      self.buf.extend_from_slice(&be_u64(v));
+      self
+   }
+   fn bytes(&mut self, b: &[u8]) -> &mut Self {
+      self.buf.extend_from_slice(b);
+      self
+   }
+   fn into_box(self, fourcc: [u8; 4]) -> Vec<u8> {
+      make_box(fourcc, &self.buf)
+   }
 }
 
 pub fn build_ftyp_isom() -> Vec<u8> {
@@ -77,7 +101,9 @@ fn build_mvhd(timescale: u32, duration: u64) -> Vec<u8> {
    p.extend_from_slice(&be_u32(0));
    p.extend_from_slice(&be_u32(0x40000000));
    // pre_defined 6*4 + next_track_id
-   for _ in 0..6 { p.extend_from_slice(&be_u32(0)); }
+   for _ in 0..6 {
+      p.extend_from_slice(&be_u32(0));
+   }
    p.extend_from_slice(&be_u32(2));
    make_box(Mp4Box::Mvhd.bytes(), &p)
 }
@@ -96,11 +122,17 @@ fn build_tkhd(track_id: u32, duration: u64, width: u16, height: u16) -> Vec<u8> 
      .u16(0)              // layer
      .u16(0)              // alternate_group
      .u16(0)              // volume 0 for video
-     .u16(0);             // reserved
+     .u16(0); // reserved
    // unity matrix
-   bw.u32(0x00010000).u32(0).u32(0)
-     .u32(0).u32(0x00010000).u32(0)
-     .u32(0).u32(0).u32(0x40000000);
+   bw.u32(0x00010000)
+      .u32(0)
+      .u32(0)
+      .u32(0)
+      .u32(0x00010000)
+      .u32(0)
+      .u32(0)
+      .u32(0)
+      .u32(0x40000000);
    // width, height (16.16)
    let w = ((width as u32) << 16) & 0xFFFF0000;
    let h = ((height as u32) << 16) & 0xFFFF0000;
@@ -116,7 +148,7 @@ fn build_mdhd(timescale: u32, duration: u64, lang: &str) -> Vec<u8> {
      .u32(timescale)
      .u32(duration as u32)
      .u16(language_to_mdhd_bits(lang))
-     .u16(0);     // pre_defined
+     .u16(0); // pre_defined
    bw.into_box(Mp4Box::Mdhd.bytes())
 }
 
@@ -136,7 +168,9 @@ fn build_stts(pairs: &[(u32, u32)]) -> Vec<u8> {
    let mut bw = BoxWriter::new();
    bw.u32(0) // version+flags
      .u32(pairs.len() as u32);
-   for (count, delta) in pairs { bw.u32(*count).u32(*delta); }
+   for (count, delta) in pairs {
+      bw.u32(*count).u32(*delta);
+   }
    bw.into_box(Mp4Box::Stts.bytes())
 }
 
@@ -145,7 +179,9 @@ fn build_stsz(sizes: &[u32]) -> Vec<u8> {
    bw.u32(0) // version+flags
      .u32(0) // sample_size = 0 => table follows
      .u32(sizes.len() as u32);
-   for s in sizes { bw.u32(*s); }
+   for s in sizes {
+      bw.u32(*s);
+   }
    bw.into_box(Mp4Box::Stsz.bytes())
 }
 
@@ -164,12 +200,16 @@ fn build_chunk_offsets_box(offsets: &[u64]) -> Vec<u8> {
    if fits32 {
       let mut bw = BoxWriter::new();
       bw.u32(0).u32(offsets.len() as u32);
-      for o in offsets { bw.u32(*o as u32); }
+      for o in offsets {
+         bw.u32(*o as u32);
+      }
       bw.into_box(Mp4Box::Stco.bytes())
    } else {
       let mut bw = BoxWriter::new();
       bw.u32(0).u32(offsets.len() as u32);
-      for o in offsets { bw.u64(*o); }
+      for o in offsets {
+         bw.u64(*o);
+      }
       bw.into_box(Mp4Box::Co64.bytes())
    }
 }
@@ -178,7 +218,9 @@ fn build_stss(entries_1based: &[u32]) -> Vec<u8> {
    let mut p = Vec::new();
    p.extend_from_slice(&[0, 0, 0, 0]);
    p.extend_from_slice(&be_u32(entries_1based.len() as u32));
-   for e in entries_1based { p.extend_from_slice(&be_u32(*e)); }
+   for e in entries_1based {
+      p.extend_from_slice(&be_u32(*e));
+   }
    make_box(Mp4Box::Stss.bytes(), &p)
 }
 
@@ -233,7 +275,11 @@ fn build_stsd_avc1(width: u16, height: u16, avcc_payload: &[u8]) -> Vec<u8> {
 
 fn build_ctts(pairs: &[(u32, i32)]) -> Vec<u8> {
    // Determine version: if any negative offset, use version 1 (signed); else version 0 (unsigned)
-   let version: u8 = if pairs.iter().any(|&(_, off)| off < 0) { 1 } else { 0 };
+   let version: u8 = if pairs.iter().any(|&(_, off)| off < 0) {
+      1
+   } else {
+      0
+   };
    let mut p = Vec::new();
    p.extend_from_slice(&[version, 0, 0, 0]); // version + flags
    p.extend_from_slice(&be_u32(pairs.len() as u32));
@@ -242,10 +288,16 @@ fn build_ctts(pairs: &[(u32, i32)]) -> Vec<u8> {
       if version == 0 {
          p.extend_from_slice(&be_u32(*off as u32));
       } else {
-         p.extend_from_slice(&(*off as i32).to_be_bytes());
+         p.extend_from_slice(&(*off).to_be_bytes());
       }
    }
    make_box(*b"ctts", &p)
+}
+
+struct VideoTrackParams<'a> {
+   width: u16,
+   height: u16,
+   avcc_payload: &'a [u8],
 }
 
 fn build_stbl(
@@ -254,21 +306,25 @@ fn build_stbl(
    ctts_pairs: Option<&[(u32, i32)]>,
    sync_1based: Option<&[u32]>,
    offsets: &[u64],
-   width: u16,
-   height: u16,
-   avcc_payload: &[u8],
+   video_params: VideoTrackParams,
 ) -> Vec<u8> {
    let mut content = Vec::new();
-   content.extend_from_slice(&build_stsd_avc1(width, height, avcc_payload));
+   content.extend_from_slice(&build_stsd_avc1(
+      video_params.width,
+      video_params.height,
+      video_params.avcc_payload,
+   ));
    content.extend_from_slice(&build_stts(stts_pairs));
-   if let Some(ctts) = ctts_pairs { content.extend_from_slice(&build_ctts(ctts)); }
+   if let Some(ctts) = ctts_pairs {
+      content.extend_from_slice(&build_ctts(ctts));
+   }
    content.extend_from_slice(&build_stsz(sizes));
    content.extend_from_slice(&build_stsc_one_sample_per_chunk());
    content.extend_from_slice(&build_chunk_offsets_box(offsets));
-   if let Some(s) = sync_1based {
-      if !s.is_empty() {
-         content.extend_from_slice(&build_stss(s));
-      }
+   if let Some(s) = sync_1based
+      && !s.is_empty()
+   {
+      content.extend_from_slice(&build_stss(s));
    }
    make_box(Mp4Box::Stbl.bytes(), &content)
 }
@@ -295,7 +351,9 @@ fn build_trak(track_id: u32, duration: u64, mdia: Vec<u8>, width: u16, height: u
 fn build_moov(mvhd: Vec<u8>, traks: Vec<Vec<u8>>) -> Vec<u8> {
    let mut content = Vec::new();
    content.extend_from_slice(&mvhd);
-   for t in traks { content.extend_from_slice(&t); }
+   for t in traks {
+      content.extend_from_slice(&t);
+   }
    make_box(Mp4Box::Moov.bytes(), &content)
 }
 
@@ -336,18 +394,32 @@ pub fn build_moov_video(params: &VideoMoovParams) -> Vec<u8> {
    let duration_movie = scale_duration(duration_track, track_ts, movie_ts);
 
    let offsets = compute_offsets(params.mdat_base_offset, params.sample_sizes);
+   let video_params = VideoTrackParams {
+      width: params.width,
+      height: params.height,
+      avcc_payload: params.avcc_payload,
+   };
    let stbl = build_stbl(
       params.sample_sizes,
       params.stts_pairs,
       params.ctts_pairs,
       params.sync_samples_1based,
       &offsets,
+      video_params,
+   );
+   let mdia = build_mdia(
+      track_ts,
+      duration_track,
+      params.language.unwrap_or("und"),
+      stbl,
+   );
+   let trak = build_trak(
+      params.track_id,
+      duration_movie,
+      mdia,
       params.width,
       params.height,
-      params.avcc_payload,
    );
-   let mdia = build_mdia(track_ts, duration_track, params.language.unwrap_or("und"), stbl);
-   let trak = build_trak(params.track_id, duration_movie, mdia, params.width, params.height);
    let mvhd = build_mvhd(movie_ts, duration_movie);
    build_moov(mvhd, vec![trak])
 }
@@ -369,14 +441,23 @@ fn scale_duration(track_duration: u64, track_timescale: u32, movie_timescale: u3
 /// size of the preceding `ftyp` box. Returns the finalized `moov` bytes and
 /// the computed `mdat_base_offset`.
 fn finalize_moov(meta: &VideoMoovParams, ftyp_len: usize) -> (Vec<u8>, u64) {
-   let tmp_params = VideoMoovParams { mdat_base_offset: 0, ..*meta };
+   let tmp_params = VideoMoovParams {
+      mdat_base_offset: 0,
+      ..*meta
+   };
    let moov_tmp = build_moov_video(&tmp_params);
    let mdat_base = (ftyp_len as u64) + (moov_tmp.len() as u64) + 8u64;
-   let params2 = VideoMoovParams { mdat_base_offset: mdat_base, ..*meta };
+   let params2 = VideoMoovParams {
+      mdat_base_offset: mdat_base,
+      ..*meta
+   };
    let moov = build_moov_video(&params2);
    let mdat_base2 = (ftyp_len as u64) + (moov.len() as u64) + 8u64;
    if mdat_base2 != mdat_base {
-      let params3 = VideoMoovParams { mdat_base_offset: mdat_base2, ..*meta };
+      let params3 = VideoMoovParams {
+         mdat_base_offset: mdat_base2,
+         ..*meta
+      };
       let moov2 = build_moov_video(&params3);
       (moov2, mdat_base2)
    } else {
@@ -415,7 +496,12 @@ pub fn build_segment_headers(meta: &VideoMoovParams, total_payload_size: u64) ->
    let ftyp = build_ftyp_isom();
    let (moov, mdat_base) = finalize_moov(meta, ftyp.len());
    let mdat_header = build_mdat_header(total_payload_size);
-   SegmentHeaders { ftyp, moov, mdat_header, mdat_base }
+   SegmentHeaders {
+      ftyp,
+      moov,
+      mdat_header,
+      mdat_base,
+   }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -435,9 +521,15 @@ pub struct CoalescedRange {
 /// Group contiguous or near-contiguous samples into read ranges.
 /// max_gap controls the tolerated hole between samples included in a group.
 pub fn coalesce_sample_reads(samples: &[SampleRef], max_gap: u64) -> Vec<CoalescedRange> {
-   if samples.is_empty() { return Vec::new(); }
+   if samples.is_empty() {
+      return Vec::new();
+   }
    let mut out: Vec<CoalescedRange> = Vec::new();
-   let mut cur = CoalescedRange { start: samples[0].src_offset, len: samples[0].size as usize, parts: vec![(0, samples[0].size as usize)] };
+   let mut cur = CoalescedRange {
+      start: samples[0].src_offset,
+      len: samples[0].size as usize,
+      parts: vec![(0, samples[0].size as usize)],
+   };
    let mut cur_end = cur.start + cur.len as u64;
    for s in &samples[1..] {
       let s_start = s.src_offset;
@@ -446,10 +538,17 @@ pub fn coalesce_sample_reads(samples: &[SampleRef], max_gap: u64) -> Vec<Coalesc
          // Extend current range, include gap if any
          let part_off = (s_start - cur.start) as usize;
          cur.parts.push((part_off, s.size as usize));
-         if s_end > cur_end { cur_end = s_end; cur.len = (cur_end - cur.start) as usize; }
+         if s_end > cur_end {
+            cur_end = s_end;
+            cur.len = (cur_end - cur.start) as usize;
+         }
       } else {
          out.push(cur);
-         cur = CoalescedRange { start: s_start, len: s.size as usize, parts: vec![(0, s.size as usize)] };
+         cur = CoalescedRange {
+            start: s_start,
+            len: s.size as usize,
+            parts: vec![(0, s.size as usize)],
+         };
          cur_end = s_end;
       }
    }
@@ -470,7 +569,12 @@ pub async fn stream_mp4_segment(
    let payload_size: u64 = sample_sizes.iter().map(|s| *s as u64).sum();
 
    // Build headers
-   let SegmentHeaders { ftyp, moov, mdat_header, .. } = build_segment_headers(meta, payload_size);
+   let SegmentHeaders {
+      ftyp,
+      moov,
+      mdat_header,
+      ..
+   } = build_segment_headers(meta, payload_size);
 
    // Write ftyp and moov
    sink.write_all(&ftyp).await?;
@@ -495,7 +599,7 @@ pub async fn stream_mdat_payload(
    samples: &[SampleRef],
    sink: &mut (impl AsyncWrite + Unpin),
 ) -> io::Result<()> {
-   const CHUNK: usize = 1 * 1024 * 1024; // 1 MiB chunk for better throughput
+   const CHUNK: usize = 1024 * 1024; // 1 MiB chunk for better throughput
    let groups = coalesce_sample_reads(samples, 0);
    stream_coalesced_groups(src, &groups, sink, CHUNK).await?;
    sink.flush().await?;
@@ -519,7 +623,9 @@ async fn stream_coalesced_groups(
             let to_read = remaining.min(chunk_size);
             let mut buf = vec![0u8; to_read];
             let n = src.read(&mut buf).await?;
-            if n == 0 { break; }
+            if n == 0 {
+               break;
+            }
             sink.write_all(&buf[..n]).await?;
             remaining -= n;
             absolute += n as u64;
@@ -532,7 +638,9 @@ async fn stream_coalesced_groups(
 #[cfg(test)]
 mod tests {
    use super::*;
-   use crate::helpers::{extract_track_tables, language_from_mdhd, moov_payload, iter_boxes, stsd_entry_types, Mp4Nav};
+   use crate::helpers::{
+      Mp4Nav, extract_track_tables, iter_boxes, language_from_mdhd, moov_payload, stsd_entry_types,
+   };
    use crate::mp4_path;
    use tokio::io::AsyncWrite;
 
@@ -578,7 +686,10 @@ mod tests {
       // Find trak
       let mut trak_payload = None;
       for (typ, pl) in iter_boxes(payload) {
-         if typ == Mp4Box::Trak.bytes() { trak_payload = Some(pl); break; }
+         if typ == Mp4Box::Trak.bytes() {
+            trak_payload = Some(pl);
+            break;
+         }
       }
       let trak = trak_payload.expect("trak present");
 
@@ -590,7 +701,9 @@ mod tests {
       assert_eq!(ts, 1000);
 
       // Validate stsd codec type
-      let stsd = trak.nav(&mp4_path!(Mdia, Minf, Stbl, Stsd)).expect("stsd present");
+      let stsd = trak
+         .nav(&mp4_path!(Mdia, Minf, Stbl, Stsd))
+         .expect("stsd present");
       let types = stsd_entry_types(stsd);
       assert_eq!(&types[0], b"avc1");
       // Ensure width/height are readable at expected offsets (per tracks.rs)
@@ -615,7 +728,9 @@ mod tests {
    }
 
    impl MemStream {
-      fn from_data(data: Vec<u8>) -> Self { Self { data, pos: 0 } }
+      fn from_data(data: Vec<u8>) -> Self {
+         Self { data, pos: 0 }
+      }
    }
 
    #[async_trait::async_trait]
@@ -631,22 +746,46 @@ mod tests {
          let new = match pos {
             std::io::SeekFrom::Start(o) => o,
             std::io::SeekFrom::End(o) => {
-               if o >= 0 { self.data.len() as u64 + o as u64 } else { (self.data.len() as u64).saturating_sub((-o) as u64) }
+               if o >= 0 {
+                  self.data.len() as u64 + o as u64
+               } else {
+                  (self.data.len() as u64).saturating_sub((-o) as u64)
+               }
             }
             std::io::SeekFrom::Current(o) => {
-               if o >= 0 { self.pos + o as u64 } else { self.pos.saturating_sub((-o) as u64) }
+               if o >= 0 {
+                  self.pos + o as u64
+               } else {
+                  self.pos.saturating_sub((-o) as u64)
+               }
             }
          };
          self.pos = new;
          Ok(self.pos)
       }
-      async fn size(&self) -> std::io::Result<Option<u64>> { Ok(Some(self.data.len() as u64)) }
+      async fn size(&self) -> std::io::Result<Option<u64>> {
+         Ok(Some(self.data.len() as u64))
+      }
    }
 
-   struct CollectSink { buf: Vec<u8> }
-   impl CollectSink { fn new() -> Self { Self { buf: Vec::new() } } }
-   impl AsRef<[u8]> for CollectSink { fn as_ref(&self) -> &[u8] { &self.buf } }
-   impl CollectSink { fn into_inner(self) -> Vec<u8> { self.buf } }
+   struct CollectSink {
+      buf: Vec<u8>,
+   }
+   impl CollectSink {
+      fn new() -> Self {
+         Self { buf: Vec::new() }
+      }
+   }
+   impl AsRef<[u8]> for CollectSink {
+      fn as_ref(&self) -> &[u8] {
+         &self.buf
+      }
+   }
+   impl CollectSink {
+      fn into_inner(self) -> Vec<u8> {
+         self.buf
+      }
+   }
 
    impl AsyncWrite for CollectSink {
       fn poll_write(
@@ -660,11 +799,15 @@ mod tests {
       fn poll_flush(
          self: std::pin::Pin<&mut Self>,
          _cx: &mut std::task::Context<'_>,
-      ) -> std::task::Poll<std::io::Result<()>> { std::task::Poll::Ready(Ok(())) }
+      ) -> std::task::Poll<std::io::Result<()>> {
+         std::task::Poll::Ready(Ok(()))
+      }
       fn poll_shutdown(
          self: std::pin::Pin<&mut Self>,
          _cx: &mut std::task::Context<'_>,
-      ) -> std::task::Poll<std::io::Result<()>> { std::task::Poll::Ready(Ok(())) }
+      ) -> std::task::Poll<std::io::Result<()>> {
+         std::task::Poll::Ready(Ok(()))
+      }
    }
 
    #[tokio::test]
@@ -681,9 +824,18 @@ mod tests {
 
       // samples
       let samples = vec![
-         SampleRef { src_offset: 100, size: 4 },
-         SampleRef { src_offset: 500, size: 6 },
-         SampleRef { src_offset: 700, size: 3 },
+         SampleRef {
+            src_offset: 100,
+            size: 4,
+         },
+         SampleRef {
+            src_offset: 500,
+            size: 6,
+         },
+         SampleRef {
+            src_offset: 700,
+            size: 3,
+         },
       ];
 
       // timing: 3 samples of 1s at 1000 Hz
@@ -709,21 +861,28 @@ mod tests {
       };
 
       let mut sink = CollectSink::new();
-      stream_mp4_segment(&mut src, &meta, &samples, &mut sink).await.unwrap();
+      stream_mp4_segment(&mut src, &meta, &samples, &mut sink)
+         .await
+         .unwrap();
       let out = sink.into_inner();
 
       // Parse first two boxes to get mdat base
       let ftyp_len = u32::from_be_bytes([out[0], out[1], out[2], out[3]]) as usize;
       assert_eq!(&out[4..8], b"ftyp");
       let moov_off = ftyp_len;
-      let moov_len = u32::from_be_bytes([out[moov_off], out[moov_off+1], out[moov_off+2], out[moov_off+3]]) as usize;
-      assert_eq!(&out[moov_off+4..moov_off+8], b"moov");
+      let moov_len = u32::from_be_bytes([
+         out[moov_off],
+         out[moov_off + 1],
+         out[moov_off + 2],
+         out[moov_off + 3],
+      ]) as usize;
+      assert_eq!(&out[moov_off + 4..moov_off + 8], b"moov");
       let mdat_header_off = moov_off + moov_len;
-      assert_eq!(&out[mdat_header_off+4..mdat_header_off+8], b"mdat");
+      assert_eq!(&out[mdat_header_off + 4..mdat_header_off + 8], b"mdat");
       let mdat_base = (mdat_header_off + 8) as u64;
 
       // Validate that mdat payload equals concatenated sample bytes
-      let payload = &out[mdat_header_off+8..];
+      let payload = &out[mdat_header_off + 8..];
       let expected = [s1.as_slice(), s2.as_slice(), s3.as_slice()].concat();
       assert_eq!(payload, &expected);
 
@@ -733,7 +892,10 @@ mod tests {
       // find trak
       let mut trak_payload = None;
       for (typ, pl) in iter_boxes(moov_payload) {
-         if typ == Mp4Box::Trak.bytes() { trak_payload = Some(pl); break; }
+         if typ == Mp4Box::Trak.bytes() {
+            trak_payload = Some(pl);
+            break;
+         }
       }
       let trak = trak_payload.expect("trak present");
       let tables = extract_track_tables(trak).expect("tables");
@@ -745,18 +907,30 @@ mod tests {
    #[test]
    fn coalesces_contiguous_and_splits_gaps() {
       let samples = vec![
-         SampleRef { src_offset: 0, size: 4 },
-         SampleRef { src_offset: 4, size: 2 }, // contiguous
-         SampleRef { src_offset: 20, size: 3 }, // gap
-         SampleRef { src_offset: 23, size: 1 }, // contiguous with previous
+         SampleRef {
+            src_offset: 0,
+            size: 4,
+         },
+         SampleRef {
+            src_offset: 4,
+            size: 2,
+         }, // contiguous
+         SampleRef {
+            src_offset: 20,
+            size: 3,
+         }, // gap
+         SampleRef {
+            src_offset: 23,
+            size: 1,
+         }, // contiguous with previous
       ];
       let groups = coalesce_sample_reads(&samples, 0);
       assert_eq!(groups.len(), 2);
       assert_eq!(groups[0].start, 0);
       assert_eq!(groups[0].len, 6);
-      assert_eq!(groups[0].parts, vec![(0,4),(4,2)]);
+      assert_eq!(groups[0].parts, vec![(0, 4), (4, 2)]);
       assert_eq!(groups[1].start, 20);
       assert_eq!(groups[1].len, 4);
-      assert_eq!(groups[1].parts, vec![(0,3),(3,1)]);
+      assert_eq!(groups[1].parts, vec![(0, 3), (3, 1)]);
    }
 }
