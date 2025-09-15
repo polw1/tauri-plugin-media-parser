@@ -2,7 +2,7 @@ use crate::{mp4_path, stream_reader::StreamReader};
 use std::convert::TryInto;
 use std::io::{self, SeekFrom};
 pub mod moov;
-// ENUM PARA BOXES MP4 (muito mais legível!)
+
 #[derive(Debug, Clone, Copy)]
 pub enum Mp4Box {
    Moov, // Movie box
@@ -17,6 +17,7 @@ pub enum Mp4Box {
    Co64, // 64-bit chunk offset box
    Stts, // Time-to-sample box
    Stsc, // Sample-to-chunk box
+   Ctts, // Composition time to sample box
    Stsd, // Sample description box
    Stss, // Sync sample box
    Mvhd, // Movie header box
@@ -42,6 +43,7 @@ impl Mp4Box {
          Self::Co64 => *b"co64",
          Self::Stts => *b"stts",
          Self::Stsc => *b"stsc",
+         Self::Ctts => *b"ctts",
          Self::Stsd => *b"stsd",
          Self::Stss => *b"stss",
          Self::Mvhd => *b"mvhd",
@@ -198,6 +200,7 @@ pub struct TrackTables {
    pub offsets: Vec<u64>,
    pub timing: Vec<(u32, u32)>,
    pub stsc: Vec<(u32, u32)>,
+   pub ctts: Option<Vec<(u32, i32)>>,
 }
 
 /// Extract common per-track tables used by sample iteration.
@@ -219,13 +222,66 @@ pub fn extract_track_tables(trak: &[u8]) -> Option<TrackTables> {
    let stsc = trak
       .nav(&mp4_path!(Mdia, Minf, Stbl, Stsc))?
       .extract_stsc_pairs();
+   // Optional CTTS
+   let ctts = extract_ctts_pairs(trak);
    Some(TrackTables {
       timescale,
       sizes,
       offsets,
       timing,
       stsc,
+      ctts,
    })
+}
+
+/// Parse `ctts` pairs (sample_count, sample_offset) from a video `trak` if present.
+/// Returns Some(Vec, version) where version is 0 (unsigned offsets) or 1 (signed offsets).
+pub fn extract_ctts_pairs(trak: &[u8]) -> Option<Vec<(u32, i32)>> {
+   let ctts = trak.nav(&mp4_path!(Mdia, Minf, Stbl, Ctts))?;
+   if ctts.len() < 8 { return None; }
+   let version = ctts[0];
+   // flags = ctts[1..4]
+   let count = u32::from_be_bytes([ctts[4], ctts[5], ctts[6], ctts[7]]) as usize;
+   let mut out: Vec<(u32, i32)> = Vec::with_capacity(count);
+   let mut off = 8usize;
+   for _ in 0..count {
+      if off + 8 > ctts.len() { break; }
+      let sample_count = u32::from_be_bytes([ctts[off], ctts[off+1], ctts[off+2], ctts[off+3]]);
+      let raw = u32::from_be_bytes([ctts[off+4], ctts[off+5], ctts[off+6], ctts[off+7]]);
+      let sample_offset = if version == 0 { raw as i32 } else { i32::from_be_bytes([ctts[off+4], ctts[off+5], ctts[off+6], ctts[off+7]]) };
+      out.push((sample_count, sample_offset));
+      off += 8;
+   }
+   Some(out)
+}
+
+/// Slice `ctts` timing pairs to a selected sample range [start, end) and
+/// return a compacted list of `(count, offset)` covering somente esse subconjunto.
+pub fn slice_ctts_pairs(pairs: &[(u32, i32)], start: usize, end: usize) -> Vec<(u32, i32)> {
+   if start >= end { return Vec::new(); }
+   let mut out: Vec<(u32, i32)> = Vec::new();
+   let mut idx: usize = 0;
+   for &(count, offset) in pairs {
+      let run_start = idx;
+      let run_end = idx + (count as usize);
+      let s = run_start.max(start);
+      let e = run_end.min(end);
+      if s < e {
+         let take = (e - s) as u32;
+         if let Some(last) = out.last_mut() {
+            if last.1 == offset {
+               last.0 = last.0.saturating_add(take);
+            } else {
+               out.push((take, offset));
+            }
+         } else {
+            out.push((take, offset));
+         }
+      }
+      idx = run_end;
+      if idx >= end { break; }
+   }
+   out
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -266,6 +322,128 @@ pub fn enumerate_samples(tables: &TrackTables) -> Vec<SampleInfo> {
       }
    }
    out
+}
+
+/// Return the list of sync sample indices (1-based as stored in `stss`).
+///
+/// If the provided `trak` has no `stss` box, returns an empty vector.
+pub fn extract_sync_samples(trak: &[u8]) -> Vec<u32> {
+   if let Some(stss) = trak.nav(&mp4_path!(Mdia, Minf, Stbl, Stss)) {
+      // stss payload: version+flags (4) + entry_count (4) + entries (u32 each)
+      if stss.len() < 8 { return Vec::new(); }
+      let count = u32::from_be_bytes([stss[4], stss[5], stss[6], stss[7]]) as usize;
+      let mut out = Vec::with_capacity(count);
+      let mut off = 8usize;
+      for _ in 0..count {
+         if off + 4 > stss.len() { break; }
+         let v = u32::from_be_bytes([stss[off], stss[off+1], stss[off+2], stss[off+3]]);
+         out.push(v);
+         off += 4;
+      }
+      return out;
+   }
+   Vec::new()
+}
+
+/// Selection result describing which samples fall into a requested time range.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TimeSelection {
+   /// First selected sample index (0-based).
+   pub start_index: usize,
+   /// Last selected sample index (inclusive, 0-based).
+   pub end_index: usize,
+   /// Adjusted start time (actual start of `start_index`).
+   pub adjusted_start: f64,
+   /// Actual end time (start of the sample after `end_index`, or last sample end).
+   pub adjusted_end: f64,
+}
+
+/// Build per-sample timestamps from `(count, delta)` timing pairs.
+/// This mirrors `build_timestamps` but returns a vector for internal reuse.
+fn timestamps_from_pairs(timescale: u32, timing: &[(u32, u32)]) -> Vec<(f64, f64)> {
+   build_timestamps(timescale, timing)
+}
+
+/// Given MP4 timing tables and optional sync samples, select sample indices
+/// that cover the interval `[start, end)` in seconds.
+///
+/// - If `stss` is provided, the start aligns to the previous keyframe.
+/// - The end is truncated so that all samples with `start_time < end` are included.
+/// - Returns an error if `start >= end` or if no samples exist.
+pub fn select_samples_by_time(
+   timescale: u32,
+   timing: &[(u32, u32)],
+   stss_1based: Option<&[u32]>,
+   start: f64,
+   end: f64,
+) -> Result<TimeSelection, &'static str> {
+   if !(end.is_finite() && start.is_finite()) || end <= start {
+      return Err("invalid time range");
+   }
+   let samples = timestamps_from_pairs(timescale, timing);
+   if samples.is_empty() {
+      return Err("no samples");
+   }
+
+   // Find the sample index containing or immediately preceding `start`.
+   let mut idx_at_or_before_start = 0usize;
+   for (i, (s, d)) in samples.iter().enumerate() {
+      if *s <= start && start < s + d {
+         idx_at_or_before_start = i;
+         break;
+      }
+      if *s <= start {
+         idx_at_or_before_start = i;
+      }
+   }
+
+   // Align to previous keyframe if provided.
+   let start_index = if let Some(stss) = stss_1based {
+      if stss.is_empty() {
+         idx_at_or_before_start
+      } else {
+         // Convert to 0-based indices and find the greatest <= idx.
+         let mut sync_idx = 0usize;
+         let mut found = false;
+         for &n in stss {
+            if n == 0 { continue; }
+            let z = (n - 1) as usize;
+            if z <= idx_at_or_before_start {
+               sync_idx = z;
+               found = true;
+            } else {
+               break;
+            }
+         }
+         if found { sync_idx } else { 0 }
+      }
+   } else {
+      idx_at_or_before_start
+   };
+
+   // Include all samples with start < end.
+   let mut end_index = start_index;
+   for i in start_index..samples.len() {
+      let (s, _d) = samples[i];
+      if s < end {
+         end_index = i;
+      } else {
+         break;
+      }
+   }
+   if end_index < start_index {
+      return Err("empty selection");
+   }
+
+   let adjusted_start = samples[start_index].0;
+   let last = samples[end_index];
+   let adjusted_end = last.0 + last.1;
+   Ok(TimeSelection {
+      start_index,
+      end_index,
+      adjusted_start,
+      adjusted_end,
+   })
 }
 
 /// Iterator over child MP4 boxes of a given payload.
@@ -359,6 +537,206 @@ pub async fn read_sample(
    Ok(buf)
 }
 
+// --------------------
+// Shared video helpers
+// --------------------
+
+/// Find the first video `trak` payload inside a `moov` payload.
+/// The input slice should be the payload of the `moov` box (use `moov_payload`).
+pub fn find_first_video_trak(moov_pl: &[u8]) -> Option<&[u8]> {
+   for (typ, payload) in iter_boxes(moov_pl) {
+      if typ == Mp4Box::Trak.bytes() {
+         if let Some(mdia) = payload.nav(&crate::mp4_path!(Mdia)) {
+            if let Some(hdlr) = mdia.nav(&crate::mp4_path!(Hdlr)) {
+               if hdlr.len() >= 12 && &hdlr[8..12] == b"vide" {
+                  return Some(payload);
+               }
+            }
+         }
+      }
+   }
+   None
+}
+
+/// Find the video `trak` with a specific `track_id` inside a `moov` payload.
+#[allow(dead_code)]
+pub fn find_video_trak_by_id(moov_pl: &[u8], track_id: u32) -> Option<&[u8]> {
+   for (typ, payload) in iter_boxes(moov_pl) {
+      if typ != Mp4Box::Trak.bytes() { continue; }
+      let id = payload
+         .nav(&crate::mp4_path!(Tkhd))
+         .and_then(track_id_from_tkhd)
+         .unwrap_or(0);
+      if id == track_id {
+         let is_video = payload
+            .nav(&crate::mp4_path!(Mdia, Hdlr))
+            .map(|h| h.len() >= 12 && &h[8..12] == b"vide")
+            .unwrap_or(false);
+         if is_video { return Some(payload); }
+      }
+   }
+   None
+}
+
+/// Slice `stts` timing pairs to a selected sample range [start, end) and
+/// return a compacted list of `(count, delta)` covering only that subset.
+pub fn slice_stts_pairs(pairs: &[(u32, u32)], start: usize, end: usize) -> Vec<(u32, u32)> {
+   if start >= end { return Vec::new(); }
+   let mut out: Vec<(u32, u32)> = Vec::new();
+   let mut idx: usize = 0;
+   for &(count, delta) in pairs {
+      let run_start = idx;
+      let run_end = idx + (count as usize);
+      // Overlap with [start, end)
+      let s = run_start.max(start);
+      let e = run_end.min(end);
+      if s < e {
+         let take = (e - s) as u32;
+         // Merge with previous if same delta
+         if let Some(last) = out.last_mut() {
+            if last.1 == delta {
+               last.0 = last.0.saturating_add(take);
+            } else {
+               out.push((take, delta));
+            }
+         } else {
+            out.push((take, delta));
+         }
+      }
+      idx = run_end;
+      if idx >= end { break; }
+   }
+   out
+}
+
+/// Information extracted from an H.264 avc1/avc3 entry.
+pub struct AvcInfo {
+   pub avcc_payload: Vec<u8>,
+   pub sps: Vec<u8>,
+   pub pps: Vec<u8>,
+   pub width: u16,
+   pub height: u16,
+}
+
+fn parse_avcc_sps_pps(data: &[u8]) -> Option<(Vec<u8>, Vec<u8>)> {
+   if data.len() < 7 { return None; }
+   let mut pos = 6;
+   let num_sps = data.get(5).copied().unwrap_or(0) & 0x1f;
+   if num_sps == 0 || pos + 2 > data.len() { return None; }
+   let sps_len = u16::from_be_bytes([data[pos], data[pos + 1]]) as usize;
+   pos += 2;
+   if pos + sps_len > data.len() { return None; }
+   let sps = data[pos..pos + sps_len].to_vec();
+   pos += sps_len;
+   if pos >= data.len() { return None; }
+   let num_pps = data[pos] as usize;
+   pos += 1;
+   if num_pps == 0 || pos + 2 > data.len() { return None; }
+   let pps_len = u16::from_be_bytes([data[pos], data[pos + 1]]) as usize;
+   pos += 2;
+   if pos + pps_len > data.len() { return None; }
+   let pps = data[pos..pos + pps_len].to_vec();
+   Some((sps, pps))
+}
+
+/// Extract avcC payload, SPS/PPS and dimensions from a video `trak`.
+pub fn extract_avc_from_trak(trak: &[u8]) -> Option<AvcInfo> {
+   let stsd = trak.nav(&crate::mp4_path!(Mdia, Minf, Stbl, Stsd))?;
+   if stsd.len() < 16 { return None; }
+   // First entry
+   let entry_size = u32::from_be_bytes([stsd[8], stsd[9], stsd[10], stsd[11]]) as usize;
+   let entry_type = &stsd[12..16];
+   if entry_type != b"avc1" && entry_type != b"avc3" { return None; }
+   let entry = &stsd[16..16+entry_size-8];
+   if entry.len() < 78 { return None; }
+   let width = u16::from_be_bytes([entry[24], entry[25]]);
+   let height = u16::from_be_bytes([entry[26], entry[27]]);
+   // Scan child boxes inside entry for avcC
+   let mut off = 78usize; // skip VisualSampleEntry fields
+   while off + 8 <= entry.len() {
+      let sz = u32::from_be_bytes([entry[off], entry[off+1], entry[off+2], entry[off+3]]) as usize;
+      if sz < 8 || off + sz > entry.len() { break; }
+      if &entry[off+4..off+8] == b"avcC" {
+         let avcc = &entry[off+8..off+sz];
+         if let Some((sps, pps)) = parse_avcc_sps_pps(avcc) {
+            return Some(AvcInfo {
+               avcc_payload: avcc.to_vec(),
+               sps,
+               pps,
+               width,
+               height,
+            });
+         } else {
+            return Some(AvcInfo {
+               avcc_payload: avcc.to_vec(),
+               sps: Vec::new(),
+               pps: Vec::new(),
+               width,
+               height,
+            });
+         }
+      }
+      off += sz;
+   }
+   None
+}
+
+/// Strategy to select a video track inside a `moov` payload.
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub enum TrackSelector {
+   FirstVideo,
+   ById(u32),
+   ByCodec(String),
+   ByLanguage(String),
+}
+
+/// Select a video `trak` from the `moov` payload based on the selector.
+#[allow(dead_code)]
+pub fn select_video_trak<'a>(moov_pl: &'a [u8], selector: &TrackSelector) -> Option<&'a [u8]> {
+   match selector {
+      TrackSelector::FirstVideo => find_first_video_trak(moov_pl),
+      TrackSelector::ById(id) => find_video_trak_by_id(moov_pl, *id),
+      TrackSelector::ByCodec(want) => {
+         let want_lc = want.to_lowercase();
+         for (typ, payload) in iter_boxes(moov_pl) {
+            if typ != Mp4Box::Trak.bytes() { continue; }
+            let is_video = payload
+               .nav(&mp4_path!(Mdia, Hdlr))
+               .map(|h| h.len() >= 12 && &h[8..12] == b"vide")
+               .unwrap_or(false);
+            if !is_video { continue; }
+            if let Some(stsd) = payload.nav(&mp4_path!(Mdia, Minf, Stbl, Stsd)) {
+               if let Some(fourcc) = stsd_entry_types(stsd).first() {
+                  if let Ok(code) = std::str::from_utf8(fourcc) {
+                     if code.trim_matches('\0').to_lowercase() == want_lc { return Some(payload); }
+                  }
+               }
+            }
+         }
+         None
+      }
+      TrackSelector::ByLanguage(lang) => {
+         let want_lc = lang.to_lowercase();
+         for (typ, payload) in iter_boxes(moov_pl) {
+            if typ != Mp4Box::Trak.bytes() { continue; }
+            let is_video = payload
+               .nav(&mp4_path!(Mdia, Hdlr))
+               .map(|h| h.len() >= 12 && &h[8..12] == b"vide")
+               .unwrap_or(false);
+            if !is_video { continue; }
+            let lang = payload
+               .nav(&mp4_path!(Mdia, Mdhd))
+               .and_then(language_from_mdhd)
+               .unwrap_or_else(|| "und".to_string())
+               .to_lowercase();
+            if lang == want_lc { return Some(payload); }
+         }
+         None
+      }
+   }
+}
+
 pub fn get_samples_in_chunk(chunk_num: u32, sample_to_chunk: &[(u32, u32)]) -> u32 {
    for (i, (first_chunk, samples_per_chunk)) in sample_to_chunk.iter().enumerate() {
       if chunk_num >= *first_chunk {
@@ -421,6 +799,7 @@ mod tests {
          offsets: vec![100, 200],
          timing: vec![(2, 500)], // two samples of 500 each
          stsc: vec![(1, 1)],     // 1 sample per chunk
+         ctts: None,
       };
       let s = enumerate_samples(&tables);
       assert_eq!(s.len(), 2);
@@ -448,5 +827,80 @@ mod tests {
       let mut mdhd = vec![0u8; 22];
       mdhd[20..22].copy_from_slice(&u16::to_be_bytes(0x15C7));
       assert_eq!(language_from_mdhd(&mdhd), Some("eng".to_string()));
+   }
+
+   #[test]
+   fn extract_sync_samples_reads_entries() {
+      // Build a minimal stss payload: version+flags (4) + count (4) + entries
+      let mut stss_payload = vec![0u8; 8];
+      stss_payload[4..8].copy_from_slice(&u32::to_be_bytes(3));
+      stss_payload.extend_from_slice(&u32::to_be_bytes(1));
+      stss_payload.extend_from_slice(&u32::to_be_bytes(5));
+      stss_payload.extend_from_slice(&u32::to_be_bytes(9));
+
+      // Wrap into a box chain: stss under mdia->minf->stbl
+      fn box_with(typ: &[u8;4], payload: &[u8]) -> Vec<u8> {
+         let mut out = Vec::with_capacity(8 + payload.len());
+         out.extend_from_slice(&u32::to_be_bytes((8 + payload.len()) as u32));
+         out.extend_from_slice(typ);
+         out.extend_from_slice(payload);
+         out
+      }
+      let stss_box = box_with(&Mp4Box::Stss.bytes(), &stss_payload);
+      let stbl = box_with(&Mp4Box::Stbl.bytes(), &stss_box);
+      let minf = box_with(&Mp4Box::Minf.bytes(), &stbl);
+      let mdia = box_with(&Mp4Box::Mdia.bytes(), &minf);
+      let trak = box_with(&Mp4Box::Trak.bytes(), &mdia);
+      // Our navigation helpers expect a box payload slice (not including the
+      // 8-byte size+type header). Pass only the trak payload here.
+      let entries = extract_sync_samples(&trak[8..]);
+      assert_eq!(entries, vec![1,5,9]);
+   }
+
+   #[test]
+   fn sample_selection_aligns_to_keyframe_and_truncates_end() {
+      // timescale 1000, 10 samples of 1s
+      let timing = vec![(10, 1000)];
+      // keyframes at samples 1 and 6 (1-based) => indices 0 and 5
+      let stss = vec![1u32, 6u32];
+
+      // request [2.5, 3.2) => nominal around sample 2/3
+      let sel = select_samples_by_time(1000, &timing, Some(&stss), 2.5, 3.2).unwrap();
+      // Should align to previous keyframe at index 0
+      assert_eq!(sel.start_index, 0);
+      // end should include samples with start < 3.2 => indices 0..=3
+      assert_eq!(sel.end_index, 3);
+      assert!((sel.adjusted_start - 0.0).abs() < 1e-9);
+      assert!((sel.adjusted_end - 4.0).abs() < 1e-9);
+   }
+
+   #[test]
+   fn sample_selection_without_stss_starts_at_time_bucket() {
+      let timing = vec![(5, 1000)]; // 5 samples of 1s
+      // No stss provided
+      let sel = select_samples_by_time(1000, &timing, None, 1.1, 2.4).unwrap();
+      // Starts in sample 1 (index 1)
+      assert_eq!(sel.start_index, 1);
+      // Includes samples starting before 2.4 => indices 1..=2
+      assert_eq!(sel.end_index, 2);
+      assert!((sel.adjusted_start - 1.0).abs() < 1e-9);
+      assert!((sel.adjusted_end - 3.0).abs() < 1e-9);
+   }
+
+   #[test]
+   fn sample_selection_rejects_invalid_ranges() {
+      let timing = vec![(2, 1000)];
+      assert!(select_samples_by_time(1000, &timing, None, 1.0, 1.0).is_err());
+      assert!(select_samples_by_time(1000, &timing, None, 2.0, 1.0).is_err());
+   }
+
+   #[test]
+   fn slice_stts_pairs_basic_slices_and_merges() {
+      let pairs = vec![(3, 1000), (2, 500), (1, 500)]; // total 6 samples
+      // take middle 4 samples: indexes [1..5)
+      let out = slice_stts_pairs(&pairs, 1, 5);
+      // Expected: from first run, take 2 with delta 1000; then full second run (2 x 500);
+      // third run excluded.
+      assert_eq!(out, vec![(2, 1000), (2, 500)]);
    }
 }

@@ -3,7 +3,14 @@ use crate::helpers::moov::find_and_read_moov_box;
 use crate::mp4_path;
 use crate::{
    Result,
-   helpers::{enumerate_samples, extract_track_tables, iter_boxes, track_id_from_tkhd},
+   helpers::{
+      enumerate_samples,
+      extract_track_tables,
+      iter_boxes,
+      track_id_from_tkhd,
+      extract_avc_from_trak,
+      extract_sync_samples,
+   },
    stream_reader::StreamReader,
 };
 use image::{ImageOutputFormat, RgbImage};
@@ -65,6 +72,40 @@ impl RawFrame {
          general_purpose::STANDARD.encode(&buffer)
       )
    }
+
+   /// Encode the frame to JPEG bytes, scaling to `max_width` if needed.
+   ///
+   /// Supports `Rgb24` frames. Returns the encoded JPEG as a byte vector.
+   pub fn to_jpeg_scaled_bytes(&self, max_width: u32, quality: u8) -> std::io::Result<Vec<u8>> {
+      use image::DynamicImage;
+      use image::imageops::FilterType;
+
+      // Convert to an ImageBuffer based on supported formats.
+      let rgb_image: RgbImage = match self.format {
+         PixelFormat::Rgb24 => {
+            RgbImage::from_raw(self.width, self.height, self.data.clone())
+               .ok_or_else(|| std::io::Error::other("invalid RGB24 buffer dimensions"))?
+         }
+         _ => return Err(std::io::Error::other("unsupported pixel format for JPEG encoding")),
+      };
+
+      // Scale down if wider than max_width while preserving aspect ratio.
+      let mut img = DynamicImage::ImageRgb8(rgb_image);
+      if max_width > 0 && self.width > max_width {
+         let new_height = ((self.height as f32) * (max_width as f32 / self.width as f32)).round() as u32;
+         img = img.resize_exact(max_width, new_height.max(1), FilterType::Triangle);
+      }
+
+      // Encode to JPEG with requested quality.
+      let mut buffer = Vec::new();
+      {
+         use std::io::Cursor;
+         let mut cursor = Cursor::new(&mut buffer);
+         img.write_to(&mut cursor, ImageOutputFormat::Jpeg(quality))
+            .map_err(|e| std::io::Error::other(format!("jpeg encode: {e}")))?;
+      }
+      Ok(buffer)
+   }
 }
 
 pub(crate) trait ThumbnailExtractor {
@@ -99,27 +140,18 @@ impl ThumbnailExtractor for [u8] {
 
    fn extract_track_data(&self, track: &[u8]) -> Option<TrackData> {
       let tables = extract_track_tables(track)?;
-      let (sps, pps) = track
-         .nav(&mp4_path!(Mdia, Minf, Stbl, Stsd))
-         .and_then(extract_sps_pps)
+      let avc = extract_avc_from_trak(track);
+      let (sps, pps) = avc
+         .map(|a| (a.sps, a.pps))
          .unwrap_or_default();
-      let keyframes = track
-         .nav(&mp4_path!(Mdia, Minf, Stbl, Stss))
-         .map(|stss| {
-            if stss.len() < 8 {
-               return Vec::new();
-            }
-            let count = u32::from_be_bytes([stss[4], stss[5], stss[6], stss[7]]) as usize;
-            (0..count)
-               .filter_map(|i| {
-                  let pos = 8 + i * 4;
-                  stss
-                     .get(pos..pos + 4)
-                     .map(|v| u32::from_be_bytes([v[0], v[1], v[2], v[3]]))
-               })
-               .collect::<Vec<_>>()
-         })
-         .unwrap_or_else(|| (1..=tables.sizes.len() as u32).collect());
+      let keyframes = {
+         let stss = extract_sync_samples(track);
+         if stss.is_empty() {
+            (1..=tables.sizes.len() as u32).collect()
+         } else {
+            stss
+         }
+      };
       Some((tables, sps, pps, keyframes))
    }
 
@@ -223,71 +255,7 @@ fn find_nearest_keyframe(samples: &[Sample], ts: f64) -> Option<&Sample> {
    }
 }
 
-fn extract_sps_pps(stsd: &[u8]) -> Option<(Vec<u8>, Vec<u8>)> {
-   if stsd.len() < 8 {
-      return None;
-   }
-   let mut off = 8;
-   while off + 8 <= stsd.len() {
-      let size =
-         u32::from_be_bytes([stsd[off], stsd[off + 1], stsd[off + 2], stsd[off + 3]]) as usize;
-      if off + size > stsd.len() {
-         break;
-      }
-      let typ = &stsd[off + 4..off + 8];
-      if typ == b"avc1" || typ == b"avc3" {
-         let entry = &stsd[off + 8..off + size];
-         let mut pos = 78;
-         while pos + 8 <= entry.len() {
-            let esize =
-               u32::from_be_bytes([entry[pos], entry[pos + 1], entry[pos + 2], entry[pos + 3]])
-                  as usize;
-            if pos + esize > entry.len() {
-               break;
-            }
-            if &entry[pos + 4..pos + 8] == b"avcC" {
-               return parse_avcc(&entry[pos + 8..pos + esize]);
-            }
-            pos += esize.max(8);
-         }
-      }
-      off += size.max(8);
-   }
-   None
-}
-
-fn parse_avcc(data: &[u8]) -> Option<(Vec<u8>, Vec<u8>)> {
-   if data.len() < 7 {
-      return None;
-   }
-   let mut pos = 6;
-   let num_sps = data[5] & 0x1f;
-   if num_sps == 0 || pos + 2 > data.len() {
-      return None;
-   }
-   let sps_len = u16::from_be_bytes([data[pos], data[pos + 1]]) as usize;
-   pos += 2;
-   if pos + sps_len > data.len() {
-      return None;
-   }
-   let sps = data[pos..pos + sps_len].to_vec();
-   pos += sps_len;
-   if pos >= data.len() {
-      return None;
-   }
-   let num_pps = data[pos] as usize;
-   pos += 1;
-   if num_pps == 0 || pos + 2 > data.len() {
-      return None;
-   }
-   let pps_len = u16::from_be_bytes([data[pos], data[pos + 1]]) as usize;
-   pos += 2;
-   if pos + pps_len > data.len() {
-      return None;
-   }
-   let pps = data[pos..pos + pps_len].to_vec();
-   Some((sps, pps))
-}
+// (SPS/PPS parsing moved to helpers via extract_avc_from_trak)
 
 fn sample_to_annexb(sample: &[u8]) -> Vec<u8> {
    let mut out = Vec::new();

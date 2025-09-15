@@ -11,8 +11,8 @@ async fn test_read_local_metadata() {
    let mut parser = MediaParser::new(reader);
    let metadata = parser.metadata().await.expect("metadata read failed");
 
-   assert_eq!(metadata.title, Some("Big Buck Bunny".to_string()));
-   assert_eq!(metadata.artist, Some("Blender Foundation".to_string()));
-   assert!(metadata.album.is_none());
+   assert_eq!(metadata.get("title"), Some("Big Buck Bunny".to_string()));
+   assert_eq!(metadata.get("artist"), Some("Blender Foundation".to_string()));
+   assert!(metadata.get("album").is_none());
    assert!(metadata.duration.as_secs_f64() > 0.0);
 }

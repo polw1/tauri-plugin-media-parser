@@ -14,6 +14,8 @@ mod stream_reader;
 mod subtitles;
 mod thumbnails;
 mod tracks;
+mod mp4_writer;
+mod clip;
 
 use helpers::*;
 use std::time::Duration;
@@ -178,10 +180,40 @@ impl<R: stream_reader::StreamReader> MediaParser<R> {
    pub async fn metadata(&mut self) -> Result<metadata::MediaMetadata> {
       metadata::extract_from_stream(&mut self.reader).await
    }
+
+   /// Attempt to detect the MIME type of the underlying stream.
+   ///
+   /// This is a lightweight sniff that looks for common container signatures.
+   /// If unknown, returns `Ok(None)` so callers can apply a sensible default.
+   pub async fn sniff_mime(&mut self) -> Result<Option<String>> {
+      use std::io::SeekFrom;
+      let mut head = [0u8; 12];
+      // Best-effort read from the start of the stream
+      let _ = self.reader.seek(SeekFrom::Start(0)).await?;
+      let n = self.reader.read(&mut head).await?;
+
+      if n >= 8 && &head[4..8] == b"ftyp" {
+         // ISO Base Media / MP4 family
+         return Ok(Some("video/mp4".to_string()));
+      }
+      if n >= 4 && head[..4] == [0x1A, 0x45, 0xDF, 0xA3] {
+         // Matroska/WebM EBML header
+         return Ok(Some("video/webm".to_string()));
+      }
+      Ok(None)
+   }
 }
 
-pub use metadata::MediaMetadata;
+pub use metadata::{MediaMetadata, Meta};
 pub use stream_reader::{FileStreamReader, HttpStreamReader, StreamReader};
 pub use subtitles::{Subtitle, SubtitleQuery};
 pub use thumbnails::{PixelFormat, RawFrame};
 pub use tracks::{Track, TrackType};
+pub use mp4_writer::{build_ftyp_isom, build_moov_video, VideoMoovParams, stream_mdat_payload, build_segment_headers};
+pub use clip::{
+   // clip_h264_from_url_to_writer,
+   stream_clip_to_writer,
+   plan_clip_core,
+   ClipSelectionCore,
+};
+pub use stream_reader::open_source;

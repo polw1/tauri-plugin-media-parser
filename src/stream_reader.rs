@@ -50,6 +50,18 @@ impl StreamReader for FileStreamReader {
    }
 }
 
+/// Open a generic source that can be either a local file path or a HTTP/HTTPS URL.
+/// Returns a boxed [`StreamReader`] ready to use with the parser helpers.
+pub async fn open_source(src: &str) -> io::Result<Box<dyn StreamReader>> {
+   if src.starts_with("http://") || src.starts_with("https://") {
+      let r = HttpStreamReader::new(src).await?;
+      Ok(Box::new(r))
+   } else {
+      let r = FileStreamReader::new(src)?;
+      Ok(Box::new(r))
+   }
+}
+
 /// HTTP range-based reader using `reqwest`.
 ///
 /// Performs `HEAD` to obtain `Content-Length`, then issues `GET` requests with
@@ -61,6 +73,11 @@ pub struct HttpStreamReader {
    position: u64,
    length: u64,
    headers: HashMap<String, String>,
+   // Simple read-ahead cache to reduce Range requests on small reads
+   cache: Vec<u8>,
+   cache_start: u64, // absolute offset of cache[0]
+   cache_len: usize, // valid bytes in cache
+   cache_pos: usize, // next unread index in cache
 }
 
 impl HttpStreamReader {
@@ -89,6 +106,10 @@ impl HttpStreamReader {
          position: 0,
          length: len,
          headers,
+         cache: Vec::new(),
+         cache_start: 0,
+         cache_len: 0,
+         cache_pos: 0,
       })
    }
 }
@@ -96,21 +117,50 @@ impl HttpStreamReader {
 #[async_trait]
 impl StreamReader for HttpStreamReader {
    async fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-      if buf.is_empty() {
-         return Ok(0);
+      if buf.is_empty() { return Ok(0); }
+
+      let mut total_copied = 0usize;
+      // const FETCH: usize = 1 * 1024 * 1024; // 2 MiB read-ahead for high-bitrate content
+      const FETCH: usize = 256 * 1024; // 256 KiB read-ahead for testing
+
+      loop {
+         // Drain from cache first
+         if self.cache_len > self.cache_pos {
+            let avail = self.cache_len - self.cache_pos;
+            let need = buf.len() - total_copied;
+            let take = avail.min(need);
+            let src_off = self.cache_pos;
+            let dst_off = total_copied;
+            buf[dst_off..dst_off + take].copy_from_slice(&self.cache[src_off..src_off + take]);
+            self.cache_pos += take;
+            self.position += take as u64;
+            total_copied += take;
+            if total_copied == buf.len() { return Ok(total_copied); }
+         }
+
+         // If at EOF, return what we have
+         if self.position >= self.length { return Ok(total_copied); }
+
+         // Fetch a new chunk into cache starting at current position
+         let remaining = (self.length - self.position) as usize;
+         let to_fetch = remaining.min(FETCH.max(buf.len() - total_copied));
+         let start = self.position;
+         let end = start + to_fetch as u64 - 1;
+         let range_header = format!("bytes={}-{}", start, end);
+         let mut req = self.client.get(&self.url).header(RANGE, range_header);
+         for (k, v) in &self.headers { req = req.header(k, v); }
+         let resp = req.send().await.map_err(io::Error::other)?;
+         let bytes = resp.bytes().await.map_err(io::Error::other)?;
+         // Reset cache with the new data
+         let b = bytes.as_ref();
+         if b.is_empty() { return Ok(total_copied); }
+         if self.cache.len() < b.len() { self.cache.resize(b.len(), 0); }
+         self.cache[..b.len()].copy_from_slice(b);
+         self.cache_start = start;
+         self.cache_len = b.len();
+         self.cache_pos = 0;
+         // Loop will drain from cache in the next iteration
       }
-      let end = self.position + buf.len() as u64 - 1;
-      let range_header = format!("bytes={}-{}", self.position, end);
-      let mut req = self.client.get(&self.url).header(RANGE, range_header);
-      for (k, v) in &self.headers {
-         req = req.header(k, v);
-      }
-      let resp = req.send().await.map_err(io::Error::other)?;
-      let bytes = resp.bytes().await.map_err(io::Error::other)?;
-      let n = bytes.len().min(buf.len());
-      buf[..n].copy_from_slice(&bytes[..n]);
-      self.position += n as u64;
-      Ok(n)
    }
 
    async fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
@@ -132,11 +182,30 @@ impl StreamReader for HttpStreamReader {
          }
       };
       self.position = new_pos;
+      // Invalidate cache whenever we seek
+      self.cache_len = 0;
+      self.cache_pos = 0;
       Ok(self.position)
    }
 
    async fn size(&self) -> io::Result<Option<u64>> {
       Ok(Some(self.length))
+   }
+}
+
+// Blanket impl to allow using Box<dyn StreamReader> wherever a StreamReader is required.
+#[async_trait]
+impl<T: StreamReader + ?Sized> StreamReader for Box<T> {
+   async fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+      (**self).read(buf).await
+   }
+
+   async fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
+      (**self).seek(pos).await
+   }
+
+   async fn size(&self) -> io::Result<Option<u64>> {
+      (**self).size().await
    }
 }
 
