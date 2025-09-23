@@ -727,6 +727,41 @@ pub fn extract_avc_from_trak(trak: &[u8]) -> Option<AvcInfo> {
    None
 }
 
+/// Information extracted from an MPEG-4 AAC (`mp4a`) entry.
+pub struct Mp4aInfo {
+   pub esds_payload: Vec<u8>,
+   pub channels: u16,
+   pub sample_rate: u32,
+}
+
+/// Extract `mp4a` sample entry details (channels, sample_rate) and the `esds` payload.
+pub fn extract_mp4a_from_trak(trak: &[u8]) -> Option<Mp4aInfo> {
+   let stsd = trak.nav(&crate::mp4_path!(Mdia, Minf, Stbl, Stsd))?;
+   if stsd.len() < 16 { return None; }
+   let entry_size = u32::from_be_bytes([stsd[8], stsd[9], stsd[10], stsd[11]]) as usize;
+   let entry_type = &stsd[12..16];
+   if entry_type != b"mp4a" { return None; }
+   if 16 + entry_size - 8 > stsd.len() { return None; }
+   let entry = &stsd[16..16 + entry_size - 8];
+   if entry.len() < 28 { return None; }
+   // AudioSampleEntry base fields
+   let channels = u16::from_be_bytes([entry[16], entry[17]]);
+   let sr_fixed = u32::from_be_bytes([entry[24], entry[25], entry[26], entry[27]]);
+   let sample_rate = sr_fixed >> 16;
+   // Scan child boxes for esds
+   let mut off = 28usize;
+   while off + 8 <= entry.len() {
+      let sz = u32::from_be_bytes([entry[off], entry[off + 1], entry[off + 2], entry[off + 3]]) as usize;
+      if sz < 8 || off + sz > entry.len() { break; }
+      if &entry[off + 4..off + 8] == b"esds" {
+         let esds = &entry[off + 8..off + sz];
+         return Some(Mp4aInfo { esds_payload: esds.to_vec(), channels, sample_rate });
+      }
+      off += sz;
+   }
+   None
+}
+
 /// Strategy to select a video track inside a `moov` payload.
 #[derive(Debug, Clone)]
 #[allow(dead_code)]

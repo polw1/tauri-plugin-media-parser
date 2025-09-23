@@ -164,6 +164,18 @@ fn build_hdlr_vide() -> Vec<u8> {
    bw.into_box(Mp4Box::Hdlr.bytes())
 }
 
+fn build_hdlr_soun() -> Vec<u8> {
+   let mut bw = BoxWriter::new();
+   bw.u32(0)      // version+flags
+     .u32(0)      // pre_defined
+     .bytes(b"soun")
+     .u32(0)
+     .u32(0)
+     .u32(0)
+     .bytes(b"SoundHandler\0");
+   bw.into_box(Mp4Box::Hdlr.bytes())
+}
+
 fn build_stts(pairs: &[(u32, u32)]) -> Vec<u8> {
    let mut bw = BoxWriter::new();
    bw.u32(0) // version+flags
@@ -273,6 +285,40 @@ fn build_stsd_avc1(width: u16, height: u16, avcc_payload: &[u8]) -> Vec<u8> {
    make_box(Mp4Box::Stsd.bytes(), &p)
 }
 
+fn build_mp4a_sample_entry(channels: u16, sample_rate: u32, esds_payload: &[u8]) -> Vec<u8> {
+   // AudioSampleEntry base (reserved[6], data_reference_index, version, revision, vendor,
+   // channelcount, samplesize, compressionId, packetSize, samplerate(16.16))
+   let mut base = Vec::new();
+   base.extend_from_slice(&[0; 6]);
+   base.extend_from_slice(&be_u16(1)); // data_reference_index
+   base.extend_from_slice(&be_u16(0)); // version
+   base.extend_from_slice(&be_u16(0)); // revision
+   base.extend_from_slice(&be_u32(0)); // vendor
+   base.extend_from_slice(&be_u16(channels));
+   base.extend_from_slice(&be_u16(16)); // sampleSize 16-bit
+   base.extend_from_slice(&be_u16(0)); // compressionId
+   base.extend_from_slice(&be_u16(0)); // packetSize
+   base.extend_from_slice(&be_u32(sample_rate << 16)); // 16.16 fixed
+
+   let esds = make_box(*b"esds", esds_payload);
+   let size = 8 + base.len() + esds.len();
+   let mut out = Vec::new();
+   out.extend_from_slice(&be_u32(size as u32));
+   out.extend_from_slice(b"mp4a");
+   out.extend_from_slice(&base);
+   out.extend_from_slice(&esds);
+   out
+}
+
+fn build_stsd_mp4a(channels: u16, sample_rate: u32, esds_payload: &[u8]) -> Vec<u8> {
+   let entry = build_mp4a_sample_entry(channels, sample_rate, esds_payload);
+   let mut p = Vec::new();
+   p.extend_from_slice(&[0, 0, 0, 0]); // version+flags
+   p.extend_from_slice(&be_u32(1)); // entry_count
+   p.extend_from_slice(&entry);
+   make_box(Mp4Box::Stsd.bytes(), &p)
+}
+
 fn build_ctts(pairs: &[(u32, i32)]) -> Vec<u8> {
    // Determine version: if any negative offset, use version 1 (signed); else version 0 (unsigned)
    let version: u8 = if pairs.iter().any(|&(_, off)| off < 0) {
@@ -329,6 +375,31 @@ fn build_stbl(
    make_box(Mp4Box::Stbl.bytes(), &content)
 }
 
+fn build_stbl_custom(
+   stsd_box: Vec<u8>,
+   sizes: &[u32],
+   stts_pairs: &[(u32, u32)],
+   ctts_pairs: Option<&[(u32, i32)]>,
+   sync_1based: Option<&[u32]>,
+   offsets: &[u64],
+) -> Vec<u8> {
+   let mut content = Vec::new();
+   content.extend_from_slice(&stsd_box);
+   content.extend_from_slice(&build_stts(stts_pairs));
+   if let Some(ctts) = ctts_pairs {
+      content.extend_from_slice(&build_ctts(ctts));
+   }
+   content.extend_from_slice(&build_stsz(sizes));
+   content.extend_from_slice(&build_stsc_one_sample_per_chunk());
+   content.extend_from_slice(&build_chunk_offsets_box(offsets));
+   if let Some(s) = sync_1based
+      && !s.is_empty()
+   {
+      content.extend_from_slice(&build_stss(s));
+   }
+   make_box(Mp4Box::Stbl.bytes(), &content)
+}
+
 fn build_minf_stbl(stbl: Vec<u8>) -> Vec<u8> {
    make_box(Mp4Box::Minf.bytes(), &stbl)
 }
@@ -341,11 +412,188 @@ fn build_mdia(timescale: u32, duration: u64, lang: &str, stbl: Vec<u8>) -> Vec<u
    make_box(Mp4Box::Mdia.bytes(), &content)
 }
 
+fn build_mdia_soun(timescale: u32, duration: u64, lang: &str, stbl: Vec<u8>) -> Vec<u8> {
+   let mut content = Vec::new();
+   content.extend_from_slice(&build_mdhd(timescale, duration, lang));
+   content.extend_from_slice(&build_hdlr_soun());
+   content.extend_from_slice(&build_minf_stbl(stbl));
+   make_box(Mp4Box::Mdia.bytes(), &content)
+}
+
 fn build_trak(track_id: u32, duration: u64, mdia: Vec<u8>, width: u16, height: u16) -> Vec<u8> {
    let mut content = Vec::new();
    content.extend_from_slice(&build_tkhd(track_id, duration, width, height));
    content.extend_from_slice(&mdia);
    make_box(Mp4Box::Trak.bytes(), &content)
+}
+
+fn build_tkhd_audio(track_id: u32, duration: u64) -> Vec<u8> {
+   let mut bw = BoxWriter::new();
+   // version=0, flags track_enabled | track_in_movie | track_in_preview
+   bw.u32(0x00000007)
+     .u32(0)
+     .u32(0)
+     .u32(track_id)
+     .u32(0)
+     .u32(duration as u32)
+     .u32(0)
+     .u32(0)
+     .u16(0) // layer
+     .u16(0) // alternate_group
+     .u16(0x0100) // volume 1.0 (8.8)
+     .u16(0);
+   // unity matrix
+   bw.u32(0x00010000)
+     .u32(0)
+     .u32(0)
+     .u32(0)
+     .u32(0x00010000)
+     .u32(0)
+     .u32(0)
+     .u32(0)
+     .u32(0x40000000);
+   // width/height = 0
+   bw.u32(0).u32(0);
+   bw.into_box(Mp4Box::Tkhd.bytes())
+}
+
+fn build_trak_audio(track_id: u32, duration: u64, mdia: Vec<u8>) -> Vec<u8> {
+   let mut content = Vec::new();
+   content.extend_from_slice(&build_tkhd_audio(track_id, duration));
+   content.extend_from_slice(&mdia);
+   make_box(Mp4Box::Trak.bytes(), &content)
+}
+
+pub struct AudioMoovParams<'a> {
+   pub track_timescale: u32,
+   pub stts_pairs: &'a [(u32, u32)],
+   pub ctts_pairs: Option<&'a [(u32, i32)]>,
+   pub sample_sizes: &'a [u32],
+   pub track_id: u32,
+   pub language: Option<&'a str>,
+   pub mdat_base_offset: u64,
+   pub esds_payload: &'a [u8],
+   pub channels: u16,
+   pub sample_rate: u32,
+}
+
+/// Build a minimal `moov` for a video + audio segment. Offsets for each track
+/// are derived from the provided `mdat_base_offset`s in `video` and `audio`.
+pub fn build_moov_av(video: &VideoMoovParams, audio: &AudioMoovParams) -> Vec<u8> {
+   let movie_ts = video.movie_timescale.unwrap_or(video.track_timescale);
+   let v_track_ts = video.track_timescale;
+   let a_track_ts = audio.track_timescale;
+   let v_dur_tr = total_duration(video.stts_pairs);
+   let a_dur_tr = total_duration(audio.stts_pairs);
+   let v_dur_mv = scale_duration(v_dur_tr, v_track_ts, movie_ts);
+   let a_dur_mv = scale_duration(a_dur_tr, a_track_ts, movie_ts);
+   let movie_duration = v_dur_mv.max(a_dur_mv);
+
+   // Offsets
+   let v_offsets = compute_offsets(video.mdat_base_offset, video.sample_sizes);
+   let a_offsets = compute_offsets(audio.mdat_base_offset, audio.sample_sizes);
+
+   // stbl for video
+   let v_stbl = build_stbl(
+      video.sample_sizes,
+      video.stts_pairs,
+      video.ctts_pairs,
+      video.sync_samples_1based,
+      &v_offsets,
+      VideoTrackParams { width: video.width, height: video.height, avcc_payload: video.avcc_payload },
+   );
+   let v_mdia = build_mdia(
+      v_track_ts,
+      v_dur_tr,
+      video.language.unwrap_or("und"),
+      v_stbl,
+   );
+   let v_trak = build_trak(video.track_id, movie_duration, v_mdia, video.width, video.height);
+
+   // stbl for audio
+   let a_stsd = build_stsd_mp4a(audio.channels, audio.sample_rate, audio.esds_payload);
+   let a_stbl = build_stbl_custom(
+      a_stsd,
+      audio.sample_sizes,
+      audio.stts_pairs,
+      audio.ctts_pairs,
+      None,
+      &a_offsets,
+   );
+   let a_mdia = build_mdia_soun(
+      a_track_ts,
+      a_dur_tr,
+      audio.language.unwrap_or("und"),
+      a_stbl,
+   );
+   let a_trak = build_trak_audio(audio.track_id, movie_duration, a_mdia);
+
+   let mvhd = build_mvhd(movie_ts, movie_duration);
+   build_moov(mvhd, vec![v_trak, a_trak])
+}
+
+/// Build a `moov` for a video + audio segment using explicit per-sample
+/// absolute chunk offsets for each track. This is useful when the `mdat`
+/// payload is interleaved (e.g., [v1][a1][v2][a2]...) and offsets cannot be
+/// derived from a simple contiguous layout.
+///
+/// Offsets provided must be absolute file offsets (from file start) pointing
+/// to the beginning of each sample. The number of offsets must match the
+/// number of samples (length of `sample_sizes`) for each track. One sample per
+/// chunk is assumed.
+pub fn build_moov_av_with_offsets(
+   video: &VideoMoovParams,
+   audio: &AudioMoovParams,
+   video_offsets: &[u64],
+   audio_offsets: &[u64],
+   video_sync_samples_1based: Option<&[u32]>,
+) -> Vec<u8> {
+   let movie_ts = video.movie_timescale.unwrap_or(video.track_timescale);
+   let v_track_ts = video.track_timescale;
+   let a_track_ts = audio.track_timescale;
+   let v_dur_tr = total_duration(video.stts_pairs);
+   let a_dur_tr = total_duration(audio.stts_pairs);
+   let v_dur_mv = scale_duration(v_dur_tr, v_track_ts, movie_ts);
+   let a_dur_mv = scale_duration(a_dur_tr, a_track_ts, movie_ts);
+   let movie_duration = v_dur_mv.max(a_dur_mv);
+
+   // stbl for video (use provided offsets)
+   let v_stbl = build_stbl(
+      video.sample_sizes,
+      video.stts_pairs,
+      video.ctts_pairs,
+      video_sync_samples_1based,
+      video_offsets,
+      VideoTrackParams { width: video.width, height: video.height, avcc_payload: video.avcc_payload },
+   );
+   let v_mdia = build_mdia(
+      v_track_ts,
+      v_dur_tr,
+      video.language.unwrap_or("und"),
+      v_stbl,
+   );
+   let v_trak = build_trak(video.track_id, movie_duration, v_mdia, video.width, video.height);
+
+   // stbl for audio (use provided offsets)
+   let a_stsd = build_stsd_mp4a(audio.channels, audio.sample_rate, audio.esds_payload);
+   let a_stbl = build_stbl_custom(
+      a_stsd,
+      audio.sample_sizes,
+      audio.stts_pairs,
+      audio.ctts_pairs,
+      None,
+      audio_offsets,
+   );
+   let a_mdia = build_mdia_soun(
+      a_track_ts,
+      a_dur_tr,
+      audio.language.unwrap_or("und"),
+      a_stbl,
+   );
+   let a_trak = build_trak_audio(audio.track_id, movie_duration, a_mdia);
+
+   let mvhd = build_mvhd(movie_ts, movie_duration);
+   build_moov(mvhd, vec![v_trak, a_trak])
 }
 
 fn build_moov(mvhd: Vec<u8>, traks: Vec<Vec<u8>>) -> Vec<u8> {
@@ -584,10 +832,9 @@ pub async fn stream_mp4_segment(
    sink.write_all(&mdat_header).await?;
 
    // Stream sample payloads (coalesced)
-   // const CHUNK: usize = 1 * 1024 * 1024; // 1 MiB chunk for better throughput
-   const CHUNK: usize = 256 * 1024; // 256 KiB chunk for testing
+   let chunk = desired_chunk_size();
    let groups = coalesce_sample_reads(samples, 0);
-   stream_coalesced_groups(src, &groups, sink, CHUNK).await?;
+   stream_coalesced_groups(src, &groups, sink, chunk).await?;
    sink.flush().await?;
    Ok(())
 }
@@ -599,9 +846,9 @@ pub async fn stream_mdat_payload(
    samples: &[SampleRef],
    sink: &mut (impl AsyncWrite + Unpin),
 ) -> io::Result<()> {
-   const CHUNK: usize = 1024 * 1024; // 1 MiB chunk for better throughput
+   let chunk = desired_chunk_size();
    let groups = coalesce_sample_reads(samples, 0);
-   stream_coalesced_groups(src, &groups, sink, CHUNK).await?;
+   stream_coalesced_groups(src, &groups, sink, chunk).await?;
    sink.flush().await?;
    Ok(())
 }
@@ -633,6 +880,24 @@ async fn stream_coalesced_groups(
       }
    }
    Ok(())
+}
+
+fn desired_chunk_size() -> usize {
+   // Webview-like defaults: aim for ~1 MiB chunks, clamp between 256 KiB and 4 MiB.
+   const MIN: usize = 256 * 1024;
+   const DEF: usize = 1024 * 1024;
+   const MAX: usize = 4 * 1024 * 1024;
+   if let Ok(v) = std::env::var("MP4_RANGE_CHUNK_KB") {
+      if let Ok(kb) = v.parse::<usize>() {
+         return (kb * 1024).clamp(MIN, MAX);
+      }
+   }
+   if let Ok(v) = std::env::var("MP4_RANGE_CHUNK_BYTES") {
+      if let Ok(b) = v.parse::<usize>() {
+         return b.clamp(MIN, MAX);
+      }
+   }
+   DEF
 }
 
 #[cfg(test)]

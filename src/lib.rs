@@ -8,7 +8,7 @@
 //!
 //! IO is abstracted behind [`StreamReader`], so the same parsing can run on
 //! local files or over HTTP range requests.
-mod clip;
+mod av_clip;
 mod helpers;
 mod metadata;
 mod mp4_writer;
@@ -204,18 +204,34 @@ impl<R: stream_reader::StreamReader> MediaParser<R> {
    }
 }
 
-pub use clip::{
-   ClipSelectionCore,
-   plan_clip_core,
-   // clip_h264_from_url_to_writer,
-   stream_clip_to_writer,
-};
 pub use metadata::{MediaMetadata, Meta};
 pub use mp4_writer::{
-   VideoMoovParams, build_ftyp_isom, build_moov_video, build_segment_headers, stream_mdat_payload,
+   VideoMoovParams, AudioMoovParams, SampleRef, build_ftyp_isom, build_moov_video, build_moov_av, build_moov_av_with_offsets, build_segment_headers, stream_mdat_payload,
 };
 pub use stream_reader::open_source;
 pub use stream_reader::{FileStreamReader, HttpStreamReader, StreamReader};
 pub use subtitles::{Subtitle, SubtitleQuery};
 pub use thumbnails::{PixelFormat, RawFrame};
 pub use tracks::{Track, TrackType};
+// Re-export selected helper utilities for research bins
+pub use helpers::{
+   moov_payload,
+   find_first_video_trak,
+   extract_track_tables,
+   enumerate_samples,
+   extract_sync_samples,
+   select_samples_by_time,
+   extract_avc_from_trak,
+   extract_mp4a_from_trak,
+   slice_stts_pairs,
+   slice_ctts_pairs,
+   TrackTables,
+   SampleInfo,
+   TimeSelection,
+   iter_boxes,
+   Mp4Box,
+   track_id_from_tkhd,
+   Mp4Nav,
+};
+pub use helpers::moov::{find_moov_box, find_and_read_moov_box, MoovBoxInfo};
+pub use av_clip::{AvClipCore, plan_av_clip_from_moov};
