@@ -1,3 +1,4 @@
 **/target
 *.lock
 **/.lock
+**/node_modules
