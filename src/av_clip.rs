@@ -1,6 +1,6 @@
 use crate::helpers::{
-   moov_payload, iter_boxes, Mp4Box, Mp4Nav, extract_track_tables, extract_avc_from_trak,
-   extract_mp4a_from_trak, extract_sync_samples, slice_stts_pairs, slice_ctts_pairs,
+   Mp4Box, Mp4Nav, extract_avc_from_trak, extract_mp4a_from_trak, extract_sync_samples,
+   extract_track_tables, iter_boxes, moov_payload, slice_ctts_pairs, slice_stts_pairs,
 };
 use crate::{mp4_path, track_id_from_tkhd};
 
@@ -19,6 +19,7 @@ pub struct AvClipCore {
    pub a_stts: Vec<(u32, u32)>,
 
    pub v_ctts: Option<Vec<(u32, i32)>>,
+   pub a_ctts: Option<Vec<(u32, i32)>>,
    pub v_sync_rel_1based: Vec<u32>,
 
    pub width: u16,
@@ -56,11 +57,17 @@ pub fn plan_av_clip_from_moov(
    let mut v_trak: Option<&[u8]> = None;
    let mut a_trak: Option<&[u8]> = None;
    for (typ, pl) in iter_boxes(moov_pl) {
-      if typ != Mp4Box::Trak.bytes() { continue; }
+      if typ != Mp4Box::Trak.bytes() {
+         continue;
+      }
       if let Some(tkhd) = (&pl[..]).nav(&mp4_path!(Tkhd)) {
          if let Some(id) = track_id_from_tkhd(tkhd) {
-            if id == v_track_id { v_trak = Some(pl); }
-            if id == a_track_id { a_trak = Some(pl); }
+            if id == v_track_id {
+               v_trak = Some(pl);
+            }
+            if id == a_track_id {
+               a_trak = Some(pl);
+            }
          }
       }
    }
@@ -71,15 +78,26 @@ pub fn plan_av_clip_from_moov(
    let a_tables = extract_track_tables(a_trak).ok_or(PlanError::InvalidTables)?;
 
    // Slice sizes
-   if v_start >= v_end || a_start >= a_end { return Err(PlanError::InvalidTables); }
-   if v_end > v_tables.sizes.len() || a_end > a_tables.sizes.len() { return Err(PlanError::InvalidTables); }
+   if v_start >= v_end || a_start >= a_end {
+      return Err(PlanError::InvalidTables);
+   }
+   if v_end > v_tables.sizes.len() || a_end > a_tables.sizes.len() {
+      return Err(PlanError::InvalidTables);
+   }
    let v_sizes: Vec<u32> = v_tables.sizes[v_start..v_end].iter().copied().collect();
    let a_sizes: Vec<u32> = a_tables.sizes[a_start..a_end].iter().copied().collect();
 
    // Slice timing
    let v_stts = slice_stts_pairs(&v_tables.timing, v_start, v_end);
    let a_stts = slice_stts_pairs(&a_tables.timing, a_start, a_end);
-   let v_ctts = v_tables.ctts.as_ref().map(|p| slice_ctts_pairs(p, v_start, v_end));
+   let v_ctts = v_tables
+      .ctts
+      .as_ref()
+      .map(|p| slice_ctts_pairs(p, v_start, v_end));
+   let a_ctts = a_tables
+      .ctts
+      .as_ref()
+      .map(|p| slice_ctts_pairs(p, a_start, a_end));
 
    // Sync samples relative to selection
    let v_sync_abs = extract_sync_samples(v_trak);
@@ -88,13 +106,17 @@ pub fn plan_av_clip_from_moov(
       v_sync_rel.push(1);
    } else {
       for &n1 in &v_sync_abs {
-         if n1 == 0 { continue; }
+         if n1 == 0 {
+            continue;
+         }
          let idx0 = (n1 - 1) as usize;
          if idx0 >= v_start && idx0 < v_end {
             v_sync_rel.push((idx0 - v_start + 1) as u32);
          }
       }
-      if v_sync_rel.is_empty() { v_sync_rel.push(1); }
+      if v_sync_rel.is_empty() {
+         v_sync_rel.push(1);
+      }
    }
 
    // Codecs and metadata
@@ -119,6 +141,7 @@ pub fn plan_av_clip_from_moov(
       v_stts,
       a_stts,
       v_ctts,
+      a_ctts,
       v_sync_rel_1based: v_sync_rel,
       width: avc.width,
       height: avc.height,
@@ -130,4 +153,3 @@ pub fn plan_av_clip_from_moov(
       sample_rate: mp4a.sample_rate,
    })
 }
-
