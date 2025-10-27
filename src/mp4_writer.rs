@@ -420,9 +420,19 @@ fn build_mdia_soun(timescale: u32, duration: u64, lang: &str, stbl: Vec<u8>) -> 
    make_box(Mp4Box::Mdia.bytes(), &content)
 }
 
-fn build_trak(track_id: u32, duration: u64, mdia: Vec<u8>, width: u16, height: u16) -> Vec<u8> {
+fn build_trak(
+   track_id: u32,
+   duration: u64,
+   mdia: Vec<u8>,
+   width: u16,
+   height: u16,
+   edts: Option<Vec<u8>>,
+) -> Vec<u8> {
    let mut content = Vec::new();
    content.extend_from_slice(&build_tkhd(track_id, duration, width, height));
+   if let Some(edts_box) = edts {
+      content.extend_from_slice(&edts_box);
+   }
    content.extend_from_slice(&mdia);
    make_box(Mp4Box::Trak.bytes(), &content)
 }
@@ -444,14 +454,14 @@ fn build_tkhd_audio(track_id: u32, duration: u64) -> Vec<u8> {
      .u16(0);
    // unity matrix
    bw.u32(0x00010000)
-     .u32(0)
-     .u32(0)
-     .u32(0)
-     .u32(0x00010000)
-     .u32(0)
-     .u32(0)
-     .u32(0)
-     .u32(0x40000000);
+      .u32(0)
+      .u32(0)
+      .u32(0)
+      .u32(0x00010000)
+      .u32(0)
+      .u32(0)
+      .u32(0)
+      .u32(0x40000000);
    // width/height = 0
    bw.u32(0).u32(0);
    bw.into_box(Mp4Box::Tkhd.bytes())
@@ -500,7 +510,11 @@ pub fn build_moov_av(video: &VideoMoovParams, audio: &AudioMoovParams) -> Vec<u8
       video.ctts_pairs,
       video.sync_samples_1based,
       &v_offsets,
-      VideoTrackParams { width: video.width, height: video.height, avcc_payload: video.avcc_payload },
+      VideoTrackParams {
+         width: video.width,
+         height: video.height,
+         avcc_payload: video.avcc_payload,
+      },
    );
    let v_mdia = build_mdia(
       v_track_ts,
@@ -508,7 +522,17 @@ pub fn build_moov_av(video: &VideoMoovParams, audio: &AudioMoovParams) -> Vec<u8
       video.language.unwrap_or("und"),
       v_stbl,
    );
-   let v_trak = build_trak(video.track_id, movie_duration, v_mdia, video.width, video.height);
+   // Optional edit list for video (edts/elst)
+   let v_edts = video.edit_list.map(build_edts_with_elst);
+
+   let v_trak = build_trak(
+      video.track_id,
+      movie_duration,
+      v_mdia,
+      video.width,
+      video.height,
+      v_edts,
+   );
 
    // stbl for audio
    let a_stsd = build_stsd_mp4a(audio.channels, audio.sample_rate, audio.esds_payload);
@@ -564,7 +588,11 @@ pub fn build_moov_av_with_offsets(
       video.ctts_pairs,
       video_sync_samples_1based,
       video_offsets,
-      VideoTrackParams { width: video.width, height: video.height, avcc_payload: video.avcc_payload },
+      VideoTrackParams {
+         width: video.width,
+         height: video.height,
+         avcc_payload: video.avcc_payload,
+      },
    );
    let v_mdia = build_mdia(
       v_track_ts,
@@ -572,7 +600,17 @@ pub fn build_moov_av_with_offsets(
       video.language.unwrap_or("und"),
       v_stbl,
    );
-   let v_trak = build_trak(video.track_id, movie_duration, v_mdia, video.width, video.height);
+   // Optional edit list for video (edts/elst)
+   let v_edts = video.edit_list.map(build_edts_with_elst);
+
+   let v_trak = build_trak(
+      video.track_id,
+      movie_duration,
+      v_mdia,
+      video.width,
+      video.height,
+      v_edts,
+   );
 
    // stbl for audio (use provided offsets)
    let a_stsd = build_stsd_mp4a(audio.channels, audio.sample_rate, audio.esds_payload);
@@ -619,6 +657,46 @@ pub fn compute_offsets(mdat_base_offset: u64, sizes: &[u32]) -> Vec<u64> {
    offs
 }
 
+// --------------------
+// Edit List (edts/elst)
+// --------------------
+
+#[derive(Debug, Clone, Copy)]
+pub struct EditListEntry {
+   pub segment_duration: u64, // in movie/track timescale units (see builders)
+   pub media_time: i64,       // media timeline start time for this edit
+}
+
+fn build_elst(entries: &[EditListEntry]) -> Vec<u8> {
+   // version 1 if duration or media_time don't fit 32-bit
+   let v1 = entries.iter().any(|e| {
+      e.segment_duration > u32::MAX as u64
+         || e.media_time > i32::MAX as i64
+         || e.media_time < i32::MIN as i64
+   });
+   let mut p = Vec::new();
+   p.extend_from_slice(&[if v1 { 1 } else { 0 }, 0, 0, 0]); // version + flags
+   p.extend_from_slice(&be_u32(entries.len() as u32));
+   for e in entries {
+      if v1 {
+         p.extend_from_slice(&be_u64(e.segment_duration));
+         p.extend_from_slice(&e.media_time.to_be_bytes());
+      } else {
+         p.extend_from_slice(&be_u32(e.segment_duration as u32));
+         p.extend_from_slice(&(e.media_time as i32).to_be_bytes());
+      }
+      // media_rate = 1.0 in 16.16 fixed
+      p.extend_from_slice(&be_u16(1));
+      p.extend_from_slice(&be_u16(0));
+   }
+   make_box(*b"elst", &p)
+}
+
+fn build_edts_with_elst(entries: &[EditListEntry]) -> Vec<u8> {
+   let elst = build_elst(entries);
+   make_box(*b"edts", &elst)
+}
+
 pub struct VideoMoovParams<'a> {
    pub movie_timescale: Option<u32>,
    pub track_timescale: u32,
@@ -632,6 +710,7 @@ pub struct VideoMoovParams<'a> {
    pub language: Option<&'a str>,
    pub mdat_base_offset: u64,
    pub avcc_payload: &'a [u8],
+   pub edit_list: Option<&'a [EditListEntry]>,
 }
 
 /// Build a minimal `moov` box for a single H.264 video track.
@@ -661,12 +740,17 @@ pub fn build_moov_video(params: &VideoMoovParams) -> Vec<u8> {
       params.language.unwrap_or("und"),
       stbl,
    );
+   // Optional edit list for single-track build (rare in our flow)
+   let v_edts = params
+      .edit_list
+      .map(build_edts_with_elst);
    let trak = build_trak(
       params.track_id,
       duration_movie,
       mdia,
       params.width,
       params.height,
+      v_edts,
    );
    let mvhd = build_mvhd(movie_ts, duration_movie);
    build_moov(mvhd, vec![trak])
@@ -887,16 +971,14 @@ fn desired_chunk_size() -> usize {
    const MIN: usize = 256 * 1024;
    const DEF: usize = 1024 * 1024;
    const MAX: usize = 4 * 1024 * 1024;
-   if let Ok(v) = std::env::var("MP4_RANGE_CHUNK_KB") {
-      if let Ok(kb) = v.parse::<usize>() {
+   if let Ok(v) = std::env::var("MP4_RANGE_CHUNK_KB")
+      && let Ok(kb) = v.parse::<usize>() {
          return (kb * 1024).clamp(MIN, MAX);
       }
-   }
-   if let Ok(v) = std::env::var("MP4_RANGE_CHUNK_BYTES") {
-      if let Ok(b) = v.parse::<usize>() {
+   if let Ok(v) = std::env::var("MP4_RANGE_CHUNK_BYTES")
+      && let Ok(b) = v.parse::<usize>() {
          return b.clamp(MIN, MAX);
       }
-   }
    DEF
 }
 

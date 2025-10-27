@@ -60,8 +60,8 @@ pub fn plan_av_clip_from_moov(
       if typ != Mp4Box::Trak.bytes() {
          continue;
       }
-      if let Some(tkhd) = (&pl[..]).nav(&mp4_path!(Tkhd)) {
-         if let Some(id) = track_id_from_tkhd(tkhd) {
+      if let Some(tkhd) = pl[..].nav(&mp4_path!(Tkhd))
+         && let Some(id) = track_id_from_tkhd(tkhd) {
             if id == v_track_id {
                v_trak = Some(pl);
             }
@@ -69,7 +69,6 @@ pub fn plan_av_clip_from_moov(
                a_trak = Some(pl);
             }
          }
-      }
    }
    let v_trak = v_trak.ok_or(PlanError::TrackNotFound)?;
    let a_trak = a_trak.ok_or(PlanError::TrackNotFound)?;
@@ -84,8 +83,8 @@ pub fn plan_av_clip_from_moov(
    if v_end > v_tables.sizes.len() || a_end > a_tables.sizes.len() {
       return Err(PlanError::InvalidTables);
    }
-   let v_sizes: Vec<u32> = v_tables.sizes[v_start..v_end].iter().copied().collect();
-   let a_sizes: Vec<u32> = a_tables.sizes[a_start..a_end].iter().copied().collect();
+   let v_sizes: Vec<u32> = v_tables.sizes[v_start..v_end].to_vec();
+   let a_sizes: Vec<u32> = a_tables.sizes[a_start..a_end].to_vec();
 
    // Slice timing
    let v_stts = slice_stts_pairs(&v_tables.timing, v_start, v_end);

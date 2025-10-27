@@ -737,13 +737,21 @@ pub struct Mp4aInfo {
 /// Extract `mp4a` sample entry details (channels, sample_rate) and the `esds` payload.
 pub fn extract_mp4a_from_trak(trak: &[u8]) -> Option<Mp4aInfo> {
    let stsd = trak.nav(&crate::mp4_path!(Mdia, Minf, Stbl, Stsd))?;
-   if stsd.len() < 16 { return None; }
+   if stsd.len() < 16 {
+      return None;
+   }
    let entry_size = u32::from_be_bytes([stsd[8], stsd[9], stsd[10], stsd[11]]) as usize;
    let entry_type = &stsd[12..16];
-   if entry_type != b"mp4a" { return None; }
-   if 16 + entry_size - 8 > stsd.len() { return None; }
+   if entry_type != b"mp4a" {
+      return None;
+   }
+   if 16 + entry_size - 8 > stsd.len() {
+      return None;
+   }
    let entry = &stsd[16..16 + entry_size - 8];
-   if entry.len() < 28 { return None; }
+   if entry.len() < 28 {
+      return None;
+   }
    // AudioSampleEntry base fields
    let channels = u16::from_be_bytes([entry[16], entry[17]]);
    let sr_fixed = u32::from_be_bytes([entry[24], entry[25], entry[26], entry[27]]);
@@ -751,11 +759,18 @@ pub fn extract_mp4a_from_trak(trak: &[u8]) -> Option<Mp4aInfo> {
    // Scan child boxes for esds
    let mut off = 28usize;
    while off + 8 <= entry.len() {
-      let sz = u32::from_be_bytes([entry[off], entry[off + 1], entry[off + 2], entry[off + 3]]) as usize;
-      if sz < 8 || off + sz > entry.len() { break; }
+      let sz =
+         u32::from_be_bytes([entry[off], entry[off + 1], entry[off + 2], entry[off + 3]]) as usize;
+      if sz < 8 || off + sz > entry.len() {
+         break;
+      }
       if &entry[off + 4..off + 8] == b"esds" {
          let esds = &entry[off + 8..off + sz];
-         return Some(Mp4aInfo { esds_payload: esds.to_vec(), channels, sample_rate });
+         return Some(Mp4aInfo {
+            esds_payload: esds.to_vec(),
+            channels,
+            sample_rate,
+         });
       }
       off += sz;
    }
@@ -994,4 +1009,331 @@ mod tests {
       // third run excluded.
       assert_eq!(out, vec![(2, 1000), (2, 500)]);
    }
+}
+
+/// Frame type information for H.264 video frames
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum H264FrameType {
+   /// I-frame (Instantaneous Decoder Refresh) - keyframe, can be decoded independently
+   IFrame,
+   /// P-frame (Predictive) - depends on previous frame(s)
+   PFrame,
+   /// B-frame (Bidirectional) - depends on frames before and/or after
+   BFrame,
+   /// Unknown frame type
+   Unknown,
+}
+
+impl H264FrameType {
+   pub fn from_nal_type(nal_type: u8) -> Self {
+      match nal_type {
+         5 => H264FrameType::IFrame,
+         1 => {
+            // Slice type needs deeper inspection, default to unknown
+            H264FrameType::Unknown
+         }
+         _ => H264FrameType::Unknown,
+      }
+   }
+
+   pub fn is_keyframe(&self) -> bool {
+      matches!(self, H264FrameType::IFrame)
+   }
+}
+
+/// Information about frame dependencies for accurate frame selection
+#[derive(Debug, Clone)]
+pub struct FrameDependencyInfo {
+   /// Index of this frame (0-based)
+   pub frame_index: usize,
+   /// Frame type (I/P/B)
+   pub frame_type: H264FrameType,
+   /// Is this a sync/key frame
+   pub is_sync: bool,
+   /// Indices of frames this frame depends on (for dependency tracking)
+   pub depends_on: Vec<usize>,
+}
+
+/// Analyze frame dependencies from sync samples to build a dependency map
+///
+/// This function creates a map of which frames each frame depends on, allowing
+/// precise calculation of the minimum frame range needed to decode a specific frame.
+pub fn analyze_frame_dependencies(
+   samples_count: usize,
+   vstss: &[u32], // 1-based sync sample indices
+) -> Vec<FrameDependencyInfo> {
+   let mut deps = Vec::with_capacity(samples_count);
+   let mut last_keyframe_idx = 0usize;
+
+   // Convert 1-based vstss to 0-based set for quick lookup
+   let sync_set: std::collections::HashSet<usize> = vstss
+      .iter()
+      .filter_map(|&n| if n > 0 { Some((n - 1) as usize) } else { None })
+      .collect();
+
+   for i in 0..samples_count {
+      let is_sync = sync_set.contains(&i);
+
+      if is_sync {
+         last_keyframe_idx = i;
+      }
+
+      let frame_type = if is_sync {
+         H264FrameType::IFrame
+      } else {
+         H264FrameType::Unknown // Would need actual bitstream parsing for P/B distinction
+      };
+
+      // Build dependency list: depends on last keyframe and any intermediate frames
+      let mut depends_on = Vec::new();
+      if !is_sync && last_keyframe_idx < i {
+         // For now, mark dependency on all frames since last keyframe
+         // (more precise tracking would require NAL unit parsing)
+         depends_on = (last_keyframe_idx..i).collect();
+      }
+
+      deps.push(FrameDependencyInfo {
+         frame_index: i,
+         frame_type,
+         is_sync,
+         depends_on,
+      });
+   }
+
+   deps
+}
+
+/// Find the minimum starting frame index that includes all dependencies for a target frame
+///
+/// Returns the earliest frame index needed to be able to decode the target frame.
+/// This looks at the dependency chain from the target frame backwards to find all
+/// required predecessor frames.
+pub fn find_min_start_for_frame(target_index: usize, frame_deps: &[FrameDependencyInfo]) -> usize {
+   if target_index >= frame_deps.len() {
+      return target_index;
+   }
+
+   let mut visited = std::collections::HashSet::new();
+   let mut to_check = vec![target_index];
+   let mut min_index = target_index;
+
+   while let Some(idx) = to_check.pop() {
+      if visited.contains(&idx) {
+         continue;
+      }
+      visited.insert(idx);
+
+      if idx < min_index {
+         min_index = idx;
+      }
+
+      if idx < frame_deps.len() {
+         // Add all dependencies to the check queue
+         for &dep_idx in &frame_deps[idx].depends_on {
+            if !visited.contains(&dep_idx) {
+               to_check.push(dep_idx);
+            }
+         }
+
+         // If this frame is a keyframe, stop traversing backwards
+         if frame_deps[idx].is_sync {
+            min_index = idx;
+            break;
+         }
+      }
+   }
+
+   min_index
+}
+
+/// Parse H.264 NAL unit header and slice header to determine frame type and dependencies
+/// Returns (frame_type, reference_frame_indices)
+pub fn parse_h264_nal_dependencies(nal_data: &[u8]) -> (H264FrameType, Vec<usize>) {
+   if nal_data.is_empty() {
+      return (H264FrameType::Unknown, vec![]);
+   }
+
+   // H.264 NAL unit structure:
+   // - Starts with 4-byte length prefix (MP4 format)
+   // - NAL header: 1 byte (forbidden_zero_bit, nal_ref_idc, nal_unit_type)
+   // - Slice header for slice NAL units
+
+   let mut offset = 0;
+   let dependencies = vec![];
+   let mut frame_type = H264FrameType::Unknown;
+
+   // Parse NAL units (MP4 uses length-prefixed NAL units)
+   while offset + 4 < nal_data.len() {
+      // Read 4-byte NAL length
+      let nal_length = u32::from_be_bytes([
+         nal_data[offset],
+         nal_data[offset + 1],
+         nal_data[offset + 2],
+         nal_data[offset + 3],
+      ]) as usize;
+
+      offset += 4;
+
+      if offset + nal_length > nal_data.len() {
+         break;
+      }
+
+      let nal_unit = &nal_data[offset..offset + nal_length];
+      if nal_unit.is_empty() {
+         offset += nal_length;
+         continue;
+      }
+
+      // Parse NAL header
+      let nal_header = nal_unit[0];
+      let nal_unit_type = nal_header & 0x1F;
+      let nal_ref_idc = (nal_header >> 5) & 0x03;
+
+      // NAL unit types:
+      // 1 = Coded slice of a non-IDR picture (P or B)
+      // 5 = Coded slice of an IDR picture (I)
+      // 6 = SEI (Supplemental Enhancement Information)
+      // 7 = SPS (Sequence Parameter Set)
+      // 8 = PPS (Picture Parameter Set)
+
+      match nal_unit_type {
+         5 => {
+            // IDR frame - keyframe, no dependencies
+            frame_type = H264FrameType::IFrame;
+            break; // Found keyframe, no dependencies
+         }
+         1 => {
+            // Non-IDR slice - need to parse slice header to determine P or B
+            // For simplicity, we'll parse the slice type from the slice header
+            if nal_unit.len() > 1 {
+               // Slice header parsing (simplified)
+               // We would need proper Exp-Golomb decoding here for full accuracy
+               // For now, assume P-frame if nal_ref_idc > 0, otherwise could be B
+
+               if nal_ref_idc > 0 {
+                  frame_type = H264FrameType::PFrame;
+                  // P-frames typically depend on 1-2 previous reference frames
+                  // Without full slice header parsing, we conservatively assume
+                  // it depends on recent frames (would need proper implementation)
+               } else {
+                  frame_type = H264FrameType::BFrame;
+                  // B-frames can depend on multiple reference frames
+               }
+            }
+         }
+         _ => {
+            // Other NAL types (SPS, PPS, SEI, etc.) - skip
+         }
+      }
+
+      offset += nal_length;
+   }
+
+   (frame_type, dependencies)
+}
+
+/// Analyze frame dependencies by reading actual mdat data and parsing NAL headers
+/// This provides more accurate dependency tracking than just using sync samples
+pub async fn analyze_frame_dependencies_from_mdat(
+   stream: &mut dyn StreamReader,
+   samples: &[SampleInfo],
+   sync_samples: &[u32],
+) -> io::Result<Vec<FrameDependencyInfo>> {
+   let mut deps = Vec::with_capacity(samples.len());
+
+   // Build sync set for quick lookup
+   let sync_set: std::collections::HashSet<usize> = sync_samples
+      .iter()
+      .filter_map(|&n| if n > 0 { Some((n - 1) as usize) } else { None })
+      .collect();
+
+   let mut last_keyframe_idx = 0;
+   let mut last_p_frame_idx = None;
+
+   for (idx, sample) in samples.iter().enumerate() {
+      let is_sync = sync_set.contains(&idx);
+
+      // Read sample data to analyze NAL units
+      let sample_data = read_sample(stream, sample.offset, sample.size).await?;
+      let (frame_type, _nal_deps) = parse_h264_nal_dependencies(&sample_data);
+
+      let mut depends_on = Vec::new();
+
+      match frame_type {
+         H264FrameType::IFrame => {
+            // Keyframe - no dependencies
+            last_keyframe_idx = idx;
+            last_p_frame_idx = None;
+         }
+         H264FrameType::PFrame => {
+            // P-frame depends on the most recent reference frame
+            // In simple cases, this is the previous P-frame or the last keyframe
+            if let Some(prev_p) = last_p_frame_idx {
+               depends_on.push(prev_p);
+            } else {
+               depends_on.push(last_keyframe_idx);
+            }
+            last_p_frame_idx = Some(idx);
+         }
+         H264FrameType::BFrame => {
+            // B-frame depends on surrounding reference frames
+            // Typically depends on the last keyframe and/or last P-frame
+            depends_on.push(last_keyframe_idx);
+            if let Some(prev_p) = last_p_frame_idx {
+               depends_on.push(prev_p);
+            }
+            // B-frames don't update last_p_frame_idx
+         }
+         H264FrameType::Unknown => {
+            // Unknown type - conservatively depend on last keyframe
+            depends_on.push(last_keyframe_idx);
+         }
+      }
+
+      deps.push(FrameDependencyInfo {
+         frame_index: idx,
+         frame_type,
+         is_sync,
+         depends_on,
+      });
+   }
+
+   Ok(deps)
+}
+
+/// Find minimum frame set needed to decode target frame by analyzing actual dependencies
+/// This recursively traces back through dependencies to find all required frames
+pub fn find_required_frames_for_target(
+   target_index: usize,
+   frame_deps: &[FrameDependencyInfo],
+) -> Vec<usize> {
+   let mut required = std::collections::HashSet::new();
+   let mut to_process = vec![target_index];
+
+   while let Some(idx) = to_process.pop() {
+      if required.contains(&idx) || idx >= frame_deps.len() {
+         continue;
+      }
+
+      required.insert(idx);
+
+      let dep_info = &frame_deps[idx];
+
+      // If this is a keyframe, we don't need to go further back
+      if dep_info.is_sync {
+         continue;
+      }
+
+      // Add all dependencies to process queue
+      for &dep_idx in &dep_info.depends_on {
+         if !required.contains(&dep_idx) {
+            to_process.push(dep_idx);
+         }
+      }
+   }
+
+   // Convert to sorted vector
+   let mut result: Vec<usize> = required.into_iter().collect();
+   result.sort_unstable();
+   result
 }
