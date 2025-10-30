@@ -74,7 +74,7 @@ fn language_to_mdhd_bits(lang: &str) -> u16 {
    (c1 << 10) | (c2 << 5) | c3
 }
 
-fn build_mvhd(timescale: u32, duration: u64) -> Vec<u8> {
+fn build_mvhd(timescale: u32, duration: u64, next_track_id: u32) -> Vec<u8> {
    let mut p = Vec::new();
    // version(1) + flags(3)
    p.extend_from_slice(&[0, 0, 0, 0]);
@@ -104,7 +104,9 @@ fn build_mvhd(timescale: u32, duration: u64) -> Vec<u8> {
    for _ in 0..6 {
       p.extend_from_slice(&be_u32(0));
    }
-   p.extend_from_slice(&be_u32(2));
+   // next_track_id must be greater than any existing track id
+   let next = if next_track_id == 0 { 1 } else { next_track_id };
+   p.extend_from_slice(&be_u32(next));
    make_box(Mp4Box::Mvhd.bytes(), &p)
 }
 
@@ -400,15 +402,61 @@ fn build_stbl_custom(
    make_box(Mp4Box::Stbl.bytes(), &content)
 }
 
-fn build_minf_stbl(stbl: Vec<u8>) -> Vec<u8> {
-   make_box(Mp4Box::Minf.bytes(), &stbl)
+fn build_vmhd() -> Vec<u8> {
+   // Video Media Header: version 0, flags 1 (as per common MP4 writers),
+   // graphicsmode = 0, opcolor = {0,0,0}
+   let mut p = Vec::new();
+   p.extend_from_slice(&[0, 0, 0, 1]); // version + flags
+   p.extend_from_slice(&be_u16(0)); // graphicsmode
+   p.extend_from_slice(&be_u16(0)); // opcolor[0]
+   p.extend_from_slice(&be_u16(0)); // opcolor[1]
+   p.extend_from_slice(&be_u16(0)); // opcolor[2]
+   make_box(*b"vmhd", &p)
+}
+
+fn build_smhd() -> Vec<u8> {
+   // Sound Media Header: version 0, flags 0, balance 0
+   let mut p = Vec::new();
+   p.extend_from_slice(&[0, 0, 0, 0]); // version + flags
+   p.extend_from_slice(&be_u16(0)); // balance (8.8)
+   p.extend_from_slice(&be_u16(0)); // reserved
+   make_box(*b"smhd", &p)
+}
+
+fn build_dinf_dref() -> Vec<u8> {
+   // dref with a single url  (self-contained)
+   let mut url_payload = Vec::new();
+   url_payload.extend_from_slice(&[0, 0, 0, 1]); // version + flags (self-contained)
+   let url_box = make_box(*b"url ", &url_payload);
+
+   let mut dref = Vec::new();
+   dref.extend_from_slice(&[0, 0, 0, 0]); // version + flags
+   dref.extend_from_slice(&be_u32(1)); // entry_count
+   dref.extend_from_slice(&url_box);
+   make_box(*b"dinf", &make_box(*b"dref", &dref))
+}
+
+fn build_minf_vide(stbl: Vec<u8>) -> Vec<u8> {
+   let mut content = Vec::new();
+   content.extend_from_slice(&build_vmhd());
+   content.extend_from_slice(&build_dinf_dref());
+   content.extend_from_slice(&stbl);
+   make_box(Mp4Box::Minf.bytes(), &content)
+}
+
+fn build_minf_soun(stbl: Vec<u8>) -> Vec<u8> {
+   let mut content = Vec::new();
+   content.extend_from_slice(&build_smhd());
+   content.extend_from_slice(&build_dinf_dref());
+   content.extend_from_slice(&stbl);
+   make_box(Mp4Box::Minf.bytes(), &content)
 }
 
 fn build_mdia(timescale: u32, duration: u64, lang: &str, stbl: Vec<u8>) -> Vec<u8> {
    let mut content = Vec::new();
    content.extend_from_slice(&build_mdhd(timescale, duration, lang));
    content.extend_from_slice(&build_hdlr_vide());
-   content.extend_from_slice(&build_minf_stbl(stbl));
+   content.extend_from_slice(&build_minf_vide(stbl));
    make_box(Mp4Box::Mdia.bytes(), &content)
 }
 
@@ -416,7 +464,7 @@ fn build_mdia_soun(timescale: u32, duration: u64, lang: &str, stbl: Vec<u8>) -> 
    let mut content = Vec::new();
    content.extend_from_slice(&build_mdhd(timescale, duration, lang));
    content.extend_from_slice(&build_hdlr_soun());
-   content.extend_from_slice(&build_minf_stbl(stbl));
+   content.extend_from_slice(&build_minf_soun(stbl));
    make_box(Mp4Box::Mdia.bytes(), &content)
 }
 
@@ -467,9 +515,12 @@ fn build_tkhd_audio(track_id: u32, duration: u64) -> Vec<u8> {
    bw.into_box(Mp4Box::Tkhd.bytes())
 }
 
-fn build_trak_audio(track_id: u32, duration: u64, mdia: Vec<u8>) -> Vec<u8> {
+fn build_trak_audio(track_id: u32, duration: u64, mdia: Vec<u8>, edts: Option<Vec<u8>>) -> Vec<u8> {
    let mut content = Vec::new();
    content.extend_from_slice(&build_tkhd_audio(track_id, duration));
+   if let Some(edts_box) = edts {
+      content.extend_from_slice(&edts_box);
+   }
    content.extend_from_slice(&mdia);
    make_box(Mp4Box::Trak.bytes(), &content)
 }
@@ -485,6 +536,7 @@ pub struct AudioMoovParams<'a> {
    pub esds_payload: &'a [u8],
    pub channels: u16,
    pub sample_rate: u32,
+   pub edit_list: Option<&'a [EditListEntry]>,
 }
 
 /// Build a minimal `moov` for a video + audio segment. Offsets for each track
@@ -523,7 +575,9 @@ pub fn build_moov_av(video: &VideoMoovParams, audio: &AudioMoovParams) -> Vec<u8
       v_stbl,
    );
    // Optional edit list for video (edts/elst)
-   let v_edts = video.edit_list.map(build_edts_with_elst);
+   let v_edts = video
+      .edit_list
+      .map(|entries| build_edts_with_elst(entries));
 
    let v_trak = build_trak(
       video.track_id,
@@ -550,9 +604,15 @@ pub fn build_moov_av(video: &VideoMoovParams, audio: &AudioMoovParams) -> Vec<u8
       audio.language.unwrap_or("und"),
       a_stbl,
    );
-   let a_trak = build_trak_audio(audio.track_id, movie_duration, a_mdia);
+   // Optional edit list for audio
+   let a_edts = audio
+      .edit_list
+      .map(|entries| build_edts_with_elst(entries));
+   let a_trak = build_trak_audio(audio.track_id, movie_duration, a_mdia, a_edts);
 
-   let mvhd = build_mvhd(movie_ts, movie_duration);
+   // next_track_id must be > max(track_id)
+   let next_track_id = video.track_id.max(audio.track_id).saturating_add(1);
+   let mvhd = build_mvhd(movie_ts, movie_duration, next_track_id);
    build_moov(mvhd, vec![v_trak, a_trak])
 }
 
@@ -601,7 +661,9 @@ pub fn build_moov_av_with_offsets(
       v_stbl,
    );
    // Optional edit list for video (edts/elst)
-   let v_edts = video.edit_list.map(build_edts_with_elst);
+   let v_edts = video
+      .edit_list
+      .map(|entries| build_edts_with_elst(entries));
 
    let v_trak = build_trak(
       video.track_id,
@@ -628,9 +690,14 @@ pub fn build_moov_av_with_offsets(
       audio.language.unwrap_or("und"),
       a_stbl,
    );
-   let a_trak = build_trak_audio(audio.track_id, movie_duration, a_mdia);
+   // Optional edit list for audio
+   let a_edts = audio
+      .edit_list
+      .map(|entries| build_edts_with_elst(entries));
+   let a_trak = build_trak_audio(audio.track_id, movie_duration, a_mdia, a_edts);
 
-   let mvhd = build_mvhd(movie_ts, movie_duration);
+   let next_track_id = video.track_id.max(audio.track_id).saturating_add(1);
+   let mvhd = build_mvhd(movie_ts, movie_duration, next_track_id);
    build_moov(mvhd, vec![v_trak, a_trak])
 }
 
@@ -670,9 +737,7 @@ pub struct EditListEntry {
 fn build_elst(entries: &[EditListEntry]) -> Vec<u8> {
    // version 1 if duration or media_time don't fit 32-bit
    let v1 = entries.iter().any(|e| {
-      e.segment_duration > u32::MAX as u64
-         || e.media_time > i32::MAX as i64
-         || e.media_time < i32::MIN as i64
+      e.segment_duration > u32::MAX as u64 || e.media_time > i32::MAX as i64 || e.media_time < i32::MIN as i64
    });
    let mut p = Vec::new();
    p.extend_from_slice(&[if v1 { 1 } else { 0 }, 0, 0, 0]); // version + flags
@@ -743,7 +808,7 @@ pub fn build_moov_video(params: &VideoMoovParams) -> Vec<u8> {
    // Optional edit list for single-track build (rare in our flow)
    let v_edts = params
       .edit_list
-      .map(build_edts_with_elst);
+      .map(|entries| build_edts_with_elst(entries));
    let trak = build_trak(
       params.track_id,
       duration_movie,
@@ -752,7 +817,8 @@ pub fn build_moov_video(params: &VideoMoovParams) -> Vec<u8> {
       params.height,
       v_edts,
    );
-   let mvhd = build_mvhd(movie_ts, duration_movie);
+   let next_track_id = params.track_id.saturating_add(1);
+   let mvhd = build_mvhd(movie_ts, duration_movie, next_track_id);
    build_moov(mvhd, vec![trak])
 }
 
@@ -971,14 +1037,16 @@ fn desired_chunk_size() -> usize {
    const MIN: usize = 256 * 1024;
    const DEF: usize = 1024 * 1024;
    const MAX: usize = 4 * 1024 * 1024;
-   if let Ok(v) = std::env::var("MP4_RANGE_CHUNK_KB")
-      && let Ok(kb) = v.parse::<usize>() {
+   if let Ok(v) = std::env::var("MP4_RANGE_CHUNK_KB") {
+      if let Ok(kb) = v.parse::<usize>() {
          return (kb * 1024).clamp(MIN, MAX);
       }
-   if let Ok(v) = std::env::var("MP4_RANGE_CHUNK_BYTES")
-      && let Ok(b) = v.parse::<usize>() {
+   }
+   if let Ok(v) = std::env::var("MP4_RANGE_CHUNK_BYTES") {
+      if let Ok(b) = v.parse::<usize>() {
          return b.clamp(MIN, MAX);
       }
+   }
    DEF
 }
 
