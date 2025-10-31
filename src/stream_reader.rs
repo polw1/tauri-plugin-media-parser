@@ -1,5 +1,9 @@
 use std::collections::HashMap;
 use std::io::{self, SeekFrom};
+#[cfg(unix)]
+use std::os::unix::fs::FileExt as _;
+#[cfg(windows)]
+use std::os::windows::fs::FileExt as _;
 use std::path::Path;
 
 use async_trait::async_trait;
@@ -22,31 +26,86 @@ pub trait StreamReader: Send + Sync {
 
    /// Total content length, if known.
    async fn size(&self) -> io::Result<Option<u64>>;
+
+   /// Read exactly `len` bytes starting at absolute `offset` without
+   /// modifying the internal cursor. Implementations should avoid
+   /// prefetching to minimize bandwidth.
+   async fn read_at(&self, offset: u64, len: usize) -> io::Result<Vec<u8>>;
+
+   /// Read multiple ranges in parallel. Default implementation falls back
+   /// to sequential `read_at` calls.
+   async fn read_ranges(&self, reqs: &[(u64, usize)]) -> io::Result<Vec<Vec<u8>>> {
+      let mut out = Vec::with_capacity(reqs.len());
+      for &(off, len) in reqs {
+         out.push(self.read_at(off, len).await?);
+      }
+      Ok(out)
+   }
 }
 
 /// Tokio-backed reader over a local filesystem file.
-pub struct FileStreamReader(File);
+pub struct FileStreamReader {
+   file: File,
+   std_file: std::fs::File,
+}
 
 impl FileStreamReader {
    /// Open a file at `path` for asynchronous reading and seeking.
    pub fn new<P: AsRef<Path>>(path: P) -> io::Result<Self> {
-      let file = std::fs::File::open(path)?;
-      Ok(Self(File::from_std(file)))
+      let stdf = std::fs::File::open(path)?;
+      let tok = File::from_std(stdf.try_clone()?);
+      Ok(Self { file: tok, std_file: stdf })
    }
 }
 
 #[async_trait]
 impl StreamReader for FileStreamReader {
    async fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-      self.0.read(buf).await
+      self.file.read(buf).await
    }
 
    async fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
-      self.0.seek(pos).await
+      self.file.seek(pos).await
    }
 
    async fn size(&self) -> io::Result<Option<u64>> {
-      Ok(Some(self.0.metadata().await?.len()))
+      Ok(Some(self.file.metadata().await?.len()))
+   }
+
+   async fn read_at(&self, offset: u64, len: usize) -> io::Result<Vec<u8>> {
+      if len == 0 { return Ok(Vec::new()); }
+      let mut buf = vec![0u8; len];
+      // Use OS-specific positioned read without affecting the cursor.
+      // Run in blocking thread to avoid blocking the async runtime.
+      #[cfg(unix)]
+      let std_clone = self.std_file.try_clone()?;
+      #[cfg(windows)]
+      let mut std_clone = self.std_file.try_clone()?;
+      tokio::task::spawn_blocking(move || {
+         #[cfg(unix)]
+         {
+            let mut read_total = 0usize;
+            while read_total < len {
+               let n = std_clone.read_at(&mut buf[read_total..], offset + read_total as u64)?;
+               if n == 0 { break; }
+               read_total += n;
+            }
+            if read_total < len { buf.truncate(read_total); }
+            Ok::<_, io::Error>(buf)
+         }
+         #[cfg(windows)]
+         {
+            use std::io::Read;
+            let mut read_total = 0usize;
+            while read_total < len {
+               let n = std_clone.seek_read(&mut buf[read_total..], offset + read_total as u64)?;
+               if n == 0 { break; }
+               read_total += n;
+            }
+            if read_total < len { buf.truncate(read_total); }
+            Ok::<_, io::Error>(buf)
+         }
+      }).await.map_err(io::Error::other)?
    }
 }
 
@@ -203,6 +262,17 @@ impl StreamReader for HttpStreamReader {
    async fn size(&self) -> io::Result<Option<u64>> {
       Ok(Some(self.length))
    }
+
+   async fn read_at(&self, offset: u64, len: usize) -> io::Result<Vec<u8>> {
+      if len == 0 { return Ok(Vec::new()); }
+      let end = offset.saturating_add(len as u64).saturating_sub(1);
+      let range_header = format!("bytes={}-{}", offset, end);
+      let mut req = self.client.get(&self.url).header(RANGE, range_header);
+      for (k, v) in &self.headers { req = req.header(k, v); }
+      let resp = req.send().await.map_err(io::Error::other)?;
+      let bytes = resp.bytes().await.map_err(io::Error::other)?;
+      Ok(bytes.to_vec())
+   }
 }
 
 // Blanket impl to allow using Box<dyn StreamReader> wherever a StreamReader is required.
@@ -218,6 +288,14 @@ impl<T: StreamReader + ?Sized> StreamReader for Box<T> {
 
    async fn size(&self) -> io::Result<Option<u64>> {
       (**self).size().await
+   }
+
+   async fn read_at(&self, offset: u64, len: usize) -> io::Result<Vec<u8>> {
+      (**self).read_at(offset, len).await
+   }
+
+   async fn read_ranges(&self, reqs: &[(u64, usize)]) -> io::Result<Vec<Vec<u8>>> {
+      (**self).read_ranges(reqs).await
    }
 }
 

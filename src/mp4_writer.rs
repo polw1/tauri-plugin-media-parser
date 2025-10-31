@@ -1,5 +1,6 @@
 use crate::Mp4Box;
 use tokio::io::{self, AsyncWrite, AsyncWriteExt};
+use rayon::join;
 
 fn be_u16(v: u16) -> [u8; 2] {
    v.to_be_bytes()
@@ -19,7 +20,7 @@ fn make_box(typ: [u8; 4], payload: &[u8]) -> Vec<u8> {
    out
 }
 
-// Lightweight writer to build box payloads with chained methods
+// Lightweight writer to build small box payloads with chained methods
 struct BoxWriter {
    buf: Vec<u8>,
 }
@@ -46,6 +47,28 @@ impl BoxWriter {
    fn into_box(self, fourcc: [u8; 4]) -> Vec<u8> {
       make_box(fourcc, &self.buf)
    }
+}
+
+// Hierarchical writer that allows building nested boxes into a single buffer
+struct HierBoxWriter {
+   buf: Vec<u8>,
+}
+impl HierBoxWriter {
+   fn with_capacity(cap: usize) -> Self { Self { buf: Vec::with_capacity(cap) } }
+   fn bytes(&mut self, b: &[u8]) { self.buf.extend_from_slice(b); }
+   // Start a new box: write placeholder size and type, return start offset
+   fn start_box(&mut self, fourcc: [u8; 4]) -> usize {
+      let start = self.buf.len();
+      self.buf.extend_from_slice(&[0u8; 4]);
+      self.buf.extend_from_slice(&fourcc);
+      start
+   }
+   // Finalize a box started at `start`, patching its size
+   fn end_box(&mut self, start: usize) {
+      let size = (self.buf.len() - start) as u32;
+      self.buf[start..start + 4].copy_from_slice(&be_u32(size));
+   }
+   fn into_vec(self) -> Vec<u8> { self.buf }
 }
 
 pub fn build_ftyp_isom() -> Vec<u8> {
@@ -356,25 +379,28 @@ fn build_stbl(
    offsets: &[u64],
    video_params: VideoTrackParams,
 ) -> Vec<u8> {
-   let mut content = Vec::new();
-   content.extend_from_slice(&build_stsd_avc1(
-      video_params.width,
-      video_params.height,
-      video_params.avcc_payload,
-   ));
-   content.extend_from_slice(&build_stts(stts_pairs));
-   if let Some(ctts) = ctts_pairs {
-      content.extend_from_slice(&build_ctts(ctts));
-   }
-   content.extend_from_slice(&build_stsz(sizes));
-   content.extend_from_slice(&build_stsc_one_sample_per_chunk());
-   content.extend_from_slice(&build_chunk_offsets_box(offsets));
-   if let Some(s) = sync_1based
-      && !s.is_empty()
-   {
-      content.extend_from_slice(&build_stss(s));
-   }
-   make_box(Mp4Box::Stbl.bytes(), &content)
+   // Estimate sub-box sizes to reserve once
+   let stsd = build_stsd_avc1(video_params.width, video_params.height, video_params.avcc_payload);
+   let stts = build_stts(stts_pairs);
+   let ctts = ctts_pairs.map(build_ctts);
+   let stsz = build_stsz(sizes);
+   let stsc = build_stsc_one_sample_per_chunk();
+   let offs = build_chunk_offsets_box(offsets);
+   let stss = sync_1based.filter(|s| !s.is_empty()).map(build_stss);
+
+   let mut w = HierBoxWriter::with_capacity(
+      8 + stsd.len() + stts.len() + stsz.len() + stsc.len() + offs.len() + stss.as_ref().map(|v| v.len()).unwrap_or(0) + ctts.as_ref().map(|v| v.len()).unwrap_or(0),
+   );
+   let stbl_start = w.start_box(Mp4Box::Stbl.bytes());
+   w.bytes(&stsd);
+   w.bytes(&stts);
+   if let Some(ref c) = ctts { w.bytes(c); }
+   w.bytes(&stsz);
+   w.bytes(&stsc);
+   w.bytes(&offs);
+   if let Some(ref s) = stss { w.bytes(s); }
+   w.end_box(stbl_start);
+   w.into_vec()
 }
 
 fn build_stbl_custom(
@@ -385,21 +411,26 @@ fn build_stbl_custom(
    sync_1based: Option<&[u32]>,
    offsets: &[u64],
 ) -> Vec<u8> {
-   let mut content = Vec::new();
-   content.extend_from_slice(&stsd_box);
-   content.extend_from_slice(&build_stts(stts_pairs));
-   if let Some(ctts) = ctts_pairs {
-      content.extend_from_slice(&build_ctts(ctts));
-   }
-   content.extend_from_slice(&build_stsz(sizes));
-   content.extend_from_slice(&build_stsc_one_sample_per_chunk());
-   content.extend_from_slice(&build_chunk_offsets_box(offsets));
-   if let Some(s) = sync_1based
-      && !s.is_empty()
-   {
-      content.extend_from_slice(&build_stss(s));
-   }
-   make_box(Mp4Box::Stbl.bytes(), &content)
+   let stts = build_stts(stts_pairs);
+   let ctts = ctts_pairs.map(build_ctts);
+   let stsz = build_stsz(sizes);
+   let stsc = build_stsc_one_sample_per_chunk();
+   let offs = build_chunk_offsets_box(offsets);
+   let stss = sync_1based.filter(|s| !s.is_empty()).map(build_stss);
+
+   let mut w = HierBoxWriter::with_capacity(
+      8 + stsd_box.len() + stts.len() + stsz.len() + stsc.len() + offs.len() + stss.as_ref().map(|v| v.len()).unwrap_or(0) + ctts.as_ref().map(|v| v.len()).unwrap_or(0),
+   );
+   let stbl_start = w.start_box(Mp4Box::Stbl.bytes());
+   w.bytes(&stsd_box);
+   w.bytes(&stts);
+   if let Some(ref c) = ctts { w.bytes(c); }
+   w.bytes(&stsz);
+   w.bytes(&stsc);
+   w.bytes(&offs);
+   if let Some(ref s) = stss { w.bytes(s); }
+   w.end_box(stbl_start);
+   w.into_vec()
 }
 
 fn build_vmhd() -> Vec<u8> {
@@ -641,19 +672,31 @@ pub fn build_moov_av_with_offsets(
    let a_dur_mv = scale_duration(a_dur_tr, a_track_ts, movie_ts);
    let movie_duration = v_dur_mv.max(a_dur_mv);
 
-   // stbl for video (use provided offsets)
-   let v_stbl = build_stbl(
-      video.sample_sizes,
-      video.stts_pairs,
-      video.ctts_pairs,
-      video_sync_samples_1based,
-      video_offsets,
-      VideoTrackParams {
-         width: video.width,
-         height: video.height,
-         avcc_payload: video.avcc_payload,
+   // Build stbl for video and audio in parallel
+   let (v_stbl, a_stbl) = join(
+      || {
+         build_stbl(
+            video.sample_sizes,
+            video.stts_pairs,
+            video.ctts_pairs,
+            video_sync_samples_1based,
+            video_offsets,
+            VideoTrackParams { width: video.width, height: video.height, avcc_payload: video.avcc_payload },
+         )
+      },
+      || {
+         let a_stsd = build_stsd_mp4a(audio.channels, audio.sample_rate, audio.esds_payload);
+         build_stbl_custom(
+            a_stsd,
+            audio.sample_sizes,
+            audio.stts_pairs,
+            audio.ctts_pairs,
+            None,
+            audio_offsets,
+         )
       },
    );
+
    let v_mdia = build_mdia(
       v_track_ts,
       v_dur_tr,
@@ -674,16 +717,6 @@ pub fn build_moov_av_with_offsets(
       v_edts,
    );
 
-   // stbl for audio (use provided offsets)
-   let a_stsd = build_stsd_mp4a(audio.channels, audio.sample_rate, audio.esds_payload);
-   let a_stbl = build_stbl_custom(
-      a_stsd,
-      audio.sample_sizes,
-      audio.stts_pairs,
-      audio.ctts_pairs,
-      None,
-      audio_offsets,
-   );
    let a_mdia = build_mdia_soun(
       a_track_ts,
       a_dur_tr,
@@ -956,6 +989,7 @@ pub fn coalesce_sample_reads(samples: &[SampleRef], max_gap: u64) -> Vec<Coalesc
 
 /// Stream a minimal MP4 file (ftyp + moov + mdat) to `sink`, using `src` to
 /// read sample payloads from given source offsets.
+#[allow(dead_code)]
 pub async fn stream_mp4_segment(
    src: &mut dyn crate::stream_reader::StreamReader,
    meta: &VideoMoovParams<'_>,

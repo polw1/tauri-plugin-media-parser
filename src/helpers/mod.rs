@@ -73,10 +73,16 @@ macro_rules! mp4_extractors {
             let count = u32::from_be_bytes([
                 $slf[$count_off], $slf[$count_off + 1], $slf[$count_off + 2], $slf[$count_off + 3]
             ]) as usize;
-            (0..count).filter_map(|i| {
+            let mut out: Vec<$ret> = Vec::with_capacity(count);
+            for i in 0..count {
                 let $pos = $count_off + 4 + i * $item_len;
-                ($slf.len() >= $pos + $item_len).then(|| $body)
-            }).collect()
+                if $slf.len() >= $pos + $item_len {
+                    out.push($body);
+                } else {
+                    break;
+                }
+            }
+            out
         })*
     };
 }
@@ -130,23 +136,25 @@ impl Mp4Nav for [u8] {
          return Vec::new();
       }
       let count = u32::from_be_bytes([self[4], self[5], self[6], self[7]]) as usize;
-      (0..count)
-         .filter_map(|i| {
-            let pos = 8 + i * 8;
-            (self.len() >= pos + 8).then(|| {
-               u64::from_be_bytes([
-                  self[pos],
-                  self[pos + 1],
-                  self[pos + 2],
-                  self[pos + 3],
-                  self[pos + 4],
-                  self[pos + 5],
-                  self[pos + 6],
-                  self[pos + 7],
-               ])
-            })
-         })
-         .collect()
+      let mut out: Vec<u64> = Vec::with_capacity(count);
+      for i in 0..count {
+         let pos = 8 + i * 8;
+         if self.len() >= pos + 8 {
+            out.push(u64::from_be_bytes([
+               self[pos],
+               self[pos + 1],
+               self[pos + 2],
+               self[pos + 3],
+               self[pos + 4],
+               self[pos + 5],
+               self[pos + 6],
+               self[pos + 7],
+            ]));
+         } else {
+            break;
+         }
+      }
+      out
    }
 }
 
@@ -377,6 +385,7 @@ pub struct TimeSelection {
 
 /// Build per-sample timestamps from `(count, delta)` timing pairs.
 /// This mirrors `build_timestamps` but returns a vector for internal reuse.
+#[allow(dead_code)]
 fn timestamps_from_pairs(timescale: u32, timing: &[(u32, u32)]) -> Vec<(f64, f64)> {
    build_timestamps(timescale, timing)
 }
@@ -397,71 +406,99 @@ pub fn select_samples_by_time(
    if !(end.is_finite() && start.is_finite()) || end <= start {
       return Err("invalid time range");
    }
-   let samples = timestamps_from_pairs(timescale, timing);
-   if samples.is_empty() {
+   if timing.is_empty() {
       return Err("no samples");
    }
 
-   // Find the sample index containing or immediately preceding `start`.
-   let mut idx_at_or_before_start = 0usize;
-   for (i, (s, d)) in samples.iter().enumerate() {
-      if *s <= start && start < s + d {
-         idx_at_or_before_start = i;
+   // Convert seconds to ticks (floor). Use u128 to avoid overflow, clamp later.
+   let ts = timescale as u64;
+   let start_ticks: u64 = if start <= 0.0 { 0 } else { (start * ts as f64).floor() as u64 };
+   let end_ticks: u64 = (end * ts as f64).floor() as u64;
+   if end_ticks == 0 { return Err("empty selection"); }
+
+   // Total samples and helpers
+   let mut total_samples: usize = 0;
+   for &(c, _) in timing { total_samples = total_samples.saturating_add(c as usize); }
+   if total_samples == 0 { return Err("no samples"); }
+
+   // Find index at/preceding start
+   let mut idx_base: usize = 0;
+   let mut t_base: u64 = 0;
+   let mut idx_at_or_before_start: usize = 0;
+   for &(count, delta) in timing {
+      let c = count as usize;
+      let d = delta as u64;
+      let pair_end_t = t_base.saturating_add(d.saturating_mul(count as u64));
+      if start_ticks < t_base {
+         // start before this pair; pick first sample of this pair
+         idx_at_or_before_start = idx_base;
          break;
-      }
-      if *s <= start {
-         idx_at_or_before_start = i;
+      } else if start_ticks < pair_end_t {
+         // start falls inside this pair
+         let k = ((start_ticks - t_base) / d) as usize;
+         idx_at_or_before_start = idx_base + k.min(c.saturating_sub(1));
+         break;
+      } else {
+         // move to next pair
+         idx_base += c;
+         t_base = pair_end_t;
+         idx_at_or_before_start = idx_base.saturating_sub(1);
       }
    }
+   if idx_base >= total_samples { idx_at_or_before_start = total_samples.saturating_sub(1); }
 
-   // Align to previous keyframe if provided.
+   // Align start to previous keyframe if provided
    let start_index = if let Some(stss) = stss_1based {
       if stss.is_empty() {
          idx_at_or_before_start
       } else {
-         // Convert to 0-based indices and find the greatest <= idx.
-         let mut sync_idx = 0usize;
-         let mut found = false;
-         for &n in stss {
-            if n == 0 {
-               continue;
-            }
-            let z = (n - 1) as usize;
-            if z <= idx_at_or_before_start {
-               sync_idx = z;
-               found = true;
-            } else {
-               break;
-            }
+         // binary search greatest <= idx_at_or_before_start
+         let mut lo = 0usize; let mut hi = stss.len();
+         while lo < hi {
+            let mid = (lo + hi) / 2;
+            let z = (stss[mid].saturating_sub(1)) as usize;
+            if z <= idx_at_or_before_start { lo = mid + 1; } else { hi = mid; }
          }
-         if found { sync_idx } else { 0 }
+         if lo == 0 { 0 } else { (stss[lo - 1].saturating_sub(1)) as usize }
       }
    } else {
       idx_at_or_before_start
    };
 
-   // Include all samples with start < end.
-   let mut end_index = start_index;
-   for (i, (s, _d)) in samples.iter().enumerate().skip(start_index) {
-      if *s < end {
-         end_index = i;
-      } else {
-         break;
+   // Compute end_index: last sample with start_time < end
+   let mut end_index: usize = 0;
+   idx_base = 0; t_base = 0;
+   for &(count, delta) in timing {
+      let c = count as usize; let d = delta as u64;
+      if end_ticks <= t_base { break; }
+      let span = d.saturating_mul(count as u64);
+      // number of samples in this pair with start < end_ticks
+      let pair_count_included = if end_ticks <= t_base { 0 } else { (((end_ticks - 1).saturating_sub(t_base)) / d + 1).min(count as u64) } as usize;
+      if pair_count_included > 0 {
+         end_index = idx_base + pair_count_included - 1;
       }
+      idx_base += c; t_base = t_base.saturating_add(span);
    }
-   if end_index < start_index {
-      return Err("empty selection");
-   }
+   if end_index < start_index { return Err("empty selection"); }
 
-   let adjusted_start = samples[start_index].0;
-   let last = samples[end_index];
-   let adjusted_end = last.0 + last.1;
-   Ok(TimeSelection {
-      start_index,
-      end_index,
-      adjusted_start,
-      adjusted_end,
-   })
+   // Compute adjusted_start and adjusted_end
+   // Compute start_ticks_exact and last sample duration
+   let mut t_acc: u64 = 0; let mut i_acc: usize = 0; let mut start_ticks_exact: u64 = 0; let mut last_delta: u64 = 0; let mut got_start = false;
+   for &(count, delta) in timing {
+      let c = count as usize; let d = delta as u64;
+      if !got_start && start_index >= i_acc && start_index < i_acc + c {
+         let offset_in_pair = (start_index - i_acc) as u64;
+         start_ticks_exact = t_acc.saturating_add(d.saturating_mul(offset_in_pair));
+         got_start = true;
+      }
+      if end_index < i_acc + c { last_delta = d; break; }
+      i_acc += c; t_acc = t_acc.saturating_add(d.saturating_mul(count as u64));
+      last_delta = d; // in case end falls exactly on boundary, keep last seen
+   }
+   let adjusted_start = (start_ticks_exact as f64) / (ts as f64);
+   let adjusted_end = ((start_ticks_exact + (end_index - start_index) as u64 * last_delta + last_delta) as f64) / (ts as f64);
+
+   Ok(TimeSelection { start_index, end_index, adjusted_start, adjusted_end })
 }
 
 /// Iterator over child MP4 boxes of a given payload.
