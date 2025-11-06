@@ -1,6 +1,23 @@
+[workspace]
+resolver = "2"
+members = [
+   "crates/media-parser",
+]
+
 [package]
-name = "media_parser"
+name = "tauri-plugin-media-parser"
 version = "0.1.0"
-description = "Async MP4 parser utilities: metadata, tracks, thumbnails, and subtitles over seekable file/HTTP streams."
+description = "A Tauri plugin for parsing MP4 media files: metadata, tracks, frames, and subtitles"
+license = "MIT"
 edition = "2024"
-rust-version = "1.89.0"
+rust-version = "1.89"
+links = "tauri-plugin-media-parser"
+
+[dependencies]
+tauri = "2.5.1"
+serde = { version = "1", features = ["derive"] }
+thiserror = "1"
+media-parser = { path = "crates/media-parser" }
+
+[build-dependencies]
+tauri-plugin = { version = "2.5.1", features = ["build"] }

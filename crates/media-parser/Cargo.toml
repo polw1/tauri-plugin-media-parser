@@ -1,0 +1,11 @@
+[package]
+name = "media-parser"
+version = "0.1.0"
+description = "Async MP4 parser utilities: metadata, tracks, frames, and subtitles over seekable file/HTTP streams."
+edition = "2024"
+rust-version = "1.89.0"
+
+[dependencies]
+thiserror = "2.0.16"
+async-trait = "0.1.89"
+
