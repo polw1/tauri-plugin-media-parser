@@ -662,6 +662,7 @@ pub fn build_moov_av_with_offsets(
    video_offsets: &[u64],
    audio_offsets: &[u64],
    video_sync_samples_1based: Option<&[u32]>,
+   movie_duration_override: Option<u64>,
 ) -> Vec<u8> {
    let movie_ts = video.movie_timescale.unwrap_or(video.track_timescale);
    let v_track_ts = video.track_timescale;
@@ -670,7 +671,10 @@ pub fn build_moov_av_with_offsets(
    let a_dur_tr = total_duration(audio.stts_pairs);
    let v_dur_mv = scale_duration(v_dur_tr, v_track_ts, movie_ts);
    let a_dur_mv = scale_duration(a_dur_tr, a_track_ts, movie_ts);
-   let movie_duration = v_dur_mv.max(a_dur_mv);
+   let mut movie_duration = v_dur_mv.max(a_dur_mv);
+   if let Some(override_duration) = movie_duration_override {
+      movie_duration = override_duration;
+   }
 
    // Build stbl for video and audio in parallel
    let (v_stbl, a_stbl) = join(
