@@ -412,14 +412,24 @@ pub fn select_samples_by_time(
 
    // Convert seconds to ticks (floor). Use u128 to avoid overflow, clamp later.
    let ts = timescale as u64;
-   let start_ticks: u64 = if start <= 0.0 { 0 } else { (start * ts as f64).floor() as u64 };
+   let start_ticks: u64 = if start <= 0.0 {
+      0
+   } else {
+      (start * ts as f64).floor() as u64
+   };
    let end_ticks: u64 = (end * ts as f64).floor() as u64;
-   if end_ticks == 0 { return Err("empty selection"); }
+   if end_ticks == 0 {
+      return Err("empty selection");
+   }
 
    // Total samples and helpers
    let mut total_samples: usize = 0;
-   for &(c, _) in timing { total_samples = total_samples.saturating_add(c as usize); }
-   if total_samples == 0 { return Err("no samples"); }
+   for &(c, _) in timing {
+      total_samples = total_samples.saturating_add(c as usize);
+   }
+   if total_samples == 0 {
+      return Err("no samples");
+   }
 
    // Find index at/preceding start
    let mut idx_base: usize = 0;
@@ -445,7 +455,9 @@ pub fn select_samples_by_time(
          idx_at_or_before_start = idx_base.saturating_sub(1);
       }
    }
-   if idx_base >= total_samples { idx_at_or_before_start = total_samples.saturating_sub(1); }
+   if idx_base >= total_samples {
+      idx_at_or_before_start = total_samples.saturating_sub(1);
+   }
 
    // Align start to previous keyframe if provided
    let start_index = if let Some(stss) = stss_1based {
@@ -453,13 +465,22 @@ pub fn select_samples_by_time(
          idx_at_or_before_start
       } else {
          // binary search greatest <= idx_at_or_before_start
-         let mut lo = 0usize; let mut hi = stss.len();
+         let mut lo = 0usize;
+         let mut hi = stss.len();
          while lo < hi {
             let mid = (lo + hi) / 2;
             let z = (stss[mid].saturating_sub(1)) as usize;
-            if z <= idx_at_or_before_start { lo = mid + 1; } else { hi = mid; }
+            if z <= idx_at_or_before_start {
+               lo = mid + 1;
+            } else {
+               hi = mid;
+            }
          }
-         if lo == 0 { 0 } else { (stss[lo - 1].saturating_sub(1)) as usize }
+         if lo == 0 {
+            0
+         } else {
+            (stss[lo - 1].saturating_sub(1)) as usize
+         }
       }
    } else {
       idx_at_or_before_start
@@ -467,38 +488,65 @@ pub fn select_samples_by_time(
 
    // Compute end_index: last sample with start_time < end
    let mut end_index: usize = 0;
-   idx_base = 0; t_base = 0;
+   idx_base = 0;
+   t_base = 0;
    for &(count, delta) in timing {
-      let c = count as usize; let d = delta as u64;
-      if end_ticks <= t_base { break; }
+      let c = count as usize;
+      let d = delta as u64;
+      if end_ticks <= t_base {
+         break;
+      }
       let span = d.saturating_mul(count as u64);
       // number of samples in this pair with start < end_ticks
-      let pair_count_included = if end_ticks <= t_base { 0 } else { (((end_ticks - 1).saturating_sub(t_base)) / d + 1).min(count as u64) } as usize;
+      let pair_count_included = if end_ticks <= t_base {
+         0
+      } else {
+         (((end_ticks - 1).saturating_sub(t_base)) / d + 1).min(count as u64)
+      } as usize;
       if pair_count_included > 0 {
          end_index = idx_base + pair_count_included - 1;
       }
-      idx_base += c; t_base = t_base.saturating_add(span);
+      idx_base += c;
+      t_base = t_base.saturating_add(span);
    }
-   if end_index < start_index { return Err("empty selection"); }
+   if end_index < start_index {
+      return Err("empty selection");
+   }
 
    // Compute adjusted_start and adjusted_end
    // Compute start_ticks_exact and last sample duration
-   let mut t_acc: u64 = 0; let mut i_acc: usize = 0; let mut start_ticks_exact: u64 = 0; let mut last_delta: u64 = 0; let mut got_start = false;
+   let mut t_acc: u64 = 0;
+   let mut i_acc: usize = 0;
+   let mut start_ticks_exact: u64 = 0;
+   let mut last_delta: u64 = 0;
+   let mut got_start = false;
    for &(count, delta) in timing {
-      let c = count as usize; let d = delta as u64;
+      let c = count as usize;
+      let d = delta as u64;
       if !got_start && start_index >= i_acc && start_index < i_acc + c {
          let offset_in_pair = (start_index - i_acc) as u64;
          start_ticks_exact = t_acc.saturating_add(d.saturating_mul(offset_in_pair));
          got_start = true;
       }
-      if end_index < i_acc + c { last_delta = d; break; }
-      i_acc += c; t_acc = t_acc.saturating_add(d.saturating_mul(count as u64));
+      if end_index < i_acc + c {
+         last_delta = d;
+         break;
+      }
+      i_acc += c;
+      t_acc = t_acc.saturating_add(d.saturating_mul(count as u64));
       last_delta = d; // in case end falls exactly on boundary, keep last seen
    }
    let adjusted_start = (start_ticks_exact as f64) / (ts as f64);
-   let adjusted_end = ((start_ticks_exact + (end_index - start_index) as u64 * last_delta + last_delta) as f64) / (ts as f64);
+   let adjusted_end =
+      ((start_ticks_exact + (end_index - start_index) as u64 * last_delta + last_delta) as f64)
+         / (ts as f64);
 
-   Ok(TimeSelection { start_index, end_index, adjusted_start, adjusted_end })
+   Ok(TimeSelection {
+      start_index,
+      end_index,
+      adjusted_start,
+      adjusted_end,
+   })
 }
 
 /// Iterator over child MP4 boxes of a given payload.

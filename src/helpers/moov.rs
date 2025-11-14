@@ -50,7 +50,9 @@ pub async fn find_moov_box(stream: &mut dyn StreamReader) -> io::Result<MoovBoxI
       if let Some(info) = scan_buffer(&buf, offset, file_size, false) {
          return Ok(info);
       }
-      if buf.is_empty() { break; }
+      if buf.is_empty() {
+         break;
+      }
       offset = offset.saturating_add(buf.len() as u64);
    }
 
@@ -64,8 +66,12 @@ pub async fn find_moov_box(stream: &mut dyn StreamReader) -> io::Result<MoovBoxI
       if let Some(info) = scan_buffer(&buf, offset, file_size, false) {
          return Ok(info);
       }
-      if offset <= trailer_start { break; }
-      if offset < INITIAL_SEARCH_SIZE as u64 { break; }
+      if offset <= trailer_start {
+         break;
+      }
+      if offset < INITIAL_SEARCH_SIZE as u64 {
+         break;
+      }
       offset = offset.saturating_sub(INITIAL_SEARCH_SIZE as u64);
    }
 
@@ -75,7 +81,12 @@ pub async fn find_moov_box(stream: &mut dyn StreamReader) -> io::Result<MoovBoxI
    ))
 }
 
-fn scan_buffer(buf: &[u8], base_offset: u64, file_size: u64, confirm_mvhd: bool) -> Option<MoovBoxInfo> {
+fn scan_buffer(
+   buf: &[u8],
+   base_offset: u64,
+   file_size: u64,
+   confirm_mvhd: bool,
+) -> Option<MoovBoxInfo> {
    let mut off = 0usize;
    while off + 8 <= buf.len() {
       let size32 = u32::from_be_bytes([buf[off], buf[off + 1], buf[off + 2], buf[off + 3]]) as u64;
@@ -87,8 +98,14 @@ fn scan_buffer(buf: &[u8], base_offset: u64, file_size: u64, confirm_mvhd: bool)
             break;
          }
          box_size = u64::from_be_bytes([
-            buf[off + 8], buf[off + 9], buf[off + 10], buf[off + 11],
-            buf[off + 12], buf[off + 13], buf[off + 14], buf[off + 15],
+            buf[off + 8],
+            buf[off + 9],
+            buf[off + 10],
+            buf[off + 11],
+            buf[off + 12],
+            buf[off + 13],
+            buf[off + 14],
+            buf[off + 15],
          ]);
          16usize
       } else {
@@ -114,13 +131,18 @@ fn scan_buffer(buf: &[u8], base_offset: u64, file_size: u64, confirm_mvhd: bool)
                   }
                }
             }
-            return Some(MoovBoxInfo { position: abs_pos, size: box_size });
+            return Some(MoovBoxInfo {
+               position: abs_pos,
+               size: box_size,
+            });
          }
       }
 
       // advance to next box
       // if box_size goes beyond buffer, stop to avoid infinite loop
-      if box_size == 0 { break; }
+      if box_size == 0 {
+         break;
+      }
       if off as u64 + box_size <= buf.len() as u64 {
          off += box_size as usize;
       } else {

@@ -116,6 +116,7 @@ async fn handler_works_and_streams_prefix() {
          language: Some("und"),
          mdat_base_offset: 0,
          avcc_payload: &avcc,
+         tkhd_duration_movie: None,
       };
       let moov_tmp = build_moov_video(&provisional);
       let mdat_base = (ftyp.len() as u64) + (moov_tmp.len() as u64) + 8u64;

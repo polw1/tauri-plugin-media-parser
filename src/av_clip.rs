@@ -61,14 +61,15 @@ pub fn plan_av_clip_from_moov(
          continue;
       }
       if let Some(tkhd) = pl[..].nav(&mp4_path!(Tkhd))
-         && let Some(id) = track_id_from_tkhd(tkhd) {
-            if id == v_track_id {
-               v_trak = Some(pl);
-            }
-            if id == a_track_id {
-               a_trak = Some(pl);
-            }
+         && let Some(id) = track_id_from_tkhd(tkhd)
+      {
+         if id == v_track_id {
+            v_trak = Some(pl);
          }
+         if id == a_track_id {
+            a_trak = Some(pl);
+         }
+      }
    }
    let v_trak = v_trak.ok_or(PlanError::TrackNotFound)?;
    let a_trak = a_trak.ok_or(PlanError::TrackNotFound)?;

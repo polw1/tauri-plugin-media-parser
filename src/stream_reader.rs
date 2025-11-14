@@ -54,7 +54,10 @@ impl FileStreamReader {
    pub fn new<P: AsRef<Path>>(path: P) -> io::Result<Self> {
       let stdf = std::fs::File::open(path)?;
       let tok = File::from_std(stdf.try_clone()?);
-      Ok(Self { file: tok, std_file: stdf })
+      Ok(Self {
+         file: tok,
+         std_file: stdf,
+      })
    }
 }
 
@@ -73,7 +76,9 @@ impl StreamReader for FileStreamReader {
    }
 
    async fn read_at(&self, offset: u64, len: usize) -> io::Result<Vec<u8>> {
-      if len == 0 { return Ok(Vec::new()); }
+      if len == 0 {
+         return Ok(Vec::new());
+      }
       let mut buf = vec![0u8; len];
       // Use OS-specific positioned read without affecting the cursor.
       // Run in blocking thread to avoid blocking the async runtime.
@@ -87,10 +92,14 @@ impl StreamReader for FileStreamReader {
             let mut read_total = 0usize;
             while read_total < len {
                let n = std_clone.read_at(&mut buf[read_total..], offset + read_total as u64)?;
-               if n == 0 { break; }
+               if n == 0 {
+                  break;
+               }
                read_total += n;
             }
-            if read_total < len { buf.truncate(read_total); }
+            if read_total < len {
+               buf.truncate(read_total);
+            }
             Ok::<_, io::Error>(buf)
          }
          #[cfg(windows)]
@@ -99,13 +108,19 @@ impl StreamReader for FileStreamReader {
             let mut read_total = 0usize;
             while read_total < len {
                let n = std_clone.seek_read(&mut buf[read_total..], offset + read_total as u64)?;
-               if n == 0 { break; }
+               if n == 0 {
+                  break;
+               }
                read_total += n;
             }
-            if read_total < len { buf.truncate(read_total); }
+            if read_total < len {
+               buf.truncate(read_total);
+            }
             Ok::<_, io::Error>(buf)
          }
-      }).await.map_err(io::Error::other)?
+      })
+      .await
+      .map_err(io::Error::other)?
    }
 }
 
@@ -264,11 +279,15 @@ impl StreamReader for HttpStreamReader {
    }
 
    async fn read_at(&self, offset: u64, len: usize) -> io::Result<Vec<u8>> {
-      if len == 0 { return Ok(Vec::new()); }
+      if len == 0 {
+         return Ok(Vec::new());
+      }
       let end = offset.saturating_add(len as u64).saturating_sub(1);
       let range_header = format!("bytes={}-{}", offset, end);
       let mut req = self.client.get(&self.url).header(RANGE, range_header);
-      for (k, v) in &self.headers { req = req.header(k, v); }
+      for (k, v) in &self.headers {
+         req = req.header(k, v);
+      }
       let resp = req.send().await.map_err(io::Error::other)?;
       let bytes = resp.bytes().await.map_err(io::Error::other)?;
       Ok(bytes.to_vec())

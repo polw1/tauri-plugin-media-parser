@@ -1,6 +1,6 @@
 use crate::Mp4Box;
-use tokio::io::{self, AsyncWrite, AsyncWriteExt};
 use rayon::join;
+use tokio::io::{self, AsyncWrite, AsyncWriteExt};
 
 fn be_u16(v: u16) -> [u8; 2] {
    v.to_be_bytes()
@@ -54,8 +54,14 @@ struct HierBoxWriter {
    buf: Vec<u8>,
 }
 impl HierBoxWriter {
-   fn with_capacity(cap: usize) -> Self { Self { buf: Vec::with_capacity(cap) } }
-   fn bytes(&mut self, b: &[u8]) { self.buf.extend_from_slice(b); }
+   fn with_capacity(cap: usize) -> Self {
+      Self {
+         buf: Vec::with_capacity(cap),
+      }
+   }
+   fn bytes(&mut self, b: &[u8]) {
+      self.buf.extend_from_slice(b);
+   }
    // Start a new box: write placeholder size and type, return start offset
    fn start_box(&mut self, fourcc: [u8; 4]) -> usize {
       let start = self.buf.len();
@@ -68,7 +74,9 @@ impl HierBoxWriter {
       let size = (self.buf.len() - start) as u32;
       self.buf[start..start + 4].copy_from_slice(&be_u32(size));
    }
-   fn into_vec(self) -> Vec<u8> { self.buf }
+   fn into_vec(self) -> Vec<u8> {
+      self.buf
+   }
 }
 
 pub fn build_ftyp_isom() -> Vec<u8> {
@@ -380,7 +388,11 @@ fn build_stbl(
    video_params: VideoTrackParams,
 ) -> Vec<u8> {
    // Estimate sub-box sizes to reserve once
-   let stsd = build_stsd_avc1(video_params.width, video_params.height, video_params.avcc_payload);
+   let stsd = build_stsd_avc1(
+      video_params.width,
+      video_params.height,
+      video_params.avcc_payload,
+   );
    let stts = build_stts(stts_pairs);
    let ctts = ctts_pairs.map(build_ctts);
    let stsz = build_stsz(sizes);
@@ -389,16 +401,26 @@ fn build_stbl(
    let stss = sync_1based.filter(|s| !s.is_empty()).map(build_stss);
 
    let mut w = HierBoxWriter::with_capacity(
-      8 + stsd.len() + stts.len() + stsz.len() + stsc.len() + offs.len() + stss.as_ref().map(|v| v.len()).unwrap_or(0) + ctts.as_ref().map(|v| v.len()).unwrap_or(0),
+      8 + stsd.len()
+         + stts.len()
+         + stsz.len()
+         + stsc.len()
+         + offs.len()
+         + stss.as_ref().map(|v| v.len()).unwrap_or(0)
+         + ctts.as_ref().map(|v| v.len()).unwrap_or(0),
    );
    let stbl_start = w.start_box(Mp4Box::Stbl.bytes());
    w.bytes(&stsd);
    w.bytes(&stts);
-   if let Some(ref c) = ctts { w.bytes(c); }
+   if let Some(ref c) = ctts {
+      w.bytes(c);
+   }
    w.bytes(&stsz);
    w.bytes(&stsc);
    w.bytes(&offs);
-   if let Some(ref s) = stss { w.bytes(s); }
+   if let Some(ref s) = stss {
+      w.bytes(s);
+   }
    w.end_box(stbl_start);
    w.into_vec()
 }
@@ -419,16 +441,26 @@ fn build_stbl_custom(
    let stss = sync_1based.filter(|s| !s.is_empty()).map(build_stss);
 
    let mut w = HierBoxWriter::with_capacity(
-      8 + stsd_box.len() + stts.len() + stsz.len() + stsc.len() + offs.len() + stss.as_ref().map(|v| v.len()).unwrap_or(0) + ctts.as_ref().map(|v| v.len()).unwrap_or(0),
+      8 + stsd_box.len()
+         + stts.len()
+         + stsz.len()
+         + stsc.len()
+         + offs.len()
+         + stss.as_ref().map(|v| v.len()).unwrap_or(0)
+         + ctts.as_ref().map(|v| v.len()).unwrap_or(0),
    );
    let stbl_start = w.start_box(Mp4Box::Stbl.bytes());
    w.bytes(&stsd_box);
    w.bytes(&stts);
-   if let Some(ref c) = ctts { w.bytes(c); }
+   if let Some(ref c) = ctts {
+      w.bytes(c);
+   }
    w.bytes(&stsz);
    w.bytes(&stsc);
    w.bytes(&offs);
-   if let Some(ref s) = stss { w.bytes(s); }
+   if let Some(ref s) = stss {
+      w.bytes(s);
+   }
    w.end_box(stbl_start);
    w.into_vec()
 }
@@ -556,6 +588,7 @@ fn build_trak_audio(track_id: u32, duration: u64, mdia: Vec<u8>, edts: Option<Ve
    make_box(Mp4Box::Trak.bytes(), &content)
 }
 
+#[derive(Clone, Copy)]
 pub struct AudioMoovParams<'a> {
    pub track_timescale: u32,
    pub stts_pairs: &'a [(u32, u32)],
@@ -568,6 +601,7 @@ pub struct AudioMoovParams<'a> {
    pub channels: u16,
    pub sample_rate: u32,
    pub edit_list: Option<&'a [EditListEntry]>,
+   pub tkhd_duration_movie: Option<u64>,
 }
 
 /// Build a minimal `moov` for a video + audio segment. Offsets for each track
@@ -581,6 +615,8 @@ pub fn build_moov_av(video: &VideoMoovParams, audio: &AudioMoovParams) -> Vec<u8
    let v_dur_mv = scale_duration(v_dur_tr, v_track_ts, movie_ts);
    let a_dur_mv = scale_duration(a_dur_tr, a_track_ts, movie_ts);
    let movie_duration = v_dur_mv.max(a_dur_mv);
+   let video_tkhd_duration = video.tkhd_duration_movie.unwrap_or(v_dur_mv);
+   let audio_tkhd_duration = audio.tkhd_duration_movie.unwrap_or(a_dur_mv);
 
    // Offsets
    let v_offsets = compute_offsets(video.mdat_base_offset, video.sample_sizes);
@@ -606,13 +642,11 @@ pub fn build_moov_av(video: &VideoMoovParams, audio: &AudioMoovParams) -> Vec<u8
       v_stbl,
    );
    // Optional edit list for video (edts/elst)
-   let v_edts = video
-      .edit_list
-      .map(|entries| build_edts_with_elst(entries));
+   let v_edts = video.edit_list.map(|entries| build_edts_with_elst(entries));
 
    let v_trak = build_trak(
       video.track_id,
-      movie_duration,
+      video_tkhd_duration,
       v_mdia,
       video.width,
       video.height,
@@ -636,10 +670,8 @@ pub fn build_moov_av(video: &VideoMoovParams, audio: &AudioMoovParams) -> Vec<u8
       a_stbl,
    );
    // Optional edit list for audio
-   let a_edts = audio
-      .edit_list
-      .map(|entries| build_edts_with_elst(entries));
-   let a_trak = build_trak_audio(audio.track_id, movie_duration, a_mdia, a_edts);
+   let a_edts = audio.edit_list.map(|entries| build_edts_with_elst(entries));
+   let a_trak = build_trak_audio(audio.track_id, audio_tkhd_duration, a_mdia, a_edts);
 
    // next_track_id must be > max(track_id)
    let next_track_id = video.track_id.max(audio.track_id).saturating_add(1);
@@ -662,7 +694,6 @@ pub fn build_moov_av_with_offsets(
    video_offsets: &[u64],
    audio_offsets: &[u64],
    video_sync_samples_1based: Option<&[u32]>,
-   movie_duration_override: Option<u64>,
 ) -> Vec<u8> {
    let movie_ts = video.movie_timescale.unwrap_or(video.track_timescale);
    let v_track_ts = video.track_timescale;
@@ -671,10 +702,9 @@ pub fn build_moov_av_with_offsets(
    let a_dur_tr = total_duration(audio.stts_pairs);
    let v_dur_mv = scale_duration(v_dur_tr, v_track_ts, movie_ts);
    let a_dur_mv = scale_duration(a_dur_tr, a_track_ts, movie_ts);
-   let mut movie_duration = v_dur_mv.max(a_dur_mv);
-   if let Some(override_duration) = movie_duration_override {
-      movie_duration = override_duration;
-   }
+   let movie_duration = v_dur_mv.max(a_dur_mv);
+   let video_tkhd_duration = video.tkhd_duration_movie.unwrap_or(v_dur_mv);
+   let audio_tkhd_duration = audio.tkhd_duration_movie.unwrap_or(a_dur_mv);
 
    // Build stbl for video and audio in parallel
    let (v_stbl, a_stbl) = join(
@@ -685,7 +715,11 @@ pub fn build_moov_av_with_offsets(
             video.ctts_pairs,
             video_sync_samples_1based,
             video_offsets,
-            VideoTrackParams { width: video.width, height: video.height, avcc_payload: video.avcc_payload },
+            VideoTrackParams {
+               width: video.width,
+               height: video.height,
+               avcc_payload: video.avcc_payload,
+            },
          )
       },
       || {
@@ -708,13 +742,11 @@ pub fn build_moov_av_with_offsets(
       v_stbl,
    );
    // Optional edit list for video (edts/elst)
-   let v_edts = video
-      .edit_list
-      .map(|entries| build_edts_with_elst(entries));
+   let v_edts = video.edit_list.map(|entries| build_edts_with_elst(entries));
 
    let v_trak = build_trak(
       video.track_id,
-      movie_duration,
+      video_tkhd_duration,
       v_mdia,
       video.width,
       video.height,
@@ -728,10 +760,8 @@ pub fn build_moov_av_with_offsets(
       a_stbl,
    );
    // Optional edit list for audio
-   let a_edts = audio
-      .edit_list
-      .map(|entries| build_edts_with_elst(entries));
-   let a_trak = build_trak_audio(audio.track_id, movie_duration, a_mdia, a_edts);
+   let a_edts = audio.edit_list.map(|entries| build_edts_with_elst(entries));
+   let a_trak = build_trak_audio(audio.track_id, audio_tkhd_duration, a_mdia, a_edts);
 
    let next_track_id = video.track_id.max(audio.track_id).saturating_add(1);
    let mvhd = build_mvhd(movie_ts, movie_duration, next_track_id);
@@ -774,7 +804,9 @@ pub struct EditListEntry {
 fn build_elst(entries: &[EditListEntry]) -> Vec<u8> {
    // version 1 if duration or media_time don't fit 32-bit
    let v1 = entries.iter().any(|e| {
-      e.segment_duration > u32::MAX as u64 || e.media_time > i32::MAX as i64 || e.media_time < i32::MIN as i64
+      e.segment_duration > u32::MAX as u64
+         || e.media_time > i32::MAX as i64
+         || e.media_time < i32::MIN as i64
    });
    let mut p = Vec::new();
    p.extend_from_slice(&[if v1 { 1 } else { 0 }, 0, 0, 0]); // version + flags
@@ -799,6 +831,7 @@ fn build_edts_with_elst(entries: &[EditListEntry]) -> Vec<u8> {
    make_box(*b"edts", &elst)
 }
 
+#[derive(Clone, Copy)]
 pub struct VideoMoovParams<'a> {
    pub movie_timescale: Option<u32>,
    pub track_timescale: u32,
@@ -813,6 +846,7 @@ pub struct VideoMoovParams<'a> {
    pub mdat_base_offset: u64,
    pub avcc_payload: &'a [u8],
    pub edit_list: Option<&'a [EditListEntry]>,
+   pub tkhd_duration_movie: Option<u64>,
 }
 
 /// Build a minimal `moov` box for a single H.264 video track.
@@ -846,9 +880,10 @@ pub fn build_moov_video(params: &VideoMoovParams) -> Vec<u8> {
    let v_edts = params
       .edit_list
       .map(|entries| build_edts_with_elst(entries));
+   let tkhd_duration = params.tkhd_duration_movie.unwrap_or(duration_movie);
    let trak = build_trak(
       params.track_id,
-      duration_movie,
+      tkhd_duration,
       mdia,
       params.width,
       params.height,
@@ -1130,6 +1165,7 @@ mod tests {
          language: Some("eng"),
          mdat_base_offset: 0,
          avcc_payload: &avcc,
+         tkhd_duration_movie: None,
       });
 
       // Validate moov structure presence
@@ -1311,6 +1347,7 @@ mod tests {
          language: Some("und"),
          mdat_base_offset: 0,
          avcc_payload: &avcc,
+         tkhd_duration_movie: None,
       };
 
       let mut sink = CollectSink::new();
