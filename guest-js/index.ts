@@ -38,6 +38,23 @@ export interface MetadataOptions {
    headers?: Record<string, string>;
 }
 
+/**
+ * Track information extracted from a media file.
+ */
+export interface TrackInfo {
+   kind: 'video' | 'audio' | 'subtitle' | 'unknown';
+   id: number;
+   codec: string;
+   language?: string;
+   timescale: number;
+   duration: number;
+   properties: Record<string, string>;
+   width?: number;
+   height?: number;
+   channels?: number;
+   sampleRate?: number;
+}
+
 // ============================================================================
 // Functions
 // ============================================================================
@@ -78,6 +95,23 @@ export async function getMetadata(
    options?: MetadataOptions,
 ): Promise<Metadata> {
    return await invoke<Metadata>('plugin:media-parser|get_metadata', {
+      source,
+      headers: options?.headers,
+   });
+}
+
+/**
+ * Extract tracks from a media file (local path or URL).
+ *
+ * @param source - Absolute path to a local file or URL of a remote media file
+ * @param options - Optional settings (headers are only used for URLs)
+ * @returns Track information for video, audio, subtitle, and unknown tracks
+ */
+export async function getTracks(
+   source: string,
+   options?: MetadataOptions,
+): Promise<TrackInfo[]> {
+   return await invoke<TrackInfo[]>('plugin:media-parser|get_tracks', {
       source,
       headers: options?.headers,
    });

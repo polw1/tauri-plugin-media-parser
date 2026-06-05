@@ -17,6 +17,7 @@
 //! ```
 
 mod iter;
+mod media;
 mod moov;
 mod nav;
 mod read;
@@ -30,3 +31,9 @@ pub use nav::{Mp4Nav, find_box_ref};
 pub use read::{BoxRead, read_box};
 pub use tags::{fourcc_to_key, tag_name};
 pub use types::Mp4Box;
+
+// Track parsing helpers are internal to the MP4 module.
+pub(super) use media::{
+   expand_sample_durations, expand_sample_sizes, fourcc_string, parse_hdlr, parse_mdhd, parse_stsd,
+   parse_tkhd, stts_sample_count,
+};

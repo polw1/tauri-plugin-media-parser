@@ -44,9 +44,10 @@ pub mod tables;
 pub mod tags;
 
 use crate::Result;
-use crate::format::{AsyncParser, Format};
+use crate::format::{AsyncParser, AsyncTrackParser, Format};
 use crate::stream::StreamReader;
-use crate::types::Metadata;
+use crate::types::{AudioTrackMeta, BaseTrackMeta, Metadata, TrackType};
+use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 
@@ -58,12 +59,63 @@ fn parse(reader: &dyn StreamReader) -> Pin<Box<dyn Future<Output = Result<Metada
    Box::pin(parse_mp3(reader))
 }
 
+fn parse_tracks(
+   reader: &dyn StreamReader,
+) -> Pin<Box<dyn Future<Output = Result<Vec<TrackType>>> + Send + '_>> {
+   Box::pin(read_tracks(reader))
+}
+
 /// MP3 format definition registered in the global table.
-pub static FORMAT: Format = Format::new(SIGNATURE, parse as AsyncParser);
+pub static FORMAT: Format = Format::new(
+   SIGNATURE,
+   parse as AsyncParser,
+   parse_tracks as AsyncTrackParser,
+);
 
 /// Main parsing function.
 async fn parse_mp3(reader: &dyn StreamReader) -> Result<Metadata> {
    metadata::read_metadata(reader).await
+}
+
+async fn read_tracks(reader: &dyn StreamReader) -> Result<Vec<TrackType>> {
+   let (header, offset) = match frame::find_first_frame(reader, 0, frame::MAX_SYNC_SEARCH).await {
+      frame::FrameParseResult::Found { header, offset } => (header, offset),
+      frame::FrameParseResult::NotFound | frame::FrameParseResult::EndOfData => {
+         return Ok(Vec::new());
+      }
+      frame::FrameParseResult::InvalidHeader { offset } => {
+         return Err(crate::errors::MediaParserError::InvalidFormat(format!(
+            "invalid MP3 frame header at offset {}",
+            offset
+         )));
+      }
+   };
+
+   let duration = duration::calculate_duration(reader, 0).await?;
+   let mut properties = HashMap::new();
+   properties.insert("offset".to_string(), offset.to_string());
+   properties.insert("bitrate_kbps".to_string(), header.bitrate_kbps.to_string());
+   properties.insert("mpeg_version".to_string(), format!("{:?}", header.version));
+   properties.insert("mpeg_layer".to_string(), format!("{:?}", header.layer));
+   properties.insert("channel_mode".to_string(), header.channel_mode.to_string());
+   properties.insert(
+      "duration_method".to_string(),
+      format!("{:?}", duration.method),
+   );
+
+   Ok(vec![TrackType::Audio(AudioTrackMeta {
+      base: BaseTrackMeta {
+         id: 1,
+         codec: "mp3".to_string(),
+         language: None,
+         timescale: 1000,
+         duration: duration.millis,
+         properties,
+      },
+      channels: if header.channel_mode == 3 { 1 } else { 2 },
+      sample_rate: header.sample_rate_hz,
+      sample_sizes: None,
+   })])
 }
 
 // Re-export public types

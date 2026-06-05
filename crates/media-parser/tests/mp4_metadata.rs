@@ -1,6 +1,6 @@
 //! Integration tests for MP4 metadata extraction.
 
-use media_parser::{FileStreamReader, MediaParser};
+use media_parser::{FileStreamReader, MediaParser, TrackType};
 use std::path::PathBuf;
 fn fixtures_dir() -> PathBuf {
    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -96,4 +96,42 @@ async fn test_mov_meta_ilst_values() {
       "expected album value, got {:?}",
       metadata.values
    );
+}
+
+#[tokio::test]
+async fn test_mp4_tracks_extraction() {
+   let path = fixtures_dir().join("sample_metadata.mp4");
+   let reader = FileStreamReader::new(&path).expect("Failed to open MP4 fixture");
+   let parser = MediaParser::new(reader);
+
+   let tracks = parser.tracks().await.expect("Failed to parse MP4 tracks");
+
+   assert_eq!(tracks.len(), 1);
+   match &tracks[0] {
+      TrackType::Audio(audio) => {
+         assert_eq!(audio.base.id, 1);
+         assert_eq!(audio.base.codec, "mp4a");
+         assert_eq!(audio.base.timescale, 44100);
+         assert_eq!(audio.base.duration, 45124);
+         assert_eq!(audio.channels, 1);
+         assert_eq!(audio.sample_rate, 44100);
+         assert_eq!(
+            audio
+               .base
+               .properties
+               .get("handler_type")
+               .map(String::as_str),
+            Some("soun")
+         );
+         assert_eq!(
+            audio
+               .base
+               .properties
+               .get("sample_count")
+               .map(String::as_str),
+            Some("45")
+         );
+      }
+      other => panic!("expected audio track, got {other:?}"),
+   }
 }
