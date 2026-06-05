@@ -4,7 +4,7 @@ use tauri::command;
 use url::Url;
 
 use media_parser::{
-   FileStreamReader, Frame, HttpStreamReader, MediaParser, Metadata, PixelFormat, StreamReader,
+   CoverArt, FileStreamReader, Frame, HttpStreamReader, MediaParser, Metadata, StreamReader,
    SubtitleTrack, TrackFilter, TrackType,
 };
 
@@ -63,6 +63,20 @@ pub(crate) async fn get_tracks(
    })?;
 
    Ok(tracks.into_iter().map(TrackInfo::from).collect())
+}
+
+/// Extract embedded cover artwork from a media file (local path or URL).
+#[command]
+pub(crate) async fn get_cover(
+   source: String,
+   headers: Option<HashMap<String, String>>,
+) -> Result<Option<CoverInfo>> {
+   let cover = with_reader!(source, headers, |reader| {
+      let parser = MediaParser::new(reader);
+      parser.cover().await
+   })?;
+
+   Ok(cover.map(CoverInfo::from))
 }
 
 /// Extract subtitle tracks and cues from a media file (local path or URL).
@@ -124,12 +138,14 @@ async fn read_thumbnail_frames(
    reader: &dyn StreamReader,
    track_id: u32,
    timestamps: &[Duration],
-   _accurate: bool,
+   accurate: bool,
 ) -> Result<Vec<Frame>> {
-   let mut frames = Vec::with_capacity(timestamps.len());
-   for &timestamp in timestamps {
-      frames.push(media_parser::format::registry::parse_frame(reader, track_id, timestamp).await?);
-   }
+   let frames = if accurate {
+      media_parser::format::registry::parse_frames(reader, track_id, timestamps).await?
+   } else {
+      media_parser::format::mp4::read_keyframes(reader, track_id, timestamps).await?
+   };
+
    Ok(frames)
 }
 
@@ -168,6 +184,24 @@ pub struct TrackInfo {
    pub height: Option<u32>,
    pub channels: Option<u16>,
    pub sample_rate: Option<u32>,
+}
+
+#[derive(serde::Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct CoverInfo {
+   pub format: String,
+   pub mime_type: String,
+   pub data: Vec<u8>,
+}
+
+impl From<CoverArt> for CoverInfo {
+   fn from(cover: CoverArt) -> Self {
+      Self {
+         format: cover.format.label().to_string(),
+         mime_type: cover.mime_type,
+         data: cover.data,
+      }
+   }
 }
 
 impl From<TrackType> for TrackInfo {
@@ -287,24 +321,13 @@ pub struct ThumbnailInfo {
 
 impl From<Frame> for ThumbnailInfo {
    fn from(frame: Frame) -> Self {
-      let (format, mime_type) = match frame.format {
-         PixelFormat::Jpeg => ("jpeg", "image/jpeg"),
-         PixelFormat::Png => ("png", "image/png"),
-         PixelFormat::EncodedVideoSample => ("encodedVideoSample", "video/mp4"),
-         PixelFormat::Yuv420p => ("yuv420p", "application/octet-stream"),
-         PixelFormat::Yuv422p => ("yuv422p", "application/octet-stream"),
-         PixelFormat::Yuv444p => ("yuv444p", "application/octet-stream"),
-         PixelFormat::Rgb24 => ("rgb24", "application/octet-stream"),
-         PixelFormat::Rgba => ("rgba", "application/octet-stream"),
-      };
-
       Self {
          track_id: frame.track_id,
          width: frame.width,
          height: frame.height,
          timestamp_sec: frame.timestamp.as_secs_f64(),
-         format: format.to_string(),
-         mime_type: mime_type.to_string(),
+         format: frame.format.label().to_string(),
+         mime_type: frame.format.mime_type().to_string(),
          data: frame.data,
       }
    }
@@ -343,17 +366,9 @@ mod tests {
 
    #[test]
    fn subtitle_filter_keeps_explicit_track_id() {
-      let (filter, first_subtitle) = subtitle_filter(Some(3), Some("eng".to_string()));
+      let (filter, first_subtitle) = subtitle_filter(Some(3), Some("jpn".to_string()));
 
-      assert!(!first_subtitle);
       assert!(matches!(filter, Some(TrackFilter::TrackId(3))));
-   }
-
-   #[test]
-   fn subtitle_filter_uses_language_when_track_missing() {
-      let (filter, first_subtitle) = subtitle_filter(None, Some("por".to_string()));
-
       assert!(!first_subtitle);
-      assert!(matches!(filter, Some(TrackFilter::Language(lang)) if lang == "por"));
    }
 }

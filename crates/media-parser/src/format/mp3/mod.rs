@@ -44,53 +44,66 @@ pub mod tables;
 pub mod tags;
 
 use crate::Result;
-use crate::format::{AsyncFrameParser, AsyncParser, AsyncSubtitleParser, AsyncTrackParser, Format};
+use crate::format::{Format, FormatParser};
 use crate::stream::StreamReader;
 use crate::types::{
-   AudioTrackMeta, BaseTrackMeta, Frame, Metadata, SubtitleTrack, TrackFilter, TrackType,
+   AudioTrackMeta, BaseTrackMeta, CoverArt, Frame, Metadata, SubtitleTrack, TrackFilter, TrackType,
 };
 use std::collections::HashMap;
-use std::future::Future;
-use std::pin::Pin;
 use std::time::Duration as StdDuration;
 
 /// MP3 format signature for detection.
 pub use crate::format::signatures::MP3 as SIGNATURE;
 
-/// Parser entry point for the registry.
-fn parse(reader: &dyn StreamReader) -> Pin<Box<dyn Future<Output = Result<Metadata>> + Send + '_>> {
-   Box::pin(parse_mp3(reader))
-}
+pub struct Mp3Parser;
 
-fn parse_tracks(
-   reader: &dyn StreamReader,
-) -> Pin<Box<dyn Future<Output = Result<Vec<TrackType>>> + Send + '_>> {
-   Box::pin(read_tracks(reader))
-}
+#[async_trait::async_trait]
+impl FormatParser for Mp3Parser {
+   async fn parse_metadata(&self, reader: &dyn StreamReader) -> Result<Metadata> {
+      parse_mp3(reader).await
+   }
 
-fn parse_frame(
-   reader: &dyn StreamReader,
-   track_id: u32,
-   timestamp: StdDuration,
-) -> Pin<Box<dyn Future<Output = Result<Frame>> + Send + '_>> {
-   Box::pin(read_frame(reader, track_id, timestamp))
-}
+   async fn parse_tracks(&self, reader: &dyn StreamReader) -> Result<Vec<TrackType>> {
+      read_tracks(reader).await
+   }
 
-fn parse_subtitles(
-   reader: &dyn StreamReader,
-   filter: Option<TrackFilter>,
-) -> Pin<Box<dyn Future<Output = Result<Vec<SubtitleTrack>>> + Send + '_>> {
-   Box::pin(read_subtitles(reader, filter))
+   async fn parse_cover(&self, reader: &dyn StreamReader) -> Result<Option<CoverArt>> {
+      metadata::read_cover(reader).await
+   }
+
+   async fn parse_frame(
+      &self,
+      reader: &dyn StreamReader,
+      track_id: u32,
+      timestamp: StdDuration,
+   ) -> Result<Frame> {
+      read_frame(reader, track_id, timestamp).await
+   }
+
+   async fn parse_frames(
+      &self,
+      reader: &dyn StreamReader,
+      track_id: u32,
+      timestamps: &[StdDuration],
+   ) -> Result<Vec<Frame>> {
+      let mut frames = Vec::new();
+      for &timestamp in timestamps {
+         frames.push(read_frame(reader, track_id, timestamp).await?);
+      }
+      Ok(frames)
+   }
+
+   async fn parse_subtitles(
+      &self,
+      reader: &dyn StreamReader,
+      filter: Option<TrackFilter>,
+   ) -> Result<Vec<SubtitleTrack>> {
+      read_subtitles(reader, filter).await
+   }
 }
 
 /// MP3 format definition registered in the global table.
-pub static FORMAT: Format = Format::new(
-   SIGNATURE,
-   parse as AsyncParser,
-   parse_tracks as AsyncTrackParser,
-   parse_frame as AsyncFrameParser,
-   parse_subtitles as AsyncSubtitleParser,
-);
+pub static FORMAT: Format = Format::new(SIGNATURE, &Mp3Parser);
 
 /// Main parsing function.
 async fn parse_mp3(reader: &dyn StreamReader) -> Result<Metadata> {

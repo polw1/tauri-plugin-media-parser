@@ -20,7 +20,7 @@ use crate::helpers::{
    decode_latin1, decode_utf8, decode_utf16_be, decode_utf16_with_bom, trim_null_and_whitespace,
 };
 use crate::stream::StreamReader;
-use crate::types::{Meta, Metadata};
+use crate::types::{CoverArt, Meta, Metadata, PixelFormat};
 
 const ID3_HEADER_SIZE: usize = 10;
 const ID3_FRAME_HEADER_SIZE: usize = 10;
@@ -54,6 +54,22 @@ pub async fn read_metadata(reader: &dyn StreamReader) -> Result<Metadata> {
       timescale: 1000,
       duration: duration.millis,
    })
+}
+
+/// Reads embedded ID3v2 APIC cover artwork, when present.
+pub async fn read_cover(reader: &dyn StreamReader) -> Result<Option<CoverArt>> {
+   let Some(header) = try_read_id3_header(reader).await? else {
+      return Ok(None);
+   };
+
+   let frames = read_id3_frames(reader, &header).await?;
+   Ok(frames.into_iter().find_map(|frame| {
+      if frame.id == *b"APIC" {
+         decode_apic_frame(&frame.data)
+      } else {
+         None
+      }
+   }))
 }
 
 #[derive(Debug)]
@@ -188,6 +204,59 @@ fn decode_id3_text(data: &[u8]) -> Option<String> {
    };
 
    trim_null_and_whitespace(&text)
+}
+
+fn decode_apic_frame(data: &[u8]) -> Option<CoverArt> {
+   let encoding = *data.first()?;
+   let mime_end = data[1..].iter().position(|&byte| byte == 0)? + 1;
+   let mime = std::str::from_utf8(&data[1..mime_end]).ok()?;
+   let picture_type_offset = mime_end + 1;
+   let description_offset = picture_type_offset + 1;
+   if description_offset > data.len() {
+      return None;
+   }
+
+   let image_offset = find_encoded_terminator(data, description_offset, encoding)?;
+   if image_offset >= data.len() {
+      return None;
+   }
+
+   let image = &data[image_offset..];
+   let (format, mime_type) = cover_format(mime, image)?;
+
+   Some(CoverArt {
+      format,
+      mime_type: mime_type.to_string(),
+      data: image.to_vec(),
+   })
+}
+
+fn find_encoded_terminator(data: &[u8], start: usize, encoding: u8) -> Option<usize> {
+   match encoding {
+      1 | 2 => data[start..]
+         .windows(2)
+         .position(|window| window == [0, 0])
+         .map(|pos| start + pos + 2),
+      _ => data[start..]
+         .iter()
+         .position(|&byte| byte == 0)
+         .map(|pos| start + pos + 1),
+   }
+}
+
+fn cover_format(mime: &str, image: &[u8]) -> Option<(PixelFormat, &'static str)> {
+   let normalized = mime.to_ascii_lowercase();
+   match normalized.as_str() {
+      "image/jpeg" | "image/jpg" => Some((PixelFormat::Jpeg, PixelFormat::Jpeg.mime_type())),
+      "image/png" => Some((PixelFormat::Png, PixelFormat::Png.mime_type())),
+      _ if image.starts_with(&[0xFF, 0xD8, 0xFF]) => {
+         Some((PixelFormat::Jpeg, PixelFormat::Jpeg.mime_type()))
+      }
+      _ if image.starts_with(&[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]) => {
+         Some((PixelFormat::Png, PixelFormat::Png.mime_type()))
+      }
+      _ => None,
+   }
 }
 
 /// Converts ID3 frames to Meta values.

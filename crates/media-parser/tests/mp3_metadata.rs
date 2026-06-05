@@ -5,7 +5,8 @@ use media_parser::format::mp3::{
    DurationMethod, FrameParseResult, MAX_SYNC_SEARCH, VbrHeaderType, calculate_duration,
    find_first_frame, parse_vbr_header,
 };
-use media_parser::{FileStreamReader, MediaParser};
+use media_parser::{FileStreamReader, MediaParser, PixelFormat};
+use std::io::Write;
 use std::path::PathBuf;
 fn fixtures_dir() -> PathBuf {
    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -25,6 +26,52 @@ async fn test_id3v2_metadata_extraction() {
    assert_eq!(metadata.get("title"), Some("Test Title"));
    assert_eq!(metadata.get("artist"), Some("Test Artist"));
    assert_eq!(metadata.get("album"), Some("Test Album"));
+}
+
+#[tokio::test]
+async fn test_id3v2_apic_cover_extraction() {
+   let image = [0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, 1, 2, 3];
+   let mut frame_data = Vec::new();
+   frame_data.push(3); // UTF-8
+   frame_data.extend_from_slice(b"image/png");
+   frame_data.push(0);
+   frame_data.push(3); // front cover
+   frame_data.extend_from_slice(b"front");
+   frame_data.push(0);
+   frame_data.extend_from_slice(&image);
+
+   let mut frame = Vec::new();
+   frame.extend_from_slice(b"APIC");
+   frame.extend_from_slice(&(frame_data.len() as u32).to_be_bytes());
+   frame.extend_from_slice(&[0, 0]);
+   frame.extend_from_slice(&frame_data);
+
+   let tag_size = frame.len() as u32;
+   let syncsafe_size = [
+      ((tag_size >> 21) & 0x7F) as u8,
+      ((tag_size >> 14) & 0x7F) as u8,
+      ((tag_size >> 7) & 0x7F) as u8,
+      (tag_size & 0x7F) as u8,
+   ];
+
+   let mut file = tempfile::NamedTempFile::new().expect("create temp mp3");
+   file.write_all(b"ID3").expect("write id3 marker");
+   file.write_all(&[3, 0, 0]).expect("write id3 version");
+   file.write_all(&syncsafe_size).expect("write id3 size");
+   file.write_all(&frame).expect("write apic frame");
+   file.flush().expect("flush temp mp3");
+
+   let reader = FileStreamReader::new(file.path()).expect("open temp mp3");
+   let parser = MediaParser::new(reader);
+   let cover = parser
+      .cover()
+      .await
+      .expect("parse cover")
+      .expect("cover should exist");
+
+   assert_eq!(cover.format, PixelFormat::Png);
+   assert_eq!(cover.mime_type, "image/png");
+   assert_eq!(cover.data, image);
 }
 
 #[tokio::test]

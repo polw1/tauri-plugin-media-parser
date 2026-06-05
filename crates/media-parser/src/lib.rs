@@ -133,13 +133,13 @@ use std::time::Duration;
 pub use errors::{MediaParserError, Result};
 pub use format::mp4::atoms::Mp4Nav;
 pub use format::registry::{
-   detect_format, get_format_info, is_supported, parse_frame, parse_metadata, parse_subtitles,
-   parse_tracks, supported_formats,
+   detect_format, get_format_info, is_supported, parse_cover, parse_frame, parse_frames,
+   parse_metadata, parse_subtitles, parse_tracks, supported_formats,
 };
 pub use stream::{FileStreamReader, HttpStreamReader, StreamReader};
 pub use types::{
-   AudioTrackMeta, BaseTrackMeta, Frame, Meta, Metadata, PixelFormat, SubtitleCue, SubtitleTrack,
-   SubtitleTrackMeta, TrackFilter, TrackType, UnknownTrackMeta, VideoTrackMeta,
+   AudioTrackMeta, BaseTrackMeta, CoverArt, Frame, Meta, Metadata, PixelFormat, SubtitleCue,
+   SubtitleTrack, SubtitleTrackMeta, TrackFilter, TrackType, UnknownTrackMeta, VideoTrackMeta,
 };
 
 /// High-level parser handle.
@@ -163,6 +163,11 @@ impl<R: StreamReader> MediaParser<R> {
       format::registry::parse_tracks(&self.reader).await
    }
 
+   /// Extract embedded cover artwork from the media file, when present.
+   pub async fn cover(&self) -> Result<Option<CoverArt>> {
+      format::registry::parse_cover(&self.reader).await
+   }
+
    /// Extract subtitle tracks from the media file.
    pub async fn subtitles(&self, filter: Option<TrackFilter>) -> Result<Vec<SubtitleTrack>> {
       format::registry::parse_subtitles(&self.reader, filter).await
@@ -175,13 +180,7 @@ impl<R: StreamReader> MediaParser<R> {
 
    /// Extract multiple frames from a video track at the specified timestamps.
    pub async fn frames(&self, track_id: u32, timestamps: &[Duration]) -> Result<Vec<Frame>> {
-      let mut frames = Vec::new();
-
-      for &timestamp in timestamps {
-         frames.push(self.frame(track_id, timestamp).await?);
-      }
-
-      Ok(frames)
+      format::registry::parse_frames(&self.reader, track_id, timestamps).await
    }
 
    /// List all supported format names.

@@ -5,7 +5,7 @@ use crate::decoders::h264::AvcConfig;
 use crate::errors::{MediaParserError, Result};
 use crate::helpers::{read_u16_be, read_u32_be, read_u64_be};
 use crate::stream::StreamReader;
-use crate::types::PixelFormat;
+use crate::types::{CoverArt, PixelFormat};
 use std::time::Duration;
 
 #[derive(Debug, Clone, Copy)]
@@ -58,12 +58,6 @@ pub struct SampleTiming {
    pub sample_index: u32,
    pub start_tick: u64,
    pub duration_ticks: u64,
-}
-
-#[derive(Debug, Clone)]
-pub struct CoverArt {
-   pub format: PixelFormat,
-   pub data: Vec<u8>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -214,6 +208,7 @@ pub fn parse_cover_art(moov_payload: &[u8]) -> Option<CoverArt> {
    }
 
    Some(CoverArt {
+      mime_type: format.mime_type().to_string(),
       format,
       data: image,
    })
@@ -596,8 +591,12 @@ pub async fn read_sample_range(
    }
 
    let mut total_bytes = 0usize;
-   let mut samples = Vec::with_capacity((end_sample - start_sample + 1) as usize);
+   let mut ranges = Vec::with_capacity((end_sample - start_sample + 1) as usize);
    for sample_index in start_sample..=end_sample {
+      let offset =
+         sample_file_offset(sample_index, sizes, stsc, chunk_offsets).ok_or_else(|| {
+            MediaParserError::InvalidFormat(format!("could not locate sample {}", sample_index))
+         })?;
       let size = sample_size(sample_index, sizes).ok_or_else(|| {
          MediaParserError::InvalidFormat(format!("could not read sample {} size", sample_index))
       })?;
@@ -613,17 +612,62 @@ pub async fn read_sample_range(
          )));
       }
 
-      samples.push(
-         read_sample_data(
-            reader,
-            sample_index,
-            sizes,
-            stsc,
-            chunk_offsets,
-            max_total_bytes,
-         )
-         .await?,
-      );
+      ranges.push(SampleByteRange { offset, size });
+   }
+
+   read_sample_ranges(reader, &ranges).await
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct SampleByteRange {
+   offset: u64,
+   size: usize,
+}
+
+async fn read_sample_ranges(
+   reader: &dyn StreamReader,
+   ranges: &[SampleByteRange],
+) -> Result<Vec<Vec<u8>>> {
+   let mut samples = Vec::with_capacity(ranges.len());
+   let mut index = 0usize;
+
+   while index < ranges.len() {
+      let span_start = index;
+      let mut span_end = index + 1;
+      let mut span_size = ranges[index].size;
+      let mut next_offset = ranges[index].offset + ranges[index].size as u64;
+
+      while span_end < ranges.len() && ranges[span_end].offset == next_offset {
+         span_size = span_size
+            .checked_add(ranges[span_end].size)
+            .ok_or_else(|| MediaParserError::InvalidFormat("sample range too large".to_string()))?;
+         next_offset = next_offset
+            .checked_add(ranges[span_end].size as u64)
+            .ok_or_else(|| {
+               MediaParserError::InvalidFormat("sample range offset overflow".to_string())
+            })?;
+         span_end += 1;
+      }
+
+      let mut span = vec![0u8; span_size];
+      let read = reader.read_at(ranges[span_start].offset, &mut span).await?;
+      if read != span_size {
+         return Err(MediaParserError::InvalidFormat(format!(
+            "truncated sample range: expected {} bytes, read {}",
+            span_size, read
+         )));
+      }
+
+      let mut cursor = 0usize;
+      for range in &ranges[span_start..span_end] {
+         let next = cursor
+            .checked_add(range.size)
+            .ok_or_else(|| MediaParserError::InvalidFormat("sample range too large".to_string()))?;
+         samples.push(span[cursor..next].to_vec());
+         cursor = next;
+      }
+
+      index = span_end;
    }
 
    Ok(samples)
@@ -739,9 +783,80 @@ fn sum_sample_sizes(start_sample: u32, count: u32, sizes: &SampleSizes) -> Optio
    )
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TrackKind {
+   Video,
+   Audio,
+   Subtitle,
+   Unknown,
+}
+
+#[derive(Debug, Clone)]
+pub struct ParsedTrak<'a> {
+   pub trak: &'a [u8],
+   pub tkhd: TrackHeader,
+   pub mdia: &'a [u8],
+   pub mdhd: MediaHeader,
+   pub handler: [u8; 4],
+   pub kind: TrackKind,
+   pub stbl: Option<&'a [u8]>,
+}
+
+pub fn parse_trak(trak: &[u8]) -> Option<ParsedTrak<'_>> {
+   let tkhd = trak.nav(&[*b"tkhd"]).and_then(parse_tkhd)?;
+   let mdia = trak.nav(&[*b"mdia"])?;
+   let mdhd = mdia.nav(&[*b"mdhd"]).and_then(parse_mdhd)?;
+   let handler = mdia
+      .nav(&[*b"hdlr"])
+      .and_then(parse_hdlr)
+      .unwrap_or(*b"    ");
+   let kind = match &handler {
+      b"vide" => TrackKind::Video,
+      b"soun" => TrackKind::Audio,
+      b"sbtl" | b"subt" | b"text" | b"clcp" => TrackKind::Subtitle,
+      _ => TrackKind::Unknown,
+   };
+   let stbl = mdia.nav(&[*b"minf", *b"stbl"]);
+
+   Some(ParsedTrak {
+      trak,
+      tkhd,
+      mdia,
+      mdhd,
+      handler,
+      kind,
+      stbl,
+   })
+}
+
 #[cfg(test)]
 mod tests {
    use super::*;
+   use crate::stream::StreamReader;
+   use async_trait::async_trait;
+   use std::sync::Arc;
+   use std::sync::atomic::{AtomicUsize, Ordering};
+
+   struct CountingReader {
+      data: Vec<u8>,
+      reads: Arc<AtomicUsize>,
+   }
+
+   #[async_trait]
+   impl StreamReader for CountingReader {
+      async fn read_at(&self, offset: u64, buf: &mut [u8]) -> Result<usize> {
+         self.reads.fetch_add(1, Ordering::SeqCst);
+         let start = offset as usize;
+         let end = start.saturating_add(buf.len()).min(self.data.len());
+         let len = end.saturating_sub(start);
+         buf[..len].copy_from_slice(&self.data[start..end]);
+         Ok(len)
+      }
+
+      async fn size(&self) -> Result<u64> {
+         Ok(self.data.len() as u64)
+      }
+   }
 
    #[test]
    fn test_decode_language() {
@@ -915,5 +1030,68 @@ mod tests {
          sample_file_offset(4, &sizes, &stsc, &chunk_offsets),
          Some(230)
       );
+   }
+
+   #[tokio::test]
+   async fn test_read_sample_ranges_coalesces_contiguous_ranges() {
+      let reads = Arc::new(AtomicUsize::new(0));
+      let reader = CountingReader {
+         data: (0u8..100).collect(),
+         reads: Arc::clone(&reads),
+      };
+
+      let samples = read_sample_ranges(
+         &reader,
+         &[
+            SampleByteRange {
+               offset: 10,
+               size: 3,
+            },
+            SampleByteRange {
+               offset: 13,
+               size: 2,
+            },
+            SampleByteRange {
+               offset: 15,
+               size: 4,
+            },
+         ],
+      )
+      .await
+      .unwrap();
+
+      assert_eq!(reads.load(Ordering::SeqCst), 1);
+      assert_eq!(
+         samples,
+         vec![vec![10, 11, 12], vec![13, 14], vec![15, 16, 17, 18]]
+      );
+   }
+
+   #[tokio::test]
+   async fn test_read_sample_ranges_splits_non_contiguous_ranges() {
+      let reads = Arc::new(AtomicUsize::new(0));
+      let reader = CountingReader {
+         data: (0u8..100).collect(),
+         reads: Arc::clone(&reads),
+      };
+
+      let samples = read_sample_ranges(
+         &reader,
+         &[
+            SampleByteRange {
+               offset: 10,
+               size: 2,
+            },
+            SampleByteRange {
+               offset: 20,
+               size: 3,
+            },
+         ],
+      )
+      .await
+      .unwrap();
+
+      assert_eq!(reads.load(Ordering::SeqCst), 2);
+      assert_eq!(samples, vec![vec![10, 11], vec![20, 21, 22]]);
    }
 }

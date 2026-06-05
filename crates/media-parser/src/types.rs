@@ -139,6 +139,41 @@ pub enum PixelFormat {
    EncodedVideoSample,
 }
 
+impl PixelFormat {
+   pub fn mime_type(&self) -> &'static str {
+      match self {
+         Self::Jpeg => "image/jpeg",
+         Self::Png => "image/png",
+         Self::EncodedVideoSample => "video/mp4",
+         Self::Yuv420p | Self::Yuv422p | Self::Yuv444p | Self::Rgb24 | Self::Rgba => {
+            "application/octet-stream"
+         }
+      }
+   }
+
+   pub fn label(&self) -> &'static str {
+      match self {
+         Self::Jpeg => "jpeg",
+         Self::Png => "png",
+         Self::EncodedVideoSample => "encodedVideoSample",
+         Self::Yuv420p => "yuv420p",
+         Self::Yuv422p => "yuv422p",
+         Self::Yuv444p => "yuv444p",
+         Self::Rgb24 => "rgb24",
+         Self::Rgba => "rgba",
+      }
+   }
+}
+
+/// Embedded cover artwork.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct CoverArt {
+   pub format: PixelFormat,
+   pub mime_type: String,
+   /// Encoded image bytes.
+   pub data: Vec<u8>,
+}
+
 /// Preview image (Frame) extracted at a timestamp.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Frame {

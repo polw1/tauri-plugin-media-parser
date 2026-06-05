@@ -17,7 +17,7 @@ use super::{Format, FormatSignature};
 use crate::Result;
 use crate::errors::MediaParserError;
 use crate::stream::StreamReader;
-use crate::types::{Frame, Metadata, SubtitleTrack, TrackFilter, TrackType};
+use crate::types::{CoverArt, Frame, Metadata, SubtitleTrack, TrackFilter, TrackType};
 use std::sync::LazyLock;
 use std::time::Duration;
 
@@ -41,36 +41,35 @@ pub fn detect_format_by_extension(ext: &str) -> Option<&'static Format> {
    FORMATS.iter().find(|f| f.matches_extension(ext)).copied()
 }
 
-/// Parses metadata by detecting format and dispatching to the appropriate parser.
-pub async fn parse_metadata(reader: &dyn StreamReader) -> Result<Metadata> {
-   // Read enough bytes to detect format (ftyp box is within first 32 bytes)
+/// Reads the header and detects the format from the stream.
+async fn detect_format_async(reader: &dyn StreamReader) -> Result<&'static Format> {
    let mut header = [0u8; 32];
    reader.read_at(0, &mut header).await?;
 
-   let format = detect_format(&header).ok_or_else(|| {
+   detect_format(&header).ok_or_else(|| {
       MediaParserError::InvalidFormat(format!(
          "Could not detect format from header: {:02X?}",
          &header[..header.len().min(16)]
       ))
-   })?;
+   })
+}
 
-   // Dispatch to the appropriate parser
-   (format.parser)(reader).await
+/// Parses metadata by detecting format and dispatching to the appropriate parser.
+pub async fn parse_metadata(reader: &dyn StreamReader) -> Result<Metadata> {
+   let format = detect_format_async(reader).await?;
+   format.parser.parse_metadata(reader).await
 }
 
 /// Parses track metadata by detecting format and dispatching to the appropriate parser.
 pub async fn parse_tracks(reader: &dyn StreamReader) -> Result<Vec<TrackType>> {
-   let mut header = [0u8; 32];
-   reader.read_at(0, &mut header).await?;
+   let format = detect_format_async(reader).await?;
+   format.parser.parse_tracks(reader).await
+}
 
-   let format = detect_format(&header).ok_or_else(|| {
-      MediaParserError::InvalidFormat(format!(
-         "Could not detect format from header: {:02X?}",
-         &header[..header.len().min(16)]
-      ))
-   })?;
-
-   (format.track_parser)(reader).await
+/// Parses embedded cover artwork by detecting format and dispatching to the appropriate parser.
+pub async fn parse_cover(reader: &dyn StreamReader) -> Result<Option<CoverArt>> {
+   let format = detect_format_async(reader).await?;
+   format.parser.parse_cover(reader).await
 }
 
 /// Parses a frame/thumbnail by detecting format and dispatching to the appropriate parser.
@@ -79,17 +78,21 @@ pub async fn parse_frame(
    track_id: u32,
    timestamp: Duration,
 ) -> Result<Frame> {
-   let mut header = [0u8; 32];
-   reader.read_at(0, &mut header).await?;
+   let format = detect_format_async(reader).await?;
+   format.parser.parse_frame(reader, track_id, timestamp).await
+}
 
-   let format = detect_format(&header).ok_or_else(|| {
-      MediaParserError::InvalidFormat(format!(
-         "Could not detect format from header: {:02X?}",
-         &header[..header.len().min(16)]
-      ))
-   })?;
-
-   (format.frame_parser)(reader, track_id, timestamp).await
+/// Parses multiple frames/thumbnails by detecting format once and dispatching.
+pub async fn parse_frames(
+   reader: &dyn StreamReader,
+   track_id: u32,
+   timestamps: &[Duration],
+) -> Result<Vec<Frame>> {
+   let format = detect_format_async(reader).await?;
+   format
+      .parser
+      .parse_frames(reader, track_id, timestamps)
+      .await
 }
 
 /// Parses subtitle tracks by detecting format and dispatching to the appropriate parser.
@@ -97,17 +100,8 @@ pub async fn parse_subtitles(
    reader: &dyn StreamReader,
    filter: Option<TrackFilter>,
 ) -> Result<Vec<SubtitleTrack>> {
-   let mut header = [0u8; 32];
-   reader.read_at(0, &mut header).await?;
-
-   let format = detect_format(&header).ok_or_else(|| {
-      MediaParserError::InvalidFormat(format!(
-         "Could not detect format from header: {:02X?}",
-         &header[..header.len().min(16)]
-      ))
-   })?;
-
-   (format.subtitle_parser)(reader, filter).await
+   let format = detect_format_async(reader).await?;
+   format.parser.parse_subtitles(reader, filter).await
 }
 
 /// Returns an iterator over all supported format signatures.

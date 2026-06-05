@@ -4145,19 +4145,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "tauri-media-player"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
- "tauri",
- "tauri-build",
- "tauri-plugin-mcp-bridge",
- "tauri-plugin-media-parser",
- "tauri-plugin-opener",
-]
-
-[[package]]
 name = "tauri-codegen"
 version = "2.6.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4196,6 +4183,19 @@ dependencies = [
  "syn 2.0.117",
  "tauri-codegen",
  "tauri-utils",
+]
+
+[[package]]
+name = "tauri-media-player"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tauri",
+ "tauri-build",
+ "tauri-plugin-mcp-bridge",
+ "tauri-plugin-media-parser",
+ "tauri-plugin-opener",
 ]
 
 [[package]]

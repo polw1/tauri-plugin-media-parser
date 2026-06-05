@@ -65,36 +65,37 @@ pub mod signatures;
 
 use crate::Result;
 use crate::stream::StreamReader;
-use crate::types::{Frame, Metadata, SubtitleTrack, TrackFilter, TrackType};
-use std::future::Future;
-use std::pin::Pin;
+use crate::types::{CoverArt, Frame, Metadata, SubtitleTrack, TrackFilter, TrackType};
 use std::time::Duration;
 
-/// Async parser function type.
-///
-/// A function that reads from a stream and returns parsed metadata.
-pub type AsyncParser =
-   for<'a> fn(&'a dyn StreamReader) -> Pin<Box<dyn Future<Output = Result<Metadata>> + Send + 'a>>;
+#[async_trait::async_trait]
+pub trait FormatParser: Send + Sync {
+   async fn parse_metadata(&self, reader: &dyn StreamReader) -> Result<Metadata>;
 
-/// Async track parser function type.
-pub type AsyncTrackParser =
-   for<'a> fn(
-      &'a dyn StreamReader,
-   ) -> Pin<Box<dyn Future<Output = Result<Vec<TrackType>>> + Send + 'a>>;
+   async fn parse_tracks(&self, reader: &dyn StreamReader) -> Result<Vec<TrackType>>;
 
-/// Async frame parser function type.
-pub type AsyncFrameParser = for<'a> fn(
-   &'a dyn StreamReader,
-   u32,
-   Duration,
-) -> Pin<Box<dyn Future<Output = Result<Frame>> + Send + 'a>>;
+   async fn parse_cover(&self, reader: &dyn StreamReader) -> Result<Option<CoverArt>>;
 
-/// Async subtitle parser function type.
-pub type AsyncSubtitleParser =
-   for<'a> fn(
-      &'a dyn StreamReader,
-      Option<TrackFilter>,
-   ) -> Pin<Box<dyn Future<Output = Result<Vec<SubtitleTrack>>> + Send + 'a>>;
+   async fn parse_frame(
+      &self,
+      reader: &dyn StreamReader,
+      track_id: u32,
+      timestamp: Duration,
+   ) -> Result<Frame>;
+
+   async fn parse_frames(
+      &self,
+      reader: &dyn StreamReader,
+      track_id: u32,
+      timestamps: &[Duration],
+   ) -> Result<Vec<Frame>>;
+
+   async fn parse_subtitles(
+      &self,
+      reader: &dyn StreamReader,
+      filter: Option<TrackFilter>,
+   ) -> Result<Vec<SubtitleTrack>>;
+}
 
 /// Format signature for identification.
 ///
@@ -117,27 +118,12 @@ pub struct FormatSignature {
 /// Links a format's identification data with its parsing implementation.
 pub struct Format {
    pub signature: FormatSignature,
-   pub parser: AsyncParser,
-   pub track_parser: AsyncTrackParser,
-   pub frame_parser: AsyncFrameParser,
-   pub subtitle_parser: AsyncSubtitleParser,
+   pub parser: &'static dyn FormatParser,
 }
 
 impl Format {
-   pub const fn new(
-      signature: FormatSignature,
-      parser: AsyncParser,
-      track_parser: AsyncTrackParser,
-      frame_parser: AsyncFrameParser,
-      subtitle_parser: AsyncSubtitleParser,
-   ) -> Self {
-      Self {
-         signature,
-         parser,
-         track_parser,
-         frame_parser,
-         subtitle_parser,
-      }
+   pub const fn new(signature: FormatSignature, parser: &'static dyn FormatParser) -> Self {
+      Self { signature, parser }
    }
 
    /// Check if this format matches the given header bytes.

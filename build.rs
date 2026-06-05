@@ -1,6 +1,7 @@
 const COMMANDS: &[&str] = &[
    "get_metadata",
    "get_tracks",
+   "get_cover",
    "get_subtitles",
    "get_thumbnails",
 ];

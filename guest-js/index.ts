@@ -56,6 +56,15 @@ export interface TrackInfo {
 }
 
 /**
+ * Embedded cover artwork.
+ */
+export interface CoverInfo {
+   format: 'jpeg' | 'png';
+   mimeType: 'image/jpeg' | 'image/png';
+   data: number[];
+}
+
+/**
  * Subtitle cue with timestamps in seconds.
  */
 export interface SubtitleCueInfo {
@@ -169,6 +178,23 @@ export async function getTracks(
    options?: MetadataOptions,
 ): Promise<TrackInfo[]> {
    return await invoke<TrackInfo[]>('plugin:media-parser|get_tracks', {
+      source,
+      headers: options?.headers,
+   });
+}
+
+/**
+ * Extract embedded cover artwork from a media file (local path or URL).
+ *
+ * @param source - Absolute path to a local file or URL of a remote media file
+ * @param options - Optional settings (headers are only used for URLs)
+ * @returns Cover artwork when present, otherwise null
+ */
+export async function getCover(
+   source: string,
+   options?: MetadataOptions,
+): Promise<CoverInfo | null> {
+   return await invoke<CoverInfo | null>('plugin:media-parser|get_cover', {
       source,
       headers: options?.headers,
    });

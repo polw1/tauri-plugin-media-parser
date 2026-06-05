@@ -9,41 +9,6 @@ files or HTTP streams.
 [ci-badge]: https://github.com/silvermine/tauri-plugin-sqlite/actions/workflows/ci.yml/badge.svg
 [ci-url]: https://github.com/silvermine/tauri-plugin-sqlite/actions/workflows/ci.yml
 
-## Project Structure
-
-This project is organized as a Cargo workspace with the following structure:
-
-```text
-tauri-plugin-media-parser/
-├── crates/
-│   └── media-parser/          # Rust media parser library
-│       ├── src/
-│       │   ├── format/
-│       │   │   ├── mp3/       # MP3 parsing (frames, duration, ID3 tags)
-│       │   │   ├── mp4/       # MP4 parsing (atoms, moov, metadata)
-│       │   │   │   └── atoms/ # Box/atom reading, iteration, navigation
-│       │   │   ├── registry.rs # Format detection and parser dispatch
-│       │   │   └── signatures.rs # Markers and extension mappings
-│       │   ├── helpers/       # Byte reading, text decoding utilities
-│       │   ├── errors.rs
-│       │   ├── lib.rs
-│       │   ├── stream.rs
-│       │   └── types.rs
-│       └── Cargo.toml
-├── src/                        # Tauri plugin implementation
-│   ├── commands.rs             # Plugin commands
-│   ├── error.rs                 # Error types
-│   └── lib.rs                   # Main plugin code
-├── guest-js/                    # JavaScript/TypeScript bindings
-│   ├── index.ts
-│   └── tsconfig.json
-├── permissions/                 # Permission definitions (mostly generated)
-├── dist-js/                     # Compiled JS (generated)
-├── Cargo.toml                   # Workspace configuration
-├── package.json                 # NPM package configuration
-└── build.rs                     # Build script
-```
-
 ## Crates
 
 ### media-parser
@@ -136,7 +101,7 @@ fn main() {
 Install the JavaScript package in your frontend:
 
 ```bash
-npm install @silvermine/tauri-plugin-media-parser
+npm install tauri-plugin-media-parser
 ```
 
 Use the plugin from JavaScript/TypeScript:
@@ -144,9 +109,10 @@ Use the plugin from JavaScript/TypeScript:
 ```typescript
 import {
    getMetadata,
-   getDurationInSeconds,
-   getMetadataValue,
-} from '@silvermine/tauri-plugin-media-parser';
+   getTracks,
+   getSubtitles,
+   getThumbnails,
+} from 'tauri-plugin-media-parser';
 
 // Extract metadata from a local file
 const metadata = await getMetadata('/path/to/video.mp4');
@@ -156,14 +122,15 @@ const remoteMetadata = await getMetadata('https://example.com/video.mp4', {
    headers: { 'Authorization': 'Bearer token123' },
 });
 
-// Get duration in seconds
-const duration = getDurationInSeconds(metadata);
-console.log(`Duration: ${duration}s`);
+// Extract tracks
+const tracks = await getTracks('/path/to/video.mp4');
 
-// Get specific metadata values
-const title = getMetadataValue(metadata, 'Title');
-const artist = getMetadataValue(metadata, 'Artist');
-console.log(`Title: ${title}, Artist: ${artist}`);
+// Extract subtitles
+const subtitles = await getSubtitles('/path/to/video.mp4', { trackId: 2 });
+
+// Extract thumbnails
+const thumbnails = await getThumbnails('/path/to/video.mp4', {trackId: 0, timestamps: [10000, 20000]});
+const thumbnail = thumbnails[0];
 ```
 
 ## Development Standards
