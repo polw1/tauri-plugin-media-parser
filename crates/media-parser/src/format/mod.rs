@@ -65,7 +65,7 @@ pub mod signatures;
 
 use crate::Result;
 use crate::stream::StreamReader;
-use crate::types::{Metadata, TrackType};
+use crate::types::{Metadata, SubtitleTrack, TrackFilter, TrackType};
 use std::future::Future;
 use std::pin::Pin;
 
@@ -80,6 +80,13 @@ pub type AsyncTrackParser =
    for<'a> fn(
       &'a dyn StreamReader,
    ) -> Pin<Box<dyn Future<Output = Result<Vec<TrackType>>> + Send + 'a>>;
+
+/// Async subtitle parser function type.
+pub type AsyncSubtitleParser =
+   for<'a> fn(
+      &'a dyn StreamReader,
+      Option<TrackFilter>,
+   ) -> Pin<Box<dyn Future<Output = Result<Vec<SubtitleTrack>>> + Send + 'a>>;
 
 /// Format signature for identification.
 ///
@@ -104,6 +111,7 @@ pub struct Format {
    pub signature: FormatSignature,
    pub parser: AsyncParser,
    pub track_parser: AsyncTrackParser,
+   pub subtitle_parser: AsyncSubtitleParser,
 }
 
 impl Format {
@@ -111,11 +119,13 @@ impl Format {
       signature: FormatSignature,
       parser: AsyncParser,
       track_parser: AsyncTrackParser,
+      subtitle_parser: AsyncSubtitleParser,
    ) -> Self {
       Self {
          signature,
          parser,
          track_parser,
+         subtitle_parser,
       }
    }
 

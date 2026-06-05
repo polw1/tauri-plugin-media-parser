@@ -39,38 +39,78 @@ pub mod thumbnails;
 pub mod tracks;
 
 use crate::Result;
-use crate::format::{AsyncParser, AsyncTrackParser, Format};
+use crate::format::{Format, FormatParser};
 use crate::stream::StreamReader;
-use crate::types::{Metadata, TrackType};
-use std::future::Future;
-use std::pin::Pin;
+use crate::types::{CoverArt, Frame, Metadata, SubtitleTrack, TrackFilter, TrackType};
+use std::time::Duration;
 
 /// MP4 format signature for detection.
 pub use crate::format::signatures::MP4 as SIGNATURE;
 
-/// Parser entry point for the registry.
-fn parse(reader: &dyn StreamReader) -> Pin<Box<dyn Future<Output = Result<Metadata>> + Send + '_>> {
-   Box::pin(parse_mp4(reader))
-}
+pub struct Mp4Parser;
 
-fn parse_tracks(
-   reader: &dyn StreamReader,
-) -> Pin<Box<dyn Future<Output = Result<Vec<TrackType>>> + Send + '_>> {
-   Box::pin(tracks::read_tracks(reader))
+#[async_trait::async_trait]
+impl FormatParser for Mp4Parser {
+   async fn parse_metadata(&self, reader: &dyn StreamReader) -> Result<Metadata> {
+      parse_mp4(reader).await
+   }
+
+   async fn parse_tracks(&self, reader: &dyn StreamReader) -> Result<Vec<TrackType>> {
+      tracks::read_tracks(reader).await
+   }
+
+   async fn parse_cover(&self, reader: &dyn StreamReader) -> Result<Option<CoverArt>> {
+      read_cover(reader).await
+   }
+
+   async fn parse_frame(
+      &self,
+      reader: &dyn StreamReader,
+      track_id: u32,
+      timestamp: Duration,
+   ) -> Result<Frame> {
+      thumbnails::read_frame(reader, track_id, timestamp).await
+   }
+
+   async fn parse_frames(
+      &self,
+      reader: &dyn StreamReader,
+      track_id: u32,
+      timestamps: &[Duration],
+   ) -> Result<Vec<Frame>> {
+      thumbnails::read_frames(reader, track_id, timestamps).await
+   }
+
+   async fn parse_subtitles(
+      &self,
+      reader: &dyn StreamReader,
+      filter: Option<TrackFilter>,
+   ) -> Result<Vec<SubtitleTrack>> {
+      subtitles::read_subtitles(reader, filter).await
+   }
 }
 
 /// MP4 format definition registered in the global table.
-pub static FORMAT: Format = Format::new(
-   SIGNATURE,
-   parse as AsyncParser,
-   parse_tracks as AsyncTrackParser,
-);
+pub static FORMAT: Format = Format::new(SIGNATURE, &Mp4Parser);
 
 /// Main parsing function.
 async fn parse_mp4(reader: &dyn StreamReader) -> Result<Metadata> {
    metadata::read_metadata(reader).await
 }
 
+pub async fn read_cover(reader: &dyn StreamReader) -> Result<Option<CoverArt>> {
+   let moov_data = atoms::find_and_read_moov_box(reader).await?;
+   let moov_payload = if moov_data.len() >= 8 && &moov_data[4..8] == b"moov" {
+      &moov_data[8..]
+   } else {
+      &moov_data
+   };
+
+   Ok(atoms::parse_cover_art(moov_payload))
+}
+
 // Re-export for direct access
 pub use metadata::read_metadata;
+pub use subtitles::{read_subtitles, read_subtitles_in_range};
+pub use thumbnails::{read_frame, read_frames, read_keyframes};
 pub use tracks::read_tracks;

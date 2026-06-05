@@ -53,6 +53,8 @@ async fn main() -> media_parser::Result<()> {
 
 ### 3) Subtitles
 
+MP4 subtitle extraction reads timed cues from `tx3g` tracks, with best-effort text extraction for `wvtt` and simple text/XML samples.
+
 ```rust
 use media_parser::{MediaParser, FileStreamReader, TrackFilter};
 
@@ -88,6 +90,8 @@ async fn main() -> media_parser::Result<()> {
    println!("Frame data: {} bytes", frame.data.len());
 
    match frame.format {
+      PixelFormat::Jpeg | PixelFormat::Png => println!("Embedded artwork detected"),
+      PixelFormat::EncodedVideoSample => println!("Encoded video sample detected"),
       PixelFormat::Yuv420p => println!("YUV 4:2:0 format detected"),
       PixelFormat::Rgb24 => println!("RGB format detected"),
       _ => println!("Other format: {:?}", frame.format),

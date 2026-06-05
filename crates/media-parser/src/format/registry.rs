@@ -17,7 +17,7 @@ use super::{Format, FormatSignature};
 use crate::Result;
 use crate::errors::MediaParserError;
 use crate::stream::StreamReader;
-use crate::types::{Metadata, TrackType};
+use crate::types::{Metadata, SubtitleTrack, TrackFilter, TrackType};
 use std::sync::LazyLock;
 
 /// Global registry of supported formats.
@@ -70,6 +70,24 @@ pub async fn parse_tracks(reader: &dyn StreamReader) -> Result<Vec<TrackType>> {
    })?;
 
    (format.track_parser)(reader).await
+}
+
+/// Parses subtitle tracks by detecting format and dispatching to the appropriate parser.
+pub async fn parse_subtitles(
+   reader: &dyn StreamReader,
+   filter: Option<TrackFilter>,
+) -> Result<Vec<SubtitleTrack>> {
+   let mut header = [0u8; 32];
+   reader.read_at(0, &mut header).await?;
+
+   let format = detect_format(&header).ok_or_else(|| {
+      MediaParserError::InvalidFormat(format!(
+         "Could not detect format from header: {:02X?}",
+         &header[..header.len().min(16)]
+      ))
+   })?;
+
+   (format.subtitle_parser)(reader, filter).await
 }
 
 /// Returns an iterator over all supported format signatures.

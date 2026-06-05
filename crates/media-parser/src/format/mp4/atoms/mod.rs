@@ -17,6 +17,7 @@
 //! ```
 
 mod iter;
+mod media;
 mod moov;
 mod nav;
 mod read;
@@ -25,6 +26,12 @@ mod types;
 
 // Re-export public items
 pub use iter::{Mp4BoxIter, iter_boxes};
+pub use media::{
+   MediaHeader, SampleDescription, SampleSizes, SampleTiming, StscEntry, TrackHeader,
+   decode_language, expand_sample_sizes, fourcc_string, parse_chunk_offsets, parse_hdlr,
+   parse_mdhd, parse_sample_sizes, parse_sample_timings, parse_stsc, parse_stsd, parse_tkhd,
+   read_sample_data, sample_file_offset, sample_size, stts_sample_count, ticks_to_duration,
+};
 pub use moov::find_and_read_moov_box;
 pub use nav::{Mp4Nav, find_box_ref};
 pub use read::{BoxRead, read_box};

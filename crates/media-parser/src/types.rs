@@ -108,7 +108,7 @@ pub enum TrackFilter {
 }
 
 /// Timed subtitle cue.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct SubtitleCue {
    pub cue_id: u32,
    pub start_time: Duration,
@@ -117,7 +117,7 @@ pub struct SubtitleCue {
 }
 
 /// Subtitle track and its cues.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct SubtitleTrack {
    pub base: BaseTrackMeta,
    pub cues: Vec<SubtitleCue>,

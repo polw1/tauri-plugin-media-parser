@@ -44,9 +44,11 @@ pub mod tables;
 pub mod tags;
 
 use crate::Result;
-use crate::format::{AsyncParser, AsyncTrackParser, Format};
+use crate::format::{AsyncParser, AsyncSubtitleParser, AsyncTrackParser, Format};
 use crate::stream::StreamReader;
-use crate::types::{AudioTrackMeta, BaseTrackMeta, Metadata, TrackType};
+use crate::types::{
+   AudioTrackMeta, BaseTrackMeta, Metadata, SubtitleTrack, TrackFilter, TrackType,
+};
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
@@ -65,11 +67,19 @@ fn parse_tracks(
    Box::pin(read_tracks(reader))
 }
 
+fn parse_subtitles(
+   reader: &dyn StreamReader,
+   filter: Option<TrackFilter>,
+) -> Pin<Box<dyn Future<Output = Result<Vec<SubtitleTrack>>> + Send + '_>> {
+   Box::pin(read_subtitles(reader, filter))
+}
+
 /// MP3 format definition registered in the global table.
 pub static FORMAT: Format = Format::new(
    SIGNATURE,
    parse as AsyncParser,
    parse_tracks as AsyncTrackParser,
+   parse_subtitles as AsyncSubtitleParser,
 );
 
 /// Main parsing function.
@@ -116,6 +126,13 @@ async fn read_tracks(reader: &dyn StreamReader) -> Result<Vec<TrackType>> {
       sample_rate: header.sample_rate_hz,
       sample_sizes: None,
    })])
+}
+
+async fn read_subtitles(
+   _reader: &dyn StreamReader,
+   _filter: Option<TrackFilter>,
+) -> Result<Vec<SubtitleTrack>> {
+   Ok(Vec::new())
 }
 
 // Re-export public types

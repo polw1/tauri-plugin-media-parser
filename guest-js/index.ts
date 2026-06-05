@@ -55,6 +55,38 @@ export interface TrackInfo {
    sampleRate?: number;
 }
 
+/**
+ * Subtitle cue with timestamps in seconds.
+ */
+export interface SubtitleCueInfo {
+   cueId: number;
+   startSec: number;
+   endSec: number;
+   text: string;
+}
+
+/**
+ * Subtitle track and decoded cues.
+ */
+export interface SubtitleInfo {
+   id: number;
+   codec: string;
+   language?: string;
+   timescale: number;
+   duration: number;
+   cues: SubtitleCueInfo[];
+}
+
+/**
+ * Options for subtitle extraction.
+ */
+export interface SubtitleOptions extends MetadataOptions {
+   /** Optional track id filter. Use 0 to return the first subtitle track. */
+   trackId?: number;
+   /** Optional ISO-639 language filter. Ignored when `trackId` is set. */
+   language?: string;
+}
+
 // ============================================================================
 // Functions
 // ============================================================================
@@ -113,6 +145,25 @@ export async function getTracks(
 ): Promise<TrackInfo[]> {
    return await invoke<TrackInfo[]>('plugin:media-parser|get_tracks', {
       source,
+      headers: options?.headers,
+   });
+}
+
+/**
+ * Extract subtitle tracks and cues from a media file (local path or URL).
+ *
+ * @param source - Absolute path to a local file or URL of a remote media file
+ * @param options - Optional track/language filters and URL headers
+ * @returns Subtitle tracks with decoded cues
+ */
+export async function getSubtitles(
+   source: string,
+   options?: SubtitleOptions,
+): Promise<SubtitleInfo[]> {
+   return await invoke<SubtitleInfo[]>('plugin:media-parser|get_subtitles', {
+      source,
+      trackId: options?.trackId,
+      language: options?.language,
       headers: options?.headers,
    });
 }

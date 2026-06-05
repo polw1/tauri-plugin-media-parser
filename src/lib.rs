@@ -70,7 +70,8 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
    tauri::plugin::Builder::new("media-parser")
       .invoke_handler(tauri::generate_handler![
          commands::get_metadata,
-         commands::get_tracks
+         commands::get_tracks,
+         commands::get_subtitles
       ])
       .build()
 }

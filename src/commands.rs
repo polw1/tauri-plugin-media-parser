@@ -2,7 +2,9 @@ use std::collections::HashMap;
 use tauri::command;
 use url::Url;
 
-use media_parser::{FileStreamReader, HttpStreamReader, MediaParser, Metadata, TrackType};
+use media_parser::{
+   FileStreamReader, HttpStreamReader, MediaParser, Metadata, SubtitleTrack, TrackFilter, TrackType,
+};
 
 use crate::Result;
 
@@ -59,6 +61,54 @@ pub(crate) async fn get_tracks(
    })?;
 
    Ok(tracks.into_iter().map(TrackInfo::from).collect())
+}
+
+/// Extract subtitle tracks and cues from a media file (local path or URL).
+#[command]
+pub(crate) async fn get_subtitles(
+   source: String,
+   track_id: Option<u32>,
+   language: Option<String>,
+   headers: Option<HashMap<String, String>>,
+) -> Result<Vec<SubtitleInfo>> {
+   let (filter, first_subtitle) = subtitle_filter(track_id, language);
+   let is_http_url = Url::parse(&source)
+      .map(|url| matches!(url.scheme(), "http" | "https"))
+      .unwrap_or(false);
+
+   let subtitles = if is_http_url {
+      let reader = match headers {
+         Some(h) => HttpStreamReader::with_headers(&source, h).await?,
+         None => HttpStreamReader::new(&source).await?,
+      };
+      let parser = MediaParser::new(reader);
+      parser.subtitles(filter).await?
+   } else {
+      let reader = FileStreamReader::new(&source)?;
+      let parser = MediaParser::new(reader);
+      parser.subtitles(filter).await?
+   };
+
+   let subtitles = if first_subtitle {
+      subtitles.into_iter().take(1).collect()
+   } else {
+      subtitles
+   };
+
+   Ok(subtitles.into_iter().map(SubtitleInfo::from).collect())
+}
+
+fn subtitle_filter(track_id: Option<u32>, language: Option<String>) -> (Option<TrackFilter>, bool) {
+   let first_subtitle = track_id == Some(0);
+   if first_subtitle {
+      return (None, true);
+   }
+
+   let filter = track_id
+      .map(TrackFilter::TrackId)
+      .or_else(|| language.map(TrackFilter::Language));
+
+   (filter, false)
 }
 
 #[derive(serde::Serialize, Clone, Debug)]
@@ -133,5 +183,79 @@ impl From<TrackType> for TrackInfo {
             sample_rate: None,
          },
       }
+   }
+}
+
+#[derive(serde::Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct SubtitleInfo {
+   pub id: u32,
+   pub codec: String,
+   pub language: Option<String>,
+   pub timescale: u32,
+   pub duration: u64,
+   pub cues: Vec<SubtitleCueInfo>,
+}
+
+impl From<SubtitleTrack> for SubtitleInfo {
+   fn from(track: SubtitleTrack) -> Self {
+      Self {
+         id: track.base.id,
+         codec: track.base.codec,
+         language: track.base.language,
+         timescale: track.base.timescale,
+         duration: track.base.duration,
+         cues: track.cues.into_iter().map(SubtitleCueInfo::from).collect(),
+      }
+   }
+}
+
+#[derive(serde::Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct SubtitleCueInfo {
+   pub cue_id: u32,
+   pub start_sec: f64,
+   pub end_sec: f64,
+   pub text: String,
+}
+
+impl From<media_parser::SubtitleCue> for SubtitleCueInfo {
+   fn from(cue: media_parser::SubtitleCue) -> Self {
+      Self {
+         cue_id: cue.cue_id,
+         start_sec: cue.start_time.as_secs_f64(),
+         end_sec: cue.end_time.as_secs_f64(),
+         text: cue.text,
+      }
+   }
+}
+
+#[cfg(test)]
+mod tests {
+   use super::subtitle_filter;
+   use media_parser::TrackFilter;
+
+   #[test]
+   fn subtitle_filter_treats_track_zero_as_first_subtitle() {
+      let (filter, first_subtitle) = subtitle_filter(Some(0), Some("jpn".to_string()));
+
+      assert!(filter.is_none());
+      assert!(first_subtitle);
+   }
+
+   #[test]
+   fn subtitle_filter_keeps_explicit_track_id() {
+      let (filter, first_subtitle) = subtitle_filter(Some(3), Some("eng".to_string()));
+
+      assert!(!first_subtitle);
+      assert!(matches!(filter, Some(TrackFilter::TrackId(3))));
+   }
+
+   #[test]
+   fn subtitle_filter_uses_language_when_track_missing() {
+      let (filter, first_subtitle) = subtitle_filter(None, Some("por".to_string()));
+
+      assert!(!first_subtitle);
+      assert!(matches!(filter, Some(TrackFilter::Language(lang)) if lang == "por"));
    }
 }
