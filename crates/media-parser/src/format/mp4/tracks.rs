@@ -2,38 +2,19 @@
 //!
 //! Reads lightweight information from each `trak` box without touching media samples.
 
-use super::atoms::{Mp4Nav, find_and_read_moov_box, iter_boxes, read_box};
+use super::atoms::{
+   Mp4Nav, expand_sample_durations, expand_sample_sizes, find_and_read_moov_box, fourcc_string,
+   iter_boxes, parse_hdlr, parse_mdhd, parse_stsd, parse_tkhd, stts_sample_count,
+};
 use crate::Result;
 use crate::errors::MediaParserError;
-use crate::helpers::{read_u16_be, read_u32_be, read_u64_be};
+use crate::helpers::read_u32_be;
 use crate::stream::StreamReader;
 use crate::types::{
    AudioTrackMeta, BaseTrackMeta, SubtitleTrackMeta, TrackType, UnknownTrackMeta, VideoTrackMeta,
 };
 use std::collections::HashMap;
 
-const TKHD_V0_TRACK_ID_OFFSET: usize = 12;
-const TKHD_V0_DURATION_OFFSET: usize = 20;
-const TKHD_V0_WIDTH_OFFSET: usize = 76;
-const TKHD_V0_HEIGHT_OFFSET: usize = 80;
-const TKHD_V1_TRACK_ID_OFFSET: usize = 20;
-const TKHD_V1_DURATION_OFFSET: usize = 32;
-const TKHD_V1_WIDTH_OFFSET: usize = 88;
-const TKHD_V1_HEIGHT_OFFSET: usize = 92;
-
-const MDHD_V0_TIMESCALE_OFFSET: usize = 12;
-const MDHD_V0_DURATION_OFFSET: usize = 16;
-const MDHD_V0_LANGUAGE_OFFSET: usize = 20;
-const MDHD_V1_TIMESCALE_OFFSET: usize = 20;
-const MDHD_V1_DURATION_OFFSET: usize = 24;
-const MDHD_V1_LANGUAGE_OFFSET: usize = 32;
-
-const HDLR_HANDLER_TYPE_OFFSET: usize = 8;
-const STSD_ENTRIES_OFFSET: usize = 8;
-const VISUAL_WIDTH_OFFSET: usize = 24;
-const VISUAL_HEIGHT_OFFSET: usize = 26;
-const AUDIO_CHANNELS_OFFSET: usize = 16;
-const AUDIO_SAMPLE_RATE_OFFSET: usize = 24;
 const MAX_EXPANDED_SAMPLE_TABLE: u32 = 100_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -42,31 +23,6 @@ enum TrackKind {
    Audio,
    Subtitle,
    Unknown,
-}
-
-#[derive(Debug, Clone, Copy)]
-struct TkhdInfo {
-   id: u32,
-   duration: u64,
-   width: u32,
-   height: u32,
-}
-
-#[derive(Debug, Clone, Copy)]
-struct MdhdInfo {
-   timescale: u32,
-   duration: u64,
-   language: Option<[u8; 3]>,
-}
-
-#[derive(Debug, Clone)]
-struct StsdInfo {
-   codec: String,
-   width: Option<u32>,
-   height: Option<u32>,
-   channels: Option<u16>,
-   sample_rate: Option<u32>,
-   entry_count: u32,
 }
 
 /// Reads all MP4 tracks from the `moov/trak` boxes.
@@ -93,8 +49,8 @@ pub async fn read_tracks(reader: &dyn StreamReader) -> Result<Vec<TrackType>> {
 fn parse_trak(trak: &[u8]) -> Result<TrackType> {
    let tkhd = trak
       .nav(&[*b"tkhd"])
-      .ok_or_else(|| MediaParserError::InvalidFormat("trak missing tkhd box".to_string()))
-      .and_then(parse_tkhd)?;
+      .and_then(parse_tkhd)
+      .ok_or_else(|| MediaParserError::InvalidFormat("trak missing tkhd box".to_string()))?;
 
    let mdia = trak
       .nav(&[*b"mdia"])
@@ -102,8 +58,8 @@ fn parse_trak(trak: &[u8]) -> Result<TrackType> {
 
    let mdhd = mdia
       .nav(&[*b"mdhd"])
-      .ok_or_else(|| MediaParserError::InvalidFormat("trak missing mdhd box".to_string()))
-      .and_then(parse_mdhd)?;
+      .and_then(parse_mdhd)
+      .ok_or_else(|| MediaParserError::InvalidFormat("trak missing mdhd box".to_string()))?;
 
    let handler = mdia
       .nav(&[*b"hdlr"])
@@ -117,10 +73,10 @@ fn parse_trak(trak: &[u8]) -> Result<TrackType> {
       .and_then(parse_stsd);
    let sample_durations = stbl
       .and_then(|stbl| stbl.nav(&[*b"stts"]))
-      .and_then(parse_sample_durations);
+      .and_then(|stts| expand_sample_durations(stts, MAX_EXPANDED_SAMPLE_TABLE));
    let sample_sizes = stbl
       .and_then(|stbl| stbl.nav(&[*b"stsz"]))
-      .and_then(parse_sample_sizes);
+      .and_then(|stsz| expand_sample_sizes(stsz, MAX_EXPANDED_SAMPLE_TABLE));
 
    let mut properties = HashMap::new();
    properties.insert("handler_type".to_string(), fourcc_string(handler));
@@ -163,156 +119,6 @@ fn parse_trak(trak: &[u8]) -> Result<TrackType> {
    }
 }
 
-fn parse_tkhd(tkhd: &[u8]) -> Result<TkhdInfo> {
-   let version = *tkhd.first().ok_or(MediaParserError::CorruptedData(0))?;
-
-   let (track_id_offset, duration_offset, width_offset, height_offset) = match version {
-      0 => (
-         TKHD_V0_TRACK_ID_OFFSET,
-         TKHD_V0_DURATION_OFFSET,
-         TKHD_V0_WIDTH_OFFSET,
-         TKHD_V0_HEIGHT_OFFSET,
-      ),
-      1 => (
-         TKHD_V1_TRACK_ID_OFFSET,
-         TKHD_V1_DURATION_OFFSET,
-         TKHD_V1_WIDTH_OFFSET,
-         TKHD_V1_HEIGHT_OFFSET,
-      ),
-      _ => {
-         return Err(MediaParserError::InvalidFormat(format!(
-            "unsupported tkhd version: {}",
-            version
-         )));
-      }
-   };
-
-   let id = read_u32_be(tkhd, track_id_offset)
-      .ok_or(MediaParserError::CorruptedData(track_id_offset as u64))?;
-   let duration = if version == 0 {
-      read_u32_be(tkhd, duration_offset)
-         .ok_or(MediaParserError::CorruptedData(duration_offset as u64))? as u64
-   } else {
-      read_u64_be(tkhd, duration_offset)
-         .ok_or(MediaParserError::CorruptedData(duration_offset as u64))?
-   };
-   let width = read_fixed_16_16(tkhd, width_offset).unwrap_or(0);
-   let height = read_fixed_16_16(tkhd, height_offset).unwrap_or(0);
-
-   Ok(TkhdInfo {
-      id,
-      duration,
-      width,
-      height,
-   })
-}
-
-fn parse_mdhd(mdhd: &[u8]) -> Result<MdhdInfo> {
-   let version = *mdhd.first().ok_or(MediaParserError::CorruptedData(0))?;
-
-   let (timescale_offset, duration_offset, language_offset) = match version {
-      0 => (
-         MDHD_V0_TIMESCALE_OFFSET,
-         MDHD_V0_DURATION_OFFSET,
-         MDHD_V0_LANGUAGE_OFFSET,
-      ),
-      1 => (
-         MDHD_V1_TIMESCALE_OFFSET,
-         MDHD_V1_DURATION_OFFSET,
-         MDHD_V1_LANGUAGE_OFFSET,
-      ),
-      _ => {
-         return Err(MediaParserError::InvalidFormat(format!(
-            "unsupported mdhd version: {}",
-            version
-         )));
-      }
-   };
-
-   let timescale = read_u32_be(mdhd, timescale_offset)
-      .ok_or(MediaParserError::CorruptedData(timescale_offset as u64))?;
-   let duration = if version == 0 {
-      read_u32_be(mdhd, duration_offset)
-         .ok_or(MediaParserError::CorruptedData(duration_offset as u64))? as u64
-   } else {
-      read_u64_be(mdhd, duration_offset)
-         .ok_or(MediaParserError::CorruptedData(duration_offset as u64))?
-   };
-   let language = read_u16_be(mdhd, language_offset).and_then(decode_language);
-
-   Ok(MdhdInfo {
-      timescale,
-      duration,
-      language,
-   })
-}
-
-fn parse_hdlr(hdlr: &[u8]) -> Option<[u8; 4]> {
-   hdlr
-      .get(HDLR_HANDLER_TYPE_OFFSET..HDLR_HANDLER_TYPE_OFFSET + 4)?
-      .try_into()
-      .ok()
-}
-
-fn parse_stsd(stsd: &[u8]) -> Option<StsdInfo> {
-   let entry_count = read_u32_be(stsd, 4)?;
-   let sample_entry = read_box(stsd, STSD_ENTRIES_OFFSET)?;
-   let codec = fourcc_string(sample_entry.fourcc);
-   let payload = sample_entry.payload;
-
-   Some(StsdInfo {
-      codec,
-      width: read_u16_be(payload, VISUAL_WIDTH_OFFSET).map(u32::from),
-      height: read_u16_be(payload, VISUAL_HEIGHT_OFFSET).map(u32::from),
-      channels: read_u16_be(payload, AUDIO_CHANNELS_OFFSET),
-      sample_rate: read_u32_be(payload, AUDIO_SAMPLE_RATE_OFFSET).map(|rate| rate >> 16),
-      entry_count,
-   })
-}
-
-fn parse_sample_durations(stts: &[u8]) -> Option<Vec<u32>> {
-   let entry_count = read_u32_be(stts, 4)?;
-   if entry_count <= 1 {
-      return None;
-   }
-
-   let mut total_samples = 0u32;
-   let mut offset = 8usize;
-   for _ in 0..entry_count {
-      total_samples = total_samples.checked_add(read_u32_be(stts, offset)?)?;
-      offset += 8;
-   }
-   if total_samples > MAX_EXPANDED_SAMPLE_TABLE {
-      return None;
-   }
-
-   let mut durations = Vec::with_capacity(total_samples as usize);
-   let mut offset = 8usize;
-   for _ in 0..entry_count {
-      let count = read_u32_be(stts, offset)?;
-      let delta = read_u32_be(stts, offset + 4)?;
-      durations.extend(std::iter::repeat_n(delta, count as usize));
-      offset += 8;
-   }
-   Some(durations)
-}
-
-fn parse_sample_sizes(stsz: &[u8]) -> Option<Vec<u32>> {
-   let fixed_sample_size = read_u32_be(stsz, 4)?;
-   let sample_count = read_u32_be(stsz, 8)?;
-   if fixed_sample_size != 0 || sample_count > MAX_EXPANDED_SAMPLE_TABLE {
-      return None;
-   }
-
-   let mut sizes = Vec::with_capacity(sample_count as usize);
-   let mut offset = 12usize;
-   for _ in 0..sample_count {
-      sizes.push(read_u32_be(stsz, offset)?);
-      offset += 4;
-   }
-   Some(sizes)
-}
-
 fn add_sample_table_properties(stbl: Option<&[u8]>, properties: &mut HashMap<String, String>) {
    let Some(stbl) = stbl else {
       return;
@@ -340,17 +146,6 @@ fn add_sample_table_properties(stbl: Option<&[u8]>, properties: &mut HashMap<Str
    }
 }
 
-fn stts_sample_count(stts: &[u8]) -> Option<u32> {
-   let entry_count = read_u32_be(stts, 4)?;
-   let mut total_samples = 0u32;
-   let mut offset = 8usize;
-   for _ in 0..entry_count {
-      total_samples = total_samples.checked_add(read_u32_be(stts, offset)?)?;
-      offset += 8;
-   }
-   Some(total_samples)
-}
-
 fn classify_handler(handler: [u8; 4]) -> TrackKind {
    match &handler {
       b"vide" => TrackKind::Video,
@@ -360,39 +155,14 @@ fn classify_handler(handler: [u8; 4]) -> TrackKind {
    }
 }
 
-fn read_fixed_16_16(buf: &[u8], offset: usize) -> Option<u32> {
-   read_u32_be(buf, offset).map(|value| value >> 16)
-}
-
-fn decode_language(code: u16) -> Option<[u8; 3]> {
-   if code == 0 {
-      return None;
-   }
-
-   let chars = [
-      (((code >> 10) & 0x1f) as u8).checked_add(0x60)?,
-      (((code >> 5) & 0x1f) as u8).checked_add(0x60)?,
-      ((code & 0x1f) as u8).checked_add(0x60)?,
-   ];
-
-   if chars.iter().all(u8::is_ascii_lowercase) && &chars != b"und" {
-      Some(chars)
-   } else {
-      None
-   }
-}
-
 fn language_string(language: [u8; 3]) -> String {
    String::from_utf8_lossy(&language).into_owned()
-}
-
-fn fourcc_string(fourcc: [u8; 4]) -> String {
-   String::from_utf8_lossy(&fourcc).into_owned()
 }
 
 #[cfg(test)]
 mod tests {
    use super::*;
+   use crate::format::mp4::atoms::decode_language;
 
    #[test]
    fn test_decode_language() {
@@ -406,10 +176,8 @@ mod tests {
    #[test]
    fn test_parse_stsd_video_entry() {
       let mut visual_payload = vec![0u8; 78];
-      visual_payload[VISUAL_WIDTH_OFFSET..VISUAL_WIDTH_OFFSET + 2]
-         .copy_from_slice(&320u16.to_be_bytes());
-      visual_payload[VISUAL_HEIGHT_OFFSET..VISUAL_HEIGHT_OFFSET + 2]
-         .copy_from_slice(&180u16.to_be_bytes());
+      visual_payload[24..26].copy_from_slice(&320u16.to_be_bytes());
+      visual_payload[26..28].copy_from_slice(&180u16.to_be_bytes());
 
       let mut stsd = vec![0u8; 8];
       stsd[4..8].copy_from_slice(&1u32.to_be_bytes());
@@ -425,10 +193,8 @@ mod tests {
    #[test]
    fn test_parse_stsd_audio_entry() {
       let mut audio_payload = vec![0u8; 28];
-      audio_payload[AUDIO_CHANNELS_OFFSET..AUDIO_CHANNELS_OFFSET + 2]
-         .copy_from_slice(&2u16.to_be_bytes());
-      audio_payload[AUDIO_SAMPLE_RATE_OFFSET..AUDIO_SAMPLE_RATE_OFFSET + 4]
-         .copy_from_slice(&(44_100u32 << 16).to_be_bytes());
+      audio_payload[16..18].copy_from_slice(&2u16.to_be_bytes());
+      audio_payload[24..28].copy_from_slice(&(44_100u32 << 16).to_be_bytes());
 
       let mut stsd = vec![0u8; 8];
       stsd[4..8].copy_from_slice(&1u32.to_be_bytes());
@@ -449,7 +215,10 @@ mod tests {
       stts.extend_from_slice(&1u32.to_be_bytes());
       stts.extend_from_slice(&120u32.to_be_bytes());
 
-      assert_eq!(parse_sample_durations(&stts), Some(vec![100, 100, 120]));
+      assert_eq!(
+         expand_sample_durations(&stts, MAX_EXPANDED_SAMPLE_TABLE),
+         Some(vec![100, 100, 120])
+      );
    }
 
    fn make_box(fourcc: &[u8; 4], payload: &[u8]) -> Vec<u8> {

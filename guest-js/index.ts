@@ -87,6 +87,31 @@ export interface SubtitleOptions extends MetadataOptions {
    language?: string;
 }
 
+/**
+ * Thumbnail/frame extracted from a media file.
+ */
+export interface ThumbnailInfo {
+   trackId: number;
+   width: number;
+   height: number;
+   timestampSec: number;
+   format: string;
+   mimeType: string;
+   data: number[];
+}
+
+/**
+ * Options for extracting a thumbnail strip.
+ */
+export interface ThumbnailsOptions extends MetadataOptions {
+   /** Track id to extract from. Defaults to the first video track. */
+   trackId?: number;
+   /** Timestamps to extract, in milliseconds. Missing/out-of-range items are ignored. */
+   timestamps: number[];
+   /** Decode exact frames. Defaults to false for fast trimmer/keyframe thumbnails. */
+   accurate?: boolean;
+}
+
 // ============================================================================
 // Functions
 // ============================================================================
@@ -165,6 +190,29 @@ export async function getSubtitles(
       trackId: options?.trackId,
       language: options?.language,
       headers: options?.headers,
+   });
+}
+
+/**
+ * Extract multiple thumbnails/frames for specific millisecond timestamps.
+ *
+ * Useful for building trimmer timelines. Missing/out-of-range timestamps are
+ * ignored, so the returned array may be shorter than `timestamps`.
+ *
+ * @param source - Absolute path to a local file or URL of a remote media file
+ * @param options - Timestamp range/list, optional track, accuracy, and URL headers
+ * @returns Thumbnail/frame objects in timestamp order
+ */
+export async function getThumbnails(
+   source: string,
+   options: ThumbnailsOptions,
+): Promise<ThumbnailInfo[]> {
+   return await invoke<ThumbnailInfo[]>('plugin:media-parser|get_thumbnails', {
+      source,
+      timestamps: options.timestamps,
+      trackId: options.trackId,
+      accurate: options.accurate,
+      headers: options.headers,
    });
 }
 

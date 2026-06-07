@@ -71,7 +71,8 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
       .invoke_handler(tauri::generate_handler![
          commands::get_metadata,
          commands::get_tracks,
-         commands::get_subtitles
+         commands::get_subtitles,
+         commands::get_thumbnails
       ])
       .build()
 }

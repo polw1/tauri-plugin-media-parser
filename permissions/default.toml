@@ -6,4 +6,5 @@ permissions = [
    "allow-get-metadata",
    "allow-get-tracks",
    "allow-get-subtitles",
+   "allow-get-thumbnails",
 ]

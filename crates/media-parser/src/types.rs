@@ -123,18 +123,24 @@ pub struct SubtitleTrack {
    pub cues: Vec<SubtitleCue>,
 }
 
-/// Supported pixel formats.
-#[derive(Debug, Clone, PartialEq)]
+/// Supported frame payload formats.
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub enum PixelFormat {
    Yuv420p,
    Yuv422p,
    Yuv444p,
    Rgb24,
    Rgba,
+   /// Encoded JPEG image bytes, usually from MP4 `covr` artwork.
+   Jpeg,
+   /// Encoded PNG image bytes, usually from MP4 `covr` artwork.
+   Png,
+   /// Encoded MP4 video sample bytes. Decoding is left to the caller.
+   EncodedVideoSample,
 }
 
 /// Preview image (Frame) extracted at a timestamp.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Frame {
    pub track_id: u32,
    pub width: u32,

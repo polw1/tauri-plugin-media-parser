@@ -44,6 +44,34 @@ const MOOV_CHILD_FOURCCS: &[&[u8; 4]] = &[
 /// # Ok(())
 /// # }
 /// ```
+/// Find the byte position and size of the `moov` box.
+pub async fn find_moov_bounds(reader: &dyn StreamReader) -> Result<(u64, u64)> {
+   let file_size = reader.size().await?;
+
+   // Strategy 1: Head - iterate aligned boxes
+   let head_len = HEAD_SIZE.min(file_size as usize);
+   let mut head_buf = vec![0u8; head_len];
+   let _ = reader.read_at(0, &mut head_buf).await?;
+
+   if let Some((pos, size)) = find_moov_aligned(&head_buf, 0) {
+      return Ok((pos, size));
+   }
+
+   // Strategy 2: Tail - pattern search for "moov" fourcc
+   let tail_len = TAIL_SIZE.min(file_size as usize);
+   let tail_offset = file_size.saturating_sub(tail_len as u64);
+   let mut tail_buf = vec![0u8; tail_len];
+   let _ = reader.read_at(tail_offset, &mut tail_buf).await?;
+
+   if let Some((pos, size)) = find_moov_pattern(&tail_buf, tail_offset, file_size) {
+      return Ok((pos, size));
+   }
+
+   Err(crate::errors::MediaParserError::InvalidFormat(
+      "moov box not found".into(),
+   ))
+}
+
 pub async fn find_and_read_moov_box(reader: &dyn StreamReader) -> Result<Vec<u8>> {
    let file_size = reader.size().await?;
 

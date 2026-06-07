@@ -1,9 +1,11 @@
-//! Media-oriented MP4 atom parsers shared by tracks and subtitles.
+//! Media-oriented MP4 atom parsers shared by tracks, thumbnails, and subtitles.
 
-use super::{Mp4Nav, read_box};
+use super::{Mp4Nav, iter_boxes, read_box};
+use crate::decoders::h264::AvcConfig;
 use crate::errors::{MediaParserError, Result};
 use crate::helpers::{read_u16_be, read_u32_be, read_u64_be};
 use crate::stream::StreamReader;
+use crate::types::PixelFormat;
 use std::time::Duration;
 
 #[derive(Debug, Clone, Copy)]
@@ -29,6 +31,7 @@ pub struct SampleDescription {
    pub channels: Option<u16>,
    pub sample_rate: Option<u32>,
    pub entry_count: u32,
+   pub avc_config: Option<AvcConfig>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -45,10 +48,43 @@ pub struct SampleSizes {
 }
 
 #[derive(Debug, Clone, Copy)]
+pub struct SampleSelection {
+   pub sample_index: u32,
+   pub start_tick: u64,
+}
+
+#[derive(Debug, Clone, Copy)]
 pub struct SampleTiming {
    pub sample_index: u32,
    pub start_tick: u64,
    pub duration_ticks: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct CoverArt {
+   pub format: PixelFormat,
+   pub data: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CompositionOffsetEntry {
+   pub sample_count: u32,
+   pub sample_offset: i64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SampleCompositionOffset {
+   pub sample_index: u32,
+   pub offset_ticks: i64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SamplePresentationTiming {
+   pub sample_index: u32,
+   pub decode_start_tick: u64,
+   pub presentation_start_tick: i64,
+   pub duration_ticks: u64,
+   pub composition_offset_ticks: i64,
 }
 
 const TKHD_V0_TRACK_ID_OFFSET: usize = 12;
@@ -154,6 +190,32 @@ pub fn parse_stsd(stsd: &[u8]) -> Option<SampleDescription> {
       channels: read_u16_be(payload, AUDIO_CHANNELS_OFFSET),
       sample_rate: read_u32_be(payload, AUDIO_SAMPLE_RATE_OFFSET).map(|rate| rate >> 16),
       entry_count,
+      avc_config: parse_avc_config_from_entry(sample_entry.fourcc, payload),
+   })
+}
+
+pub fn parse_cover_art(moov_payload: &[u8]) -> Option<CoverArt> {
+   let meta = moov_payload.nav(&[*b"udta", *b"meta"])?;
+   let meta_payload = if meta.len() >= 4 { &meta[4..] } else { meta };
+   let covr = meta_payload.nav(&[*b"ilst", *b"covr"])?;
+   let data = covr.nav(&[*b"data"])?;
+   if data.len() < 8 {
+      return None;
+   }
+
+   let format = match read_u32_be(data, 0)? {
+      13 => PixelFormat::Jpeg,
+      14 => PixelFormat::Png,
+      _ => return None,
+   };
+   let image = data[8..].to_vec();
+   if image.is_empty() {
+      return None;
+   }
+
+   Some(CoverArt {
+      format,
+      data: image,
    })
 }
 
@@ -223,6 +285,94 @@ pub fn parse_chunk_offsets(stbl: &[u8]) -> Option<Vec<u64>> {
    Some(offsets)
 }
 
+pub fn parse_stss(stss: &[u8]) -> Option<Vec<u32>> {
+   let entry_count = read_u32_be(stss, 4)?;
+   let mut samples = Vec::with_capacity(entry_count as usize);
+   let mut offset = 8usize;
+   for _ in 0..entry_count {
+      samples.push(read_u32_be(stss, offset)?);
+      offset += 4;
+   }
+   Some(samples)
+}
+
+pub fn parse_ctts(ctts: &[u8]) -> Option<Vec<CompositionOffsetEntry>> {
+   let version = *ctts.first()?;
+   let entry_count = read_u32_be(ctts, 4)?;
+   let mut entries = Vec::with_capacity(entry_count as usize);
+   let mut offset = 8usize;
+
+   for _ in 0..entry_count {
+      let sample_count = read_u32_be(ctts, offset)?;
+      let sample_offset = match version {
+         0 => read_u32_be(ctts, offset + 4)? as i64,
+         1 => i32::from_be_bytes(ctts.get(offset + 4..offset + 8)?.try_into().ok()?) as i64,
+         _ => return None,
+      };
+      entries.push(CompositionOffsetEntry {
+         sample_count,
+         sample_offset,
+      });
+      offset += 8;
+   }
+
+   Some(entries)
+}
+
+pub fn expand_sample_composition_offsets(
+   ctts: &[u8],
+   max_samples: u32,
+) -> Option<Vec<SampleCompositionOffset>> {
+   let entries = parse_ctts(ctts)?;
+   let total_samples = entries
+      .iter()
+      .try_fold(0u32, |total, entry| total.checked_add(entry.sample_count))?;
+   if total_samples > max_samples {
+      return None;
+   }
+
+   let mut offsets = Vec::with_capacity(total_samples as usize);
+   let mut sample_index = 1u32;
+   for entry in entries {
+      for _ in 0..entry.sample_count {
+         offsets.push(SampleCompositionOffset {
+            sample_index,
+            offset_ticks: entry.sample_offset,
+         });
+         sample_index = sample_index.checked_add(1)?;
+      }
+   }
+
+   Some(offsets)
+}
+
+pub fn expand_sample_durations(stts: &[u8], max_samples: u32) -> Option<Vec<u32>> {
+   let entry_count = read_u32_be(stts, 4)?;
+   if entry_count <= 1 {
+      return None;
+   }
+
+   let mut total_samples = 0u32;
+   let mut offset = 8usize;
+   for _ in 0..entry_count {
+      total_samples = total_samples.checked_add(read_u32_be(stts, offset)?)?;
+      offset += 8;
+   }
+   if total_samples > max_samples {
+      return None;
+   }
+
+   let mut durations = Vec::with_capacity(total_samples as usize);
+   let mut offset = 8usize;
+   for _ in 0..entry_count {
+      let count = read_u32_be(stts, offset)?;
+      let delta = read_u32_be(stts, offset + 4)?;
+      durations.extend(std::iter::repeat_n(delta, count as usize));
+      offset += 8;
+   }
+   Some(durations)
+}
+
 pub fn stts_sample_count(stts: &[u8]) -> Option<u32> {
    let entry_count = read_u32_be(stts, 4)?;
    let mut total_samples = 0u32;
@@ -262,6 +412,90 @@ pub fn parse_sample_timings(stts: &[u8], max_samples: u32) -> Option<Vec<SampleT
    }
 
    Some(timings)
+}
+
+pub fn parse_sample_presentation_timings(
+   stts: &[u8],
+   ctts: Option<&[u8]>,
+   max_samples: u32,
+) -> Option<Vec<SamplePresentationTiming>> {
+   let decode_timings = parse_sample_timings(stts, max_samples)?;
+   let composition_offsets = match ctts {
+      Some(ctts) => expand_sample_composition_offsets(ctts, max_samples)?,
+      None => Vec::new(),
+   };
+   if !composition_offsets.is_empty() && composition_offsets.len() != decode_timings.len() {
+      return None;
+   }
+
+   decode_timings
+      .into_iter()
+      .enumerate()
+      .map(|(index, timing)| {
+         let composition_offset = composition_offsets
+            .get(index)
+            .map(|offset| offset.offset_ticks)
+            .unwrap_or(0);
+         Some(SamplePresentationTiming {
+            sample_index: timing.sample_index,
+            decode_start_tick: timing.start_tick,
+            presentation_start_tick: (timing.start_tick as i64).checked_add(composition_offset)?,
+            duration_ticks: timing.duration_ticks,
+            composition_offset_ticks: composition_offset,
+         })
+      })
+      .collect()
+}
+
+pub fn select_sample_by_time(stts: &[u8], target_tick: u64) -> Option<SampleSelection> {
+   let entry_count = read_u32_be(stts, 4)?;
+   let mut sample_index = 1u32;
+   let mut sample_start = 0u64;
+   let mut offset = 8usize;
+
+   for _ in 0..entry_count {
+      let sample_count = read_u32_be(stts, offset)?;
+      let sample_delta = read_u32_be(stts, offset + 4)? as u64;
+      let entry_duration = sample_count as u64 * sample_delta;
+
+      if target_tick < sample_start + entry_duration {
+         let within = if sample_delta == 0 {
+            0
+         } else {
+            ((target_tick - sample_start) / sample_delta).min(sample_count.saturating_sub(1) as u64)
+         };
+         return Some(SampleSelection {
+            sample_index: sample_index + within as u32,
+            start_tick: sample_start + within * sample_delta,
+         });
+      }
+
+      sample_index = sample_index.checked_add(sample_count)?;
+      sample_start = sample_start.checked_add(entry_duration)?;
+      offset += 8;
+   }
+
+   sample_index
+      .checked_sub(1)
+      .map(|last_sample| SampleSelection {
+         sample_index: last_sample,
+         start_tick: sample_start,
+      })
+}
+
+pub fn nearest_sync_sample(sample_index: u32, sync_samples: Option<&[u32]>) -> u32 {
+   let Some(sync_samples) = sync_samples else {
+      return sample_index;
+   };
+   if sync_samples.is_empty() {
+      return sample_index;
+   }
+
+   match sync_samples.binary_search(&sample_index) {
+      Ok(index) => sync_samples[index],
+      Err(0) => sync_samples[0],
+      Err(index) => sync_samples[index - 1],
+   }
 }
 
 pub fn sample_file_offset(
@@ -345,6 +579,61 @@ pub async fn read_sample_data(
    Ok(data)
 }
 
+pub async fn read_sample_range(
+   reader: &dyn StreamReader,
+   start_sample: u32,
+   end_sample: u32,
+   sizes: &SampleSizes,
+   stsc: &[StscEntry],
+   chunk_offsets: &[u64],
+   max_total_bytes: usize,
+) -> Result<Vec<Vec<u8>>> {
+   if start_sample == 0 || end_sample < start_sample {
+      return Err(MediaParserError::InvalidFormat(format!(
+         "invalid sample range: {}..={}",
+         start_sample, end_sample
+      )));
+   }
+
+   let mut total_bytes = 0usize;
+   let mut samples = Vec::with_capacity((end_sample - start_sample + 1) as usize);
+   for sample_index in start_sample..=end_sample {
+      let size = sample_size(sample_index, sizes).ok_or_else(|| {
+         MediaParserError::InvalidFormat(format!("could not read sample {} size", sample_index))
+      })?;
+      let size = usize::try_from(size)
+         .map_err(|_| MediaParserError::InvalidFormat("sample too large".to_string()))?;
+      total_bytes = total_bytes
+         .checked_add(size)
+         .ok_or_else(|| MediaParserError::InvalidFormat("sample range too large".to_string()))?;
+      if total_bytes > max_total_bytes {
+         return Err(MediaParserError::InvalidFormat(format!(
+            "sample range too large: {} bytes",
+            total_bytes
+         )));
+      }
+
+      samples.push(
+         read_sample_data(
+            reader,
+            sample_index,
+            sizes,
+            stsc,
+            chunk_offsets,
+            max_total_bytes,
+         )
+         .await?,
+      );
+   }
+
+   Ok(samples)
+}
+
+pub fn duration_to_ticks(duration: Duration, timescale: u32) -> u64 {
+   let nanos = duration.as_nanos();
+   ((nanos * timescale as u128) / 1_000_000_000u128) as u64
+}
+
 pub fn ticks_to_duration(ticks: u64, timescale: u32) -> Duration {
    if timescale == 0 {
       return Duration::ZERO;
@@ -372,6 +661,58 @@ pub fn decode_language(code: u16) -> Option<[u8; 3]> {
 
 pub fn fourcc_string(fourcc: [u8; 4]) -> String {
    String::from_utf8_lossy(&fourcc).into_owned()
+}
+
+fn parse_avc_config_from_entry(fourcc: [u8; 4], payload: &[u8]) -> Option<AvcConfig> {
+   if &fourcc != b"avc1" && &fourcc != b"avc3" {
+      return None;
+   }
+
+   let children = payload.get(78..)?;
+   let avcc = iter_boxes(children).find_map(|(fourcc, payload)| {
+      if &fourcc == b"avcC" {
+         Some(payload)
+      } else {
+         None
+      }
+   })?;
+   parse_avcc(avcc)
+}
+
+fn parse_avcc(avcc: &[u8]) -> Option<AvcConfig> {
+   if avcc.len() < 7 || avcc[0] != 1 {
+      return None;
+   }
+
+   let length_size = (avcc[4] & 0x03) as usize + 1;
+   let sps_count = avcc[5] & 0x1f;
+   let mut offset = 6usize;
+   let mut sps = Vec::with_capacity(sps_count as usize);
+
+   for _ in 0..sps_count {
+      let len = read_u16_be(avcc, offset)? as usize;
+      offset += 2;
+      let end = offset.checked_add(len)?;
+      sps.push(avcc.get(offset..end)?.to_vec());
+      offset = end;
+   }
+
+   let pps_count = *avcc.get(offset)?;
+   offset += 1;
+   let mut pps = Vec::with_capacity(pps_count as usize);
+   for _ in 0..pps_count {
+      let len = read_u16_be(avcc, offset)? as usize;
+      offset += 2;
+      let end = offset.checked_add(len)?;
+      pps.push(avcc.get(offset..end)?.to_vec());
+      offset = end;
+   }
+
+   Some(AvcConfig {
+      length_size,
+      sps,
+      pps,
+   })
 }
 
 fn read_fixed_16_16(buf: &[u8], offset: usize) -> Option<u32> {
@@ -409,6 +750,140 @@ mod tests {
          Some("eng".into())
       );
       assert_eq!(decode_language(0x55c4), None);
+   }
+
+   #[test]
+   fn test_select_sample_by_time() {
+      let mut stts = vec![0u8; 8];
+      stts[4..8].copy_from_slice(&2u32.to_be_bytes());
+      stts.extend_from_slice(&2u32.to_be_bytes());
+      stts.extend_from_slice(&100u32.to_be_bytes());
+      stts.extend_from_slice(&1u32.to_be_bytes());
+      stts.extend_from_slice(&50u32.to_be_bytes());
+
+      assert_eq!(select_sample_by_time(&stts, 0).unwrap().sample_index, 1);
+      assert_eq!(select_sample_by_time(&stts, 100).unwrap().sample_index, 2);
+      assert_eq!(select_sample_by_time(&stts, 210).unwrap().sample_index, 3);
+   }
+
+   #[test]
+   fn test_parse_ctts_version_0_unsigned_offsets() {
+      let ctts = ctts_box(0, &[(2, 40), (1, 80)]);
+
+      assert_eq!(
+         parse_ctts(&ctts),
+         Some(vec![
+            CompositionOffsetEntry {
+               sample_count: 2,
+               sample_offset: 40,
+            },
+            CompositionOffsetEntry {
+               sample_count: 1,
+               sample_offset: 80,
+            },
+         ])
+      );
+      assert_eq!(
+         expand_sample_composition_offsets(&ctts, 10),
+         Some(vec![
+            SampleCompositionOffset {
+               sample_index: 1,
+               offset_ticks: 40,
+            },
+            SampleCompositionOffset {
+               sample_index: 2,
+               offset_ticks: 40,
+            },
+            SampleCompositionOffset {
+               sample_index: 3,
+               offset_ticks: 80,
+            },
+         ])
+      );
+   }
+
+   #[test]
+   fn test_parse_ctts_version_1_signed_offsets() {
+      let ctts = ctts_box(1, &[(1, -20), (2, 40)]);
+
+      assert_eq!(
+         expand_sample_composition_offsets(&ctts, 10),
+         Some(vec![
+            SampleCompositionOffset {
+               sample_index: 1,
+               offset_ticks: -20,
+            },
+            SampleCompositionOffset {
+               sample_index: 2,
+               offset_ticks: 40,
+            },
+            SampleCompositionOffset {
+               sample_index: 3,
+               offset_ticks: 40,
+            },
+         ])
+      );
+   }
+
+   #[test]
+   fn test_parse_sample_presentation_timings_combines_stts_and_ctts() {
+      let stts = stts_box(&[(3, 100)]);
+      let ctts = ctts_box(0, &[(1, 200), (1, 0), (1, 100)]);
+
+      assert_eq!(
+         parse_sample_presentation_timings(&stts, Some(&ctts), 10),
+         Some(vec![
+            SamplePresentationTiming {
+               sample_index: 1,
+               decode_start_tick: 0,
+               presentation_start_tick: 200,
+               duration_ticks: 100,
+               composition_offset_ticks: 200,
+            },
+            SamplePresentationTiming {
+               sample_index: 2,
+               decode_start_tick: 100,
+               presentation_start_tick: 100,
+               duration_ticks: 100,
+               composition_offset_ticks: 0,
+            },
+            SamplePresentationTiming {
+               sample_index: 3,
+               decode_start_tick: 200,
+               presentation_start_tick: 300,
+               duration_ticks: 100,
+               composition_offset_ticks: 100,
+            },
+         ])
+      );
+   }
+
+   fn stts_box(entries: &[(u32, u32)]) -> Vec<u8> {
+      let mut stts = vec![0u8; 8];
+      stts[4..8].copy_from_slice(&(entries.len() as u32).to_be_bytes());
+      for (sample_count, sample_delta) in entries {
+         stts.extend_from_slice(&sample_count.to_be_bytes());
+         stts.extend_from_slice(&sample_delta.to_be_bytes());
+      }
+      stts
+   }
+
+   fn ctts_box(version: u8, entries: &[(u32, i32)]) -> Vec<u8> {
+      let mut ctts = vec![version, 0, 0, 0];
+      ctts.extend_from_slice(&(entries.len() as u32).to_be_bytes());
+      for (sample_count, sample_offset) in entries {
+         ctts.extend_from_slice(&sample_count.to_be_bytes());
+         ctts.extend_from_slice(&sample_offset.to_be_bytes());
+      }
+      ctts
+   }
+
+   #[test]
+   fn test_nearest_sync_sample() {
+      let sync = [1, 10, 20];
+      assert_eq!(nearest_sync_sample(15, Some(&sync)), 10);
+      assert_eq!(nearest_sync_sample(1, Some(&sync)), 1);
+      assert_eq!(nearest_sync_sample(0, Some(&sync)), 1);
    }
 
    #[test]

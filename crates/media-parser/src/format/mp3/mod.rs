@@ -44,14 +44,15 @@ pub mod tables;
 pub mod tags;
 
 use crate::Result;
-use crate::format::{AsyncParser, AsyncSubtitleParser, AsyncTrackParser, Format};
+use crate::format::{AsyncFrameParser, AsyncParser, AsyncSubtitleParser, AsyncTrackParser, Format};
 use crate::stream::StreamReader;
 use crate::types::{
-   AudioTrackMeta, BaseTrackMeta, Metadata, SubtitleTrack, TrackFilter, TrackType,
+   AudioTrackMeta, BaseTrackMeta, Frame, Metadata, SubtitleTrack, TrackFilter, TrackType,
 };
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
+use std::time::Duration as StdDuration;
 
 /// MP3 format signature for detection.
 pub use crate::format::signatures::MP3 as SIGNATURE;
@@ -67,6 +68,14 @@ fn parse_tracks(
    Box::pin(read_tracks(reader))
 }
 
+fn parse_frame(
+   reader: &dyn StreamReader,
+   track_id: u32,
+   timestamp: StdDuration,
+) -> Pin<Box<dyn Future<Output = Result<Frame>> + Send + '_>> {
+   Box::pin(read_frame(reader, track_id, timestamp))
+}
+
 fn parse_subtitles(
    reader: &dyn StreamReader,
    filter: Option<TrackFilter>,
@@ -79,6 +88,7 @@ pub static FORMAT: Format = Format::new(
    SIGNATURE,
    parse as AsyncParser,
    parse_tracks as AsyncTrackParser,
+   parse_frame as AsyncFrameParser,
    parse_subtitles as AsyncSubtitleParser,
 );
 
@@ -126,6 +136,16 @@ async fn read_tracks(reader: &dyn StreamReader) -> Result<Vec<TrackType>> {
       sample_rate: header.sample_rate_hz,
       sample_sizes: None,
    })])
+}
+
+async fn read_frame(
+   _reader: &dyn StreamReader,
+   _track_id: u32,
+   _timestamp: StdDuration,
+) -> Result<Frame> {
+   Err(crate::errors::MediaParserError::UnsupportedCodec(
+      "MP3 does not contain video frames or MP4 thumbnails".to_string(),
+   ))
 }
 
 async fn read_subtitles(

@@ -1,9 +1,11 @@
 use std::collections::HashMap;
+use std::time::Duration;
 use tauri::command;
 use url::Url;
 
 use media_parser::{
-   FileStreamReader, HttpStreamReader, MediaParser, Metadata, SubtitleTrack, TrackFilter, TrackType,
+   FileStreamReader, Frame, HttpStreamReader, MediaParser, Metadata, PixelFormat, StreamReader,
+   SubtitleTrack, TrackFilter, TrackType,
 };
 
 use crate::Result;
@@ -96,6 +98,47 @@ pub(crate) async fn get_subtitles(
    };
 
    Ok(subtitles.into_iter().map(SubtitleInfo::from).collect())
+}
+
+/// Extract multiple thumbnails/frames from a media file (local path or URL).
+#[command]
+pub(crate) async fn get_thumbnails(
+   source: String,
+   timestamps: Vec<u64>,
+   track_id: Option<u32>,
+   accurate: Option<bool>,
+   headers: Option<HashMap<String, String>>,
+) -> Result<Vec<ThumbnailInfo>> {
+   let track_id = track_id.unwrap_or(0);
+   let timestamps = thumbnail_durations(&timestamps);
+   let use_accurate_frames = accurate.unwrap_or(false);
+
+   let frames = with_reader!(source, headers, |reader| {
+      read_thumbnail_frames(&reader, track_id, &timestamps, use_accurate_frames).await
+   })?;
+
+   Ok(frames.into_iter().map(ThumbnailInfo::from).collect())
+}
+
+async fn read_thumbnail_frames(
+   reader: &dyn StreamReader,
+   track_id: u32,
+   timestamps: &[Duration],
+   _accurate: bool,
+) -> Result<Vec<Frame>> {
+   let mut frames = Vec::with_capacity(timestamps.len());
+   for &timestamp in timestamps {
+      frames.push(media_parser::format::registry::parse_frame(reader, track_id, timestamp).await?);
+   }
+   Ok(frames)
+}
+
+fn thumbnail_durations(timestamps_ms: &[u64]) -> Vec<Duration> {
+   timestamps_ms
+      .iter()
+      .copied()
+      .map(Duration::from_millis)
+      .collect()
 }
 
 fn subtitle_filter(track_id: Option<u32>, language: Option<String>) -> (Option<TrackFilter>, bool) {
@@ -230,10 +273,65 @@ impl From<media_parser::SubtitleCue> for SubtitleCueInfo {
    }
 }
 
+#[derive(serde::Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct ThumbnailInfo {
+   pub track_id: u32,
+   pub width: u32,
+   pub height: u32,
+   pub timestamp_sec: f64,
+   pub format: String,
+   pub mime_type: String,
+   pub data: Vec<u8>,
+}
+
+impl From<Frame> for ThumbnailInfo {
+   fn from(frame: Frame) -> Self {
+      let (format, mime_type) = match frame.format {
+         PixelFormat::Jpeg => ("jpeg", "image/jpeg"),
+         PixelFormat::Png => ("png", "image/png"),
+         PixelFormat::EncodedVideoSample => ("encodedVideoSample", "video/mp4"),
+         PixelFormat::Yuv420p => ("yuv420p", "application/octet-stream"),
+         PixelFormat::Yuv422p => ("yuv422p", "application/octet-stream"),
+         PixelFormat::Yuv444p => ("yuv444p", "application/octet-stream"),
+         PixelFormat::Rgb24 => ("rgb24", "application/octet-stream"),
+         PixelFormat::Rgba => ("rgba", "application/octet-stream"),
+      };
+
+      Self {
+         track_id: frame.track_id,
+         width: frame.width,
+         height: frame.height,
+         timestamp_sec: frame.timestamp.as_secs_f64(),
+         format: format.to_string(),
+         mime_type: mime_type.to_string(),
+         data: frame.data,
+      }
+   }
+}
+
 #[cfg(test)]
 mod tests {
-   use super::subtitle_filter;
+   use super::{subtitle_filter, thumbnail_durations};
    use media_parser::TrackFilter;
+   use std::time::Duration;
+
+   #[test]
+   fn thumbnail_durations_converts_milliseconds_to_durations() {
+      assert_eq!(
+         thumbnail_durations(&[0, 250, 1000]),
+         vec![
+            Duration::from_millis(0),
+            Duration::from_millis(250),
+            Duration::from_millis(1000),
+         ]
+      );
+   }
+
+   #[test]
+   fn thumbnail_durations_allows_empty_input() {
+      assert_eq!(thumbnail_durations(&[]), Vec::<Duration>::new());
+   }
 
    #[test]
    fn subtitle_filter_treats_track_zero_as_first_subtitle() {

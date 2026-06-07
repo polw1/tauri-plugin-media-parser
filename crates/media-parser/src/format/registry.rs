@@ -17,8 +17,9 @@ use super::{Format, FormatSignature};
 use crate::Result;
 use crate::errors::MediaParserError;
 use crate::stream::StreamReader;
-use crate::types::{Metadata, SubtitleTrack, TrackFilter, TrackType};
+use crate::types::{Frame, Metadata, SubtitleTrack, TrackFilter, TrackType};
 use std::sync::LazyLock;
+use std::time::Duration;
 
 /// Global registry of supported formats.
 static FORMATS: LazyLock<Vec<&'static Format>> = LazyLock::new(|| {
@@ -70,6 +71,25 @@ pub async fn parse_tracks(reader: &dyn StreamReader) -> Result<Vec<TrackType>> {
    })?;
 
    (format.track_parser)(reader).await
+}
+
+/// Parses a frame/thumbnail by detecting format and dispatching to the appropriate parser.
+pub async fn parse_frame(
+   reader: &dyn StreamReader,
+   track_id: u32,
+   timestamp: Duration,
+) -> Result<Frame> {
+   let mut header = [0u8; 32];
+   reader.read_at(0, &mut header).await?;
+
+   let format = detect_format(&header).ok_or_else(|| {
+      MediaParserError::InvalidFormat(format!(
+         "Could not detect format from header: {:02X?}",
+         &header[..header.len().min(16)]
+      ))
+   })?;
+
+   (format.frame_parser)(reader, track_id, timestamp).await
 }
 
 /// Parses subtitle tracks by detecting format and dispatching to the appropriate parser.

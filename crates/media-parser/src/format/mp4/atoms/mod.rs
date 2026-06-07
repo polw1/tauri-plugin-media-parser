@@ -27,12 +27,16 @@ mod types;
 // Re-export public items
 pub use iter::{Mp4BoxIter, iter_boxes};
 pub use media::{
-   MediaHeader, SampleDescription, SampleSizes, SampleTiming, StscEntry, TrackHeader,
-   decode_language, expand_sample_sizes, fourcc_string, parse_chunk_offsets, parse_hdlr,
-   parse_mdhd, parse_sample_sizes, parse_sample_timings, parse_stsc, parse_stsd, parse_tkhd,
-   read_sample_data, sample_file_offset, sample_size, stts_sample_count, ticks_to_duration,
+   CompositionOffsetEntry, MediaHeader, ParsedTrak, SampleCompositionOffset, SampleDescription,
+   SamplePresentationTiming, SampleSelection, SampleSizes, SampleTiming, StscEntry, TrackHeader,
+   TrackKind, decode_language, duration_to_ticks, expand_sample_composition_offsets,
+   expand_sample_durations, expand_sample_sizes, fourcc_string, nearest_sync_sample,
+   parse_chunk_offsets, parse_cover_art, parse_ctts, parse_hdlr, parse_mdhd,
+   parse_sample_presentation_timings, parse_sample_sizes, parse_sample_timings, parse_stsc,
+   parse_stsd, parse_stss, parse_tkhd, parse_trak, read_sample_data, read_sample_range,
+   sample_file_offset, sample_size, select_sample_by_time, stts_sample_count, ticks_to_duration,
 };
-pub use moov::find_and_read_moov_box;
+pub use moov::{find_and_read_moov_box, find_moov_bounds};
 pub use nav::{Mp4Nav, find_box_ref};
 pub use read::{BoxRead, read_box};
 pub use tags::{fourcc_to_key, tag_name};

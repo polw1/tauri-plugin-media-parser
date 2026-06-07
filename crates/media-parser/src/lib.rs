@@ -121,6 +121,7 @@
 //! }
 //! ```
 
+pub mod decoders;
 pub mod errors;
 pub mod format;
 pub mod helpers;
@@ -132,8 +133,8 @@ use std::time::Duration;
 pub use errors::{MediaParserError, Result};
 pub use format::mp4::atoms::Mp4Nav;
 pub use format::registry::{
-   detect_format, get_format_info, is_supported, parse_metadata, parse_subtitles, parse_tracks,
-   supported_formats,
+   detect_format, get_format_info, is_supported, parse_frame, parse_metadata, parse_subtitles,
+   parse_tracks, supported_formats,
 };
 pub use stream::{FileStreamReader, HttpStreamReader, StreamReader};
 pub use types::{
@@ -169,15 +170,7 @@ impl<R: StreamReader> MediaParser<R> {
 
    /// Extract a single frame from a video track at the specified timestamp.
    pub async fn frame(&self, track_id: u32, timestamp: Duration) -> Result<Frame> {
-      Ok(Frame {
-         track_id,
-         width: 1920,
-         height: 1080,
-         timestamp,
-         format: PixelFormat::Yuv420p,
-         data: vec![0; 1920 * 1080 * 3 / 2],
-         strides: Some(vec![1920, 960, 960]),
-      })
+      format::registry::parse_frame(&self.reader, track_id, timestamp).await
    }
 
    /// Extract multiple frames from a video track at the specified timestamps.
@@ -185,15 +178,7 @@ impl<R: StreamReader> MediaParser<R> {
       let mut frames = Vec::new();
 
       for &timestamp in timestamps {
-         frames.push(Frame {
-            track_id,
-            width: 1920,
-            height: 1080,
-            timestamp,
-            format: PixelFormat::Yuv420p,
-            data: vec![0; 1920 * 1080 * 3 / 2],
-            strides: Some(vec![1920, 960, 960]),
-         });
+         frames.push(self.frame(track_id, timestamp).await?);
       }
 
       Ok(frames)
