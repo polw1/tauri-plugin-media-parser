@@ -1,0 +1,377 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Media Parser Examples</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: #0a0a0a;
+      color: #fff;
+      color-scheme: dark;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 20px;
+    }
+    h1 { margin-bottom: 20px; color: #e50914; }
+    h2 { margin-bottom: 16px; color: #fff; }
+    .container {
+      width: 100%;
+      max-width: 960px;
+    }
+    .tabs {
+      display: flex;
+      gap: 8px;
+      margin-bottom: 20px;
+      overflow-x: auto;
+      padding-bottom: 4px;
+    }
+    .tab {
+      background: #1d1d1d;
+      color: #ccc;
+      border: 1px solid #333;
+      white-space: nowrap;
+    }
+    .tab.active {
+      background: #e50914;
+      color: #fff;
+      border-color: #e50914;
+    }
+    .panel { display: none; }
+    .panel.active { display: block; }
+    video {
+      width: 100%;
+      max-width: 960px;
+      aspect-ratio: 16/9;
+      background: #000;
+      border-radius: 8px;
+    }
+    video::cue {
+      font-family: "Noto Sans CJK JP", "Noto Sans JP", "Yu Gothic", "Hiragino Sans",
+        "Meiryo", "Noto Sans", sans-serif;
+    }
+    .controls {
+      margin-top: 20px;
+      display: grid;
+      gap: 12px;
+    }
+    .example-card {
+      padding: 18px;
+      background: #111;
+      border: 1px solid #242424;
+      border-radius: 10px;
+    }
+    .row {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+      align-items: center;
+    }
+    label { color: #aaa; font-size: 14px; min-width: 80px; }
+    select, button, input {
+      padding: 10px 16px;
+      border-radius: 6px;
+      border: none;
+      font-size: 14px;
+      cursor: pointer;
+    }
+    select {
+      appearance: none;
+      -webkit-appearance: none;
+      background:
+        linear-gradient(45deg, transparent 50%, #fff 50%) calc(100% - 18px) 50% / 6px 6px no-repeat,
+        linear-gradient(135deg, #fff 50%, transparent 50%) calc(100% - 12px) 50% / 6px 6px no-repeat,
+        #2b2b2b;
+      color: #fff;
+      min-width: 200px;
+      padding-right: 38px;
+      border: 1px solid #444;
+    }
+    select:focus {
+      border-color: #e50914;
+      outline: 2px solid rgba(229, 9, 20, 0.35);
+      outline-offset: 2px;
+    }
+    select option {
+      background: #1f1f1f;
+      color: #fff;
+    }
+    select option:checked,
+    select option:hover {
+      background: #e50914;
+      color: #fff;
+    }
+    button {
+      background: #e50914;
+      color: #fff;
+      font-weight: 600;
+    }
+    button:hover { background: #f40612; }
+    button:disabled { background: #555; cursor: not-allowed; }
+    input[type="number"] {
+      background: #333;
+      color: #fff;
+      width: 90px;
+      text-align: center;
+    }
+    input[type="url"],
+    input[type="text"] {
+      background: #333;
+      color: #fff;
+      flex: 1 1 360px;
+      min-width: 220px;
+      cursor: text;
+    }
+    .info {
+      margin-top: 15px;
+      padding: 15px;
+      background: #1a1a1a;
+      border-radius: 8px;
+      font-size: 13px;
+      color: #888;
+      white-space: pre-wrap;
+      word-break: break-all;
+    }
+    .info.active { color: #4caf50; }
+    .info.error { color: #f44336; }
+    .track-info {
+      margin-top: 10px;
+      font-size: 13px;
+      color: #aaa;
+    }
+    .output {
+      margin-top: 16px;
+      padding: 15px;
+      background: #050505;
+      border: 1px solid #252525;
+      border-radius: 8px;
+      color: #d7d7d7;
+      min-height: 120px;
+      overflow: auto;
+      white-space: pre-wrap;
+      word-break: break-word;
+      font: 13px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+    .thumbnail-preview {
+      margin-top: 16px;
+      display: flex;
+      gap: 8px;
+      overflow-x: auto;
+      padding-bottom: 4px;
+    }
+    .thumbnail-preview img,
+    .thumbnail-preview video {
+      width: 160px;
+      flex: 0 0 160px;
+      border-radius: 8px;
+      border: 1px solid #333;
+      background: #000;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>Media Parser Examples</h1>
+
+    <nav class="tabs" aria-label="Examples">
+      <button class="tab active" type="button" data-tab="metadata">Metadata</button>
+      <button class="tab" type="button" data-tab="tracks">Tracks</button>
+      <button class="tab" type="button" data-tab="subtitle">Subtitle</button>
+      <button class="tab" type="button" data-tab="thumbnails">Thumbnails</button>
+    </nav>
+
+    <section class="panel active" id="metadata-panel">
+      <div class="example-card">
+        <h2>Metadata</h2>
+        <div class="controls">
+          <div class="row">
+            <label>Source:</label>
+            <input id="metadataSource" type="url">
+            <button id="metadataBtn">Read Metadata</button>
+          </div>
+        </div>
+        <pre class="output" id="metadataOutput">Click "Read Metadata" to inspect tags and duration.</pre>
+      </div>
+    </section>
+
+    <section class="panel" id="tracks-panel">
+      <div class="example-card">
+        <h2>Tracks</h2>
+        <div class="controls">
+          <div class="row">
+            <label>Source:</label>
+            <input id="tracksSource" type="url">
+            <button id="tracksBtn">Read Tracks</button>
+          </div>
+        </div>
+        <pre class="output" id="tracksOutput">Click "Read Tracks" to list video, audio, and subtitle tracks.</pre>
+      </div>
+    </section>
+
+    <section class="panel" id="subtitle-panel">
+      <div class="example-card">
+        <h2>Subtitle</h2>
+        <div class="controls">
+          <div class="row">
+            <label>Source:</label>
+            <input id="subtitleSource" type="url">
+          </div>
+          <div class="row">
+            <label>Track ID:</label>
+            <input id="subtitleTrackId" type="number" min="0" placeholder="any">
+            <label>Language:</label>
+            <input id="subtitleLanguage" type="text" placeholder="eng">
+            <button id="subtitleBtn">Read Subtitles</button>
+          </div>
+        </div>
+        <pre class="output" id="subtitleOutput">Click "Read Subtitles" to decode subtitle cues.</pre>
+      </div>
+    </section>
+
+    <section class="panel" id="thumbnails-panel">
+      <div class="example-card">
+        <h2>Thumbnails</h2>
+        <div class="controls">
+          <div class="row">
+            <label>Source:</label>
+            <input id="thumbnailSource" type="url">
+          </div>
+          <div class="row">
+            <label>Track ID:</label>
+            <input id="thumbnailTrackId" type="number" min="0" value="0">
+            <label>Milliseconds:</label>
+            <input id="thumbnailTimestamps" type="text" value="0,4000,8000,12000,16000,20000">
+            <button id="thumbnailBtn">Extract Thumbnails</button>
+          </div>
+        </div>
+        <div class="thumbnail-preview" id="thumbnailPreview"></div>
+        <pre class="output" id="thumbnailOutput">Click "Extract Thumbnails" to build a trimmer-style thumbnail strip.</pre>
+      </div>
+    </section>
+
+  </div>
+
+  <script type="module">
+    import {
+      getDurationInSeconds,
+      getMetadata,
+      getSubtitles,
+      getThumbnails,
+      getTracks,
+    } from './media-parser.js';
+
+    const DEFAULT_SOURCE = 'https://akamd1.jw-cdn.org/sg2/p/acf17f9/1/o/jwbvod25_E_47_r240P.mp4';
+
+    for (const id of ['metadataSource', 'tracksSource', 'subtitleSource', 'thumbnailSource']) {
+      document.getElementById(id).value = DEFAULT_SOURCE;
+    }
+
+    document.querySelectorAll('.tab').forEach((tab) => {
+      tab.addEventListener('click', () => {
+        document.querySelectorAll('.tab').forEach((item) => item.classList.remove('active'));
+        document.querySelectorAll('.panel').forEach((panel) => panel.classList.remove('active'));
+        tab.classList.add('active');
+        document.getElementById(`${tab.dataset.tab}-panel`).classList.add('active');
+      });
+    });
+
+    function renderJson(element, value) {
+      element.textContent = JSON.stringify(value, null, 2);
+      element.classList.remove('error');
+    }
+
+    function renderError(element, error) {
+      element.textContent = `Error: ${error?.message ?? error}`;
+      element.classList.add('error');
+    }
+
+    async function runExample(button, output, task) {
+      button.disabled = true;
+      output.textContent = 'Loading...';
+      output.classList.remove('error');
+      try {
+        await task();
+      } catch (err) {
+        renderError(output, err);
+        console.error(err);
+      } finally {
+        button.disabled = false;
+      }
+    }
+
+    document.getElementById('metadataBtn').addEventListener('click', async () => {
+      const button = document.getElementById('metadataBtn');
+      const output = document.getElementById('metadataOutput');
+      await runExample(button, output, async () => {
+        const metadata = await getMetadata(document.getElementById('metadataSource').value);
+        renderJson(output, {
+          ...metadata,
+          durationSec: getDurationInSeconds(metadata),
+        });
+      });
+    });
+
+    document.getElementById('tracksBtn').addEventListener('click', async () => {
+      const button = document.getElementById('tracksBtn');
+      const output = document.getElementById('tracksOutput');
+      await runExample(button, output, async () => {
+        renderJson(output, await getTracks(document.getElementById('tracksSource').value));
+      });
+    });
+
+    document.getElementById('subtitleBtn').addEventListener('click', async () => {
+      const button = document.getElementById('subtitleBtn');
+      const output = document.getElementById('subtitleOutput');
+      await runExample(button, output, async () => {
+        const trackIdValue = document.getElementById('subtitleTrackId').value;
+        const language = document.getElementById('subtitleLanguage').value.trim();
+        renderJson(output, await getSubtitles(document.getElementById('subtitleSource').value, {
+          trackId: trackIdValue === '' ? undefined : Number(trackIdValue),
+          language: language === '' ? undefined : language,
+        }));
+      });
+    });
+
+    document.getElementById('thumbnailBtn').addEventListener('click', async () => {
+      const button = document.getElementById('thumbnailBtn');
+      const output = document.getElementById('thumbnailOutput');
+      const preview = document.getElementById('thumbnailPreview');
+      await runExample(button, output, async () => {
+        preview.innerHTML = '';
+        const timestamps = document
+          .getElementById('thumbnailTimestamps')
+          .value
+          .split(',')
+          .map((value) => Number(value.trim()))
+          .filter((value) => Number.isFinite(value) && value >= 0);
+        const thumbnails = await getThumbnails(document.getElementById('thumbnailSource').value, {
+          trackId: Number(document.getElementById('thumbnailTrackId').value || 0),
+          timestamps,
+        });
+        for (const thumbnail of thumbnails) {
+          const bytes = new Uint8Array(thumbnail.data);
+          if (!thumbnail.mimeType.startsWith('image/')) {
+            continue;
+          }
+          const blob = new Blob([bytes], { type: thumbnail.mimeType });
+          const url = URL.createObjectURL(blob);
+          const img = document.createElement('img');
+          img.src = url;
+          img.alt = `Thumbnail at ${thumbnail.timestampSec}s`;
+          img.title = `${thumbnail.timestampSec.toFixed(2)}s`;
+          preview.appendChild(img);
+        }
+
+        renderJson(output, thumbnails.map((thumbnail) => ({
+          ...thumbnail,
+          data: `<${thumbnail.data.length} bytes>`,
+        })));
+      });
+    });
+  </script>
+</body>
+</html>

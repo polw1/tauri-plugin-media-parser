@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">tauri-media-player</string>
+    <string name="main_activity_title">tauri-media-player</string>
+</resources>
