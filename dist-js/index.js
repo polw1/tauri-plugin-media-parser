@@ -91,13 +91,30 @@ export async function getSubtitles(source, options) {
  * @returns Thumbnail/frame objects in timestamp order
  */
 export async function getThumbnails(source, options) {
-    return await invoke('plugin:media-parser|get_thumbnails', {
+    const raw = await invoke('plugin:media-parser|get_thumbnails', {
         source,
         timestamps: options.timestamps,
         trackId: options.trackId,
         accurate: options.accurate,
         headers: options.headers,
     });
+    return decodeThumbnailEnvelope(raw);
+}
+/**
+ * Decodes the binary thumbnail envelope returned by the Rust side:
+ * `[u32 LE header length][JSON header with per-frame metadata][image bytes]`.
+ */
+function decodeThumbnailEnvelope(raw) {
+    const buf = raw instanceof Uint8Array ? raw : new Uint8Array(raw);
+    const view = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
+    const headerLen = view.getUint32(0, true);
+    const headerBytes = buf.subarray(4, 4 + headerLen);
+    const dataStart = 4 + headerLen;
+    const entries = JSON.parse(new TextDecoder().decode(headerBytes));
+    return entries.map(({ offset, length, ...info }) => ({
+        ...info,
+        data: buf.subarray(dataStart + offset, dataStart + offset + length),
+    }));
 }
 // ============================================================================
 // Utility Functions

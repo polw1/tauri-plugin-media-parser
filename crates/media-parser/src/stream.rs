@@ -45,6 +45,9 @@ impl FileReadAt for std::fs::File {
 /// HTTP status code for partial content (Range request success)
 const HTTP_PARTIAL_CONTENT: u16 = 206;
 
+/// HTTP status code for an unsatisfiable Range request (read past EOF)
+const HTTP_RANGE_NOT_SATISFIABLE: u16 = 416;
+
 /// Copies bytes from `src` into `dst` and returns the count.
 fn copy_into(dst: &mut [u8], src: &[u8]) -> usize {
    let len = dst.len().min(src.len());
@@ -255,27 +258,41 @@ impl HttpStreamReader {
          .build()
          .map_err(|e| MediaParserError::HttpRequest(format!("Failed to build client: {}", e)))?;
 
-      let resp = client
-         .head(url)
-         .send()
-         .await
-         .map_err(|e| MediaParserError::HttpRequest(format!("HEAD request failed: {}", e)))?;
-
-      let len = resp
-         .headers()
-         .get(CONTENT_LENGTH)
-         .and_then(|h| h.to_str().ok())
-         .and_then(|s| s.parse::<u64>().ok())
-         .ok_or(MediaParserError::ContentLengthMissing)?;
-
-      let cached_size = OnceLock::new();
-      let _ = cached_size.set(len);
-
+      // No upfront HEAD request: the total size is learned lazily from the
+      // `Content-Range` header of the first range response, saving one
+      // round-trip before any data arrives.
       Ok(Self {
          url: url.to_string(),
          client,
-         cached_size,
+         cached_size: OnceLock::new(),
       })
+   }
+
+   /// Caches the total stream size from response headers when available.
+   fn learn_size_from_response(&self, status: u16, headers: &HeaderMap) {
+      if self.cached_size.get().is_some() {
+         return;
+      }
+
+      // 206: "Content-Range: bytes start-end/total"; 416: "bytes */total"
+      let from_content_range = headers
+         .get(reqwest::header::CONTENT_RANGE)
+         .and_then(|h| h.to_str().ok())
+         .and_then(|v| v.rsplit('/').next())
+         .and_then(|total| total.parse::<u64>().ok());
+
+      // 200: server ignored the range; Content-Length is the full size.
+      let total = match status {
+         200 => headers
+            .get(CONTENT_LENGTH)
+            .and_then(|h| h.to_str().ok())
+            .and_then(|s| s.parse::<u64>().ok()),
+         _ => from_content_range,
+      };
+
+      if let Some(total) = total {
+         let _ = self.cached_size.set(total);
+      }
    }
 
    /// Performs an HTTP Range request and streams data into the buffer.
@@ -302,6 +319,12 @@ impl HttpStreamReader {
          .map_err(|e| MediaParserError::HttpRequest(format!("GET request failed: {}", e)))?;
 
       let status = resp.status();
+      self.learn_size_from_response(status.as_u16(), resp.headers());
+
+      // Requested range starts past EOF (only possible while size is unknown).
+      if status.as_u16() == HTTP_RANGE_NOT_SATISFIABLE {
+         return Ok(0);
+      }
       if !status.is_success() && status.as_u16() != HTTP_PARTIAL_CONTENT {
          return Err(MediaParserError::HttpStatus(status.as_u16()));
       }
@@ -338,20 +361,26 @@ impl StreamReader for HttpStreamReader {
          return Ok(0);
       }
 
-      let size = self.size().await?;
-      if offset >= size {
-         return Ok(0);
-      }
-
       let mut total_read = 0usize;
       let mut current_offset = offset;
 
       // Loop to handle short reads: if server returns less than requested,
       // request the remaining bytes in subsequent requests
-      while total_read < buf.len() && current_offset < size {
+      while total_read < buf.len() {
+         // The size may be unknown before the first response; in that case
+         // request the full remainder and let the server clamp the range.
+         let known_size = self.cached_size.get().copied();
+         if let Some(size) = known_size
+            && current_offset >= size
+         {
+            break;
+         }
+
          let remaining = buf.len() - total_read;
-         let available = (size - current_offset) as usize;
-         let to_read = remaining.min(available);
+         let to_read = match known_size {
+            Some(size) => remaining.min((size - current_offset) as usize),
+            None => remaining,
+         };
 
          // Calculate range for this request directly
          let start = current_offset;
@@ -359,7 +388,7 @@ impl StreamReader for HttpStreamReader {
 
          // Read into the remaining portion of the buffer
          let bytes_read = self
-            .fetch_range_stream(start, end, &mut buf[total_read..])
+            .fetch_range_stream(start, end, &mut buf[total_read..total_read + to_read])
             .await?;
 
          if bytes_read == 0 {
@@ -375,12 +404,30 @@ impl StreamReader for HttpStreamReader {
    }
 
    /// Returns the total size of the HTTP stream.
+   ///
+   /// Uses the size cached from a previous range response when available;
+   /// otherwise falls back to a HEAD request.
    async fn size(&self) -> Result<u64> {
-      self
-         .cached_size
-         .get()
-         .copied()
-         .ok_or(MediaParserError::ContentLengthUnavailable)
+      if let Some(size) = self.cached_size.get() {
+         return Ok(*size);
+      }
+
+      let resp = self
+         .client
+         .head(&self.url)
+         .send()
+         .await
+         .map_err(|e| MediaParserError::HttpRequest(format!("HEAD request failed: {}", e)))?;
+
+      let len = resp
+         .headers()
+         .get(CONTENT_LENGTH)
+         .and_then(|h| h.to_str().ok())
+         .and_then(|s| s.parse::<u64>().ok())
+         .ok_or(MediaParserError::ContentLengthMissing)?;
+
+      let _ = self.cached_size.set(len);
+      Ok(*self.cached_size.get().unwrap_or(&len))
    }
 }
 
@@ -500,17 +547,21 @@ mod tests {
    }
 
    #[tokio::test]
-   async fn test_http_stream_reader_error_head_request_failed() {
-      // Use an invalid URL to trigger HTTP request error
+   async fn test_http_stream_reader_error_request_failed() {
+      // Construction is lazy (no HEAD request), so it succeeds even for an
+      // unreachable URL; the error surfaces on the first read instead.
       let invalid_url = "http://localhost:1/invalid";
-      let result = HttpStreamReader::new(invalid_url).await;
+      let reader = HttpStreamReader::new(invalid_url)
+         .await
+         .expect("construction should not perform network requests");
 
-      assert!(result.is_err());
+      let mut buf = vec![0u8; 16];
+      let result = reader.read_at(0, &mut buf).await;
 
       if let Err(MediaParserError::HttpRequest(_)) = result {
-         // Expected: HttpRequest error for failed HEAD request
+         // Expected: HttpRequest error for failed GET request
       } else {
-         panic!("Expected HttpRequest error for failed HEAD request");
+         panic!("Expected HttpRequest error for failed GET request");
       }
    }
 

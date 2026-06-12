@@ -264,7 +264,7 @@
       getTracks,
     } from './media-parser.js';
 
-    const DEFAULT_SOURCE = '';
+    const DEFAULT_SOURCE = 'https://cfp2.jw-cdn.org/a/89800a/1/o/jwb-087_T_03_r240P.mp4';
 
     for (const id of ['metadataSource', 'tracksSource', 'subtitleSource', 'thumbnailSource']) {
       document.getElementById(id).value = DEFAULT_SOURCE;
@@ -353,11 +353,11 @@
           timestamps,
         });
         for (const thumbnail of thumbnails) {
-          const bytes = new Uint8Array(thumbnail.data);
           if (!thumbnail.mimeType.startsWith('image/')) {
             continue;
           }
-          const blob = new Blob([bytes], { type: thumbnail.mimeType });
+          // `data` is already a Uint8Array view into the binary IPC buffer.
+          const blob = new Blob([thumbnail.data], { type: thumbnail.mimeType });
           const url = URL.createObjectURL(blob);
           const img = document.createElement('img');
           img.src = url;

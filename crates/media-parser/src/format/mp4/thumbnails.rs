@@ -9,10 +9,12 @@ use super::atoms::{
    parse_sample_sizes, parse_stsc, parse_stsd, parse_stss, parse_trak, read_sample_data,
    read_sample_range, select_sample_by_time, ticks_to_duration,
 };
-use crate::decoders::h264::{AvcConfig, decode_samples_to_png};
+use crate::decoders::h264::{AvcConfig, decode_samples_to_jpeg};
 use crate::errors::{MediaParserError, Result};
 use crate::stream::StreamReader;
 use crate::types::{Frame, PixelFormat};
+use futures::future::try_join_all;
+use std::collections::HashMap;
 use std::time::Duration;
 
 const MAX_FRAME_BYTES: usize = 64 * 1024 * 1024;
@@ -67,7 +69,7 @@ pub async fn read_frames(
 
    let mut frames = Vec::with_capacity(timestamps.len());
    for timestamp in valid_track_timestamps(timestamps, trak.mdhd.timescale, trak.mdhd.duration) {
-      match extract_video_png_with_tables(
+      match extract_video_jpeg_with_tables(
          reader,
          trak.tkhd.id,
          trak.mdhd.timescale,
@@ -109,10 +111,24 @@ pub async fn read_keyframes(
    timestamps: &[Duration],
 ) -> Result<Vec<Frame>> {
    let moov_data = find_and_read_moov_box(reader).await?;
+   read_keyframes_from_moov(reader, &moov_data, track_id, timestamps).await
+}
+
+/// Same as [`read_keyframes`], but reuses an already-downloaded `moov` box.
+///
+/// Callers that extract thumbnails repeatedly from the same source (e.g. a
+/// timeline trimmer) can fetch the `moov` box once and skip the locate/download
+/// round-trips on every subsequent call.
+pub async fn read_keyframes_from_moov(
+   reader: &dyn StreamReader,
+   moov_data: &[u8],
+   track_id: u32,
+   timestamps: &[Duration],
+) -> Result<Vec<Frame>> {
    let moov_payload = if moov_data.len() >= 8 && &moov_data[4..8] == b"moov" {
       &moov_data[8..]
    } else {
-      &moov_data
+      moov_data
    };
 
    let trak = find_video_trak(moov_payload, track_id).ok_or(MediaParserError::TrackNotFound(
@@ -120,30 +136,85 @@ pub async fn read_keyframes(
    ))?;
 
    let tables = parse_video_sample_tables(trak.stbl)?;
+   let timescale = trak.mdhd.timescale;
 
-   let mut frames = Vec::with_capacity(timestamps.len());
-   for timestamp in valid_track_timestamps(timestamps, trak.mdhd.timescale, trak.mdhd.duration) {
-      if let Ok(frame) = extract_keyframe_png_with_tables(
+   // Resolve every timestamp to its sync (key) sample up front so duplicate
+   // sync samples are read and decoded only once.
+   let mut wanted: Vec<(Duration, u32)> = Vec::with_capacity(timestamps.len());
+   for timestamp in valid_track_timestamps(timestamps, timescale, trak.mdhd.duration) {
+      let target_tick = duration_to_ticks(timestamp, timescale);
+      if let Some(selection) = select_sample_by_time(tables.stts, target_tick) {
+         let sync_sample =
+            nearest_sync_sample(selection.sample_index, tables.sync_samples.as_deref());
+         wanted.push((timestamp, sync_sample));
+      }
+   }
+
+   let mut unique_samples: Vec<u32> = wanted.iter().map(|(_, sync)| *sync).collect();
+   unique_samples.sort_unstable();
+   unique_samples.dedup();
+
+   // Fetch all sync samples concurrently (each read is an independent range).
+   let sample_data = try_join_all(unique_samples.iter().map(|&sync_sample| {
+      read_sample_data(
          reader,
-         trak.tkhd.id,
-         trak.mdhd.timescale,
-         &tables,
-         timestamp,
+         sync_sample,
+         &tables.sizes,
+         &tables.stsc,
+         &tables.chunk_offsets,
+         MAX_FRAME_BYTES,
       )
-      .await
-      {
-         frames.push(frame);
-      } else if let Ok(frame) = extract_encoded_video_sample_with_tables(
-         reader,
-         trak.tkhd.id,
-         trak.tkhd.width,
-         trak.tkhd.height,
-         trak.mdhd.timescale,
-         &tables,
-         timestamp,
-      )
-      .await
-      {
+   }))
+   .await?;
+
+   // Decode + encode in parallel on blocking threads; decoding is CPU-bound.
+   let mut decoded_by_sample: HashMap<u32, Frame> = HashMap::with_capacity(unique_samples.len());
+   match tables.avc_config.as_ref() {
+      Some(avc_config) => {
+         let handles: Vec<_> = unique_samples
+            .iter()
+            .zip(sample_data)
+            .map(|(&sync_sample, sample)| {
+               let avc_config = avc_config.clone();
+               tokio::task::spawn_blocking(move || {
+                  let decoded = decode_samples_to_jpeg(&avc_config, std::slice::from_ref(&sample));
+                  (sync_sample, sample, decoded)
+               })
+            })
+            .collect();
+
+         for handle in handles {
+            let (sync_sample, sample, decoded) = handle
+               .await
+               .map_err(|e| MediaParserError::BlockingTask(format!("decode task failed: {e}")))?;
+            let frame = match decoded {
+               Ok(image) => Frame {
+                  track_id: trak.tkhd.id,
+                  width: image.width,
+                  height: image.height,
+                  timestamp: Duration::ZERO,
+                  format: PixelFormat::Jpeg,
+                  data: image.data,
+                  strides: None,
+               },
+               // Decode failed: fall back to the raw encoded sample.
+               Err(_) => encoded_sample_frame(&trak, sample),
+            };
+            decoded_by_sample.insert(sync_sample, frame);
+         }
+      }
+      None => {
+         for (&sync_sample, sample) in unique_samples.iter().zip(sample_data) {
+            decoded_by_sample.insert(sync_sample, encoded_sample_frame(&trak, sample));
+         }
+      }
+   }
+
+   let mut frames = Vec::with_capacity(wanted.len());
+   for (timestamp, sync_sample) in wanted {
+      if let Some(frame) = decoded_by_sample.get(&sync_sample) {
+         let mut frame = frame.clone();
+         frame.timestamp = timestamp;
          frames.push(frame);
       }
    }
@@ -155,6 +226,18 @@ pub async fn read_keyframes(
    }
 
    Ok(frames)
+}
+
+fn encoded_sample_frame(trak: &ParsedTrak<'_>, data: Vec<u8>) -> Frame {
+   Frame {
+      track_id: trak.tkhd.id,
+      width: trak.tkhd.width,
+      height: trak.tkhd.height,
+      timestamp: Duration::ZERO,
+      format: PixelFormat::EncodedVideoSample,
+      data,
+      strides: None,
+   }
 }
 
 fn valid_track_timestamps(
@@ -187,49 +270,7 @@ fn find_video_trak(moov_payload: &[u8], requested_track_id: u32) -> Option<Parse
       })
 }
 
-async fn extract_keyframe_png_with_tables(
-   reader: &dyn StreamReader,
-   track_id: u32,
-   timescale: u32,
-   tables: &VideoSampleTables<'_>,
-   timestamp: Duration,
-) -> Result<Frame> {
-   let avc_config = tables.avc_config.as_ref().ok_or_else(|| {
-      MediaParserError::UnsupportedCodec("missing avcC for H.264 track".to_string())
-   })?;
-
-   let target_tick = duration_to_ticks(timestamp, timescale);
-   let target_selection = select_sample_by_time(tables.stts, target_tick).ok_or_else(|| {
-      MediaParserError::InvalidFormat("could not select video sample".to_string())
-   })?;
-   let sync_sample = nearest_sync_sample(
-      target_selection.sample_index,
-      tables.sync_samples.as_deref(),
-   );
-   let sample = read_sample_data(
-      reader,
-      sync_sample,
-      &tables.sizes,
-      &tables.stsc,
-      &tables.chunk_offsets,
-      MAX_FRAME_BYTES,
-   )
-   .await?;
-   let decoded = decode_samples_to_png(avc_config, &[sample])
-      .map_err(|e| MediaParserError::UnsupportedCodec(format!("OpenH264 decode failed: {}", e)))?;
-
-   Ok(Frame {
-      track_id,
-      width: decoded.width,
-      height: decoded.height,
-      timestamp,
-      format: PixelFormat::Png,
-      data: decoded.data,
-      strides: None,
-   })
-}
-
-async fn extract_video_png_with_tables(
+async fn extract_video_jpeg_with_tables(
    reader: &dyn StreamReader,
    track_id: u32,
    timescale: u32,
@@ -258,7 +299,10 @@ async fn extract_video_png_with_tables(
       MAX_FRAME_BYTES,
    )
    .await?;
-   let decoded = decode_samples_to_png(avc_config, &samples)
+   let avc_config = avc_config.clone();
+   let decoded = tokio::task::spawn_blocking(move || decode_samples_to_jpeg(&avc_config, &samples))
+      .await
+      .map_err(|e| MediaParserError::BlockingTask(format!("decode task failed: {e}")))?
       .map_err(|e| MediaParserError::UnsupportedCodec(format!("OpenH264 decode failed: {}", e)))?;
 
    Ok(Frame {
@@ -266,7 +310,7 @@ async fn extract_video_png_with_tables(
       width: decoded.width,
       height: decoded.height,
       timestamp: ticks_to_duration(target_selection.start_tick, timescale),
-      format: PixelFormat::Png,
+      format: PixelFormat::Jpeg,
       data: decoded.data,
       strides: None,
    })

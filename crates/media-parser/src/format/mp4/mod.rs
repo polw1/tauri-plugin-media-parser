@@ -112,5 +112,5 @@ pub async fn read_cover(reader: &dyn StreamReader) -> Result<Option<CoverArt>> {
 // Re-export for direct access
 pub use metadata::read_metadata;
 pub use subtitles::{read_subtitles, read_subtitles_in_range};
-pub use thumbnails::{read_frame, read_frames, read_keyframes};
+pub use thumbnails::{read_frame, read_frames, read_keyframes, read_keyframes_from_moov};
 pub use tracks::read_tracks;

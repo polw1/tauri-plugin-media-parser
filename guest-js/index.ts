@@ -106,7 +106,8 @@ export interface ThumbnailInfo {
    timestampSec: number;
    format: string;
    mimeType: string;
-   data: number[];
+   /** Image bytes; a view into the binary IPC response buffer (zero-copy). */
+   data: Uint8Array;
 }
 
 /**
@@ -233,13 +234,39 @@ export async function getThumbnails(
    source: string,
    options: ThumbnailsOptions,
 ): Promise<ThumbnailInfo[]> {
-   return await invoke<ThumbnailInfo[]>('plugin:media-parser|get_thumbnails', {
+   const raw = await invoke<ArrayBuffer>('plugin:media-parser|get_thumbnails', {
       source,
       timestamps: options.timestamps,
       trackId: options.trackId,
       accurate: options.accurate,
       headers: options.headers,
    });
+
+   return decodeThumbnailEnvelope(raw);
+}
+
+/**
+ * Decodes the binary thumbnail envelope returned by the Rust side:
+ * `[u32 LE header length][JSON header with per-frame metadata][image bytes]`.
+ */
+function decodeThumbnailEnvelope(raw: ArrayBuffer | Uint8Array): ThumbnailInfo[] {
+   const buf = raw instanceof Uint8Array ? raw : new Uint8Array(raw);
+   const view = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
+   const headerLen = view.getUint32(0, true);
+   const headerBytes = buf.subarray(4, 4 + headerLen);
+   const dataStart = 4 + headerLen;
+
+   interface EnvelopeEntry extends Omit<ThumbnailInfo, 'data'> {
+      offset: number;
+      length: number;
+   }
+
+   const entries: EnvelopeEntry[] = JSON.parse(new TextDecoder().decode(headerBytes));
+
+   return entries.map(({ offset, length, ...info }) => ({
+      ...info,
+      data: buf.subarray(dataStart + offset, dataStart + offset + length),
+   }));
 }
 
 // ============================================================================

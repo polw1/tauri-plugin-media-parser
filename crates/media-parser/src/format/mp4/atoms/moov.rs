@@ -46,16 +46,18 @@ const MOOV_CHILD_FOURCCS: &[&[u8; 4]] = &[
 /// ```
 /// Find the byte position and size of the `moov` box.
 pub async fn find_moov_bounds(reader: &dyn StreamReader) -> Result<(u64, u64)> {
-   let file_size = reader.size().await?;
-
-   // Strategy 1: Head - iterate aligned boxes
-   let head_len = HEAD_SIZE.min(file_size as usize);
-   let mut head_buf = vec![0u8; head_len];
-   let _ = reader.read_at(0, &mut head_buf).await?;
+   // Strategy 1: Head - iterate aligned boxes. Reading before asking for the
+   // size lets HTTP readers learn the total size from this response instead
+   // of issuing a separate HEAD round-trip.
+   let mut head_buf = vec![0u8; HEAD_SIZE];
+   let head_read = reader.read_at(0, &mut head_buf).await?;
+   head_buf.truncate(head_read);
 
    if let Some((pos, size)) = find_moov_aligned(&head_buf, 0) {
       return Ok((pos, size));
    }
+
+   let file_size = reader.size().await?;
 
    // Strategy 2: Tail - pattern search for "moov" fourcc
    let tail_len = TAIL_SIZE.min(file_size as usize);
@@ -73,16 +75,18 @@ pub async fn find_moov_bounds(reader: &dyn StreamReader) -> Result<(u64, u64)> {
 }
 
 pub async fn find_and_read_moov_box(reader: &dyn StreamReader) -> Result<Vec<u8>> {
-   let file_size = reader.size().await?;
-
-   // Strategy 1: Head - iterate aligned boxes
-   let head_len = HEAD_SIZE.min(file_size as usize);
-   let mut head_buf = vec![0u8; head_len];
-   let _ = reader.read_at(0, &mut head_buf).await?;
+   // Strategy 1: Head - iterate aligned boxes. Reading before asking for the
+   // size lets HTTP readers learn the total size from this response instead
+   // of issuing a separate HEAD round-trip.
+   let mut head_buf = vec![0u8; HEAD_SIZE];
+   let head_read = reader.read_at(0, &mut head_buf).await?;
+   head_buf.truncate(head_read);
 
    if let Some((pos, size)) = find_moov_aligned(&head_buf, 0) {
       return read_moov_at(reader, pos, size, &head_buf, 0).await;
    }
+
+   let file_size = reader.size().await?;
 
    // Strategy 2: Tail - pattern search for "moov" fourcc
    let tail_len = TAIL_SIZE.min(file_size as usize);

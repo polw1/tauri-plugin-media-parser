@@ -92,7 +92,8 @@ export interface ThumbnailInfo {
     timestampSec: number;
     format: string;
     mimeType: string;
-    data: number[];
+    /** Image bytes; a view into the binary IPC response buffer (zero-copy). */
+    data: Uint8Array;
 }
 /**
  * Options for extracting a thumbnail strip.

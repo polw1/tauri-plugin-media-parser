@@ -9,6 +9,11 @@ edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
+# Optimize dependencies (H.264 decode, image encoding, TLS) even in dev builds;
+# unoptimized PNG/JPEG encoding makes thumbnail extraction ~7x slower.
+[profile.dev.package."*"]
+opt-level = 2
+
 [lib]
 # The `_lib` suffix may seem redundant but it is necessary
 # to make the lib name unique and wouldn't conflict with the bin name.

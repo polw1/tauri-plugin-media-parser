@@ -1,16 +1,21 @@
-# Tauri HLS Media Player
+# Media Parser Examples App
 
-Desktop & Mobile HLS player with **resolution switching**, **audio track switching**, and **subtitle switching** — built with Tauri + hls.js.
+Desktop & Mobile demo app for `tauri-plugin-media-parser`: extract metadata,
+tracks, subtitles, and thumbnail strips from local or remote MP4 files.
 
 ## Features
 
-- 🎬 **Media playback** from any time range (e.g. 10s to 20s)
-- 📐 **Resolution switching** (240p, 360p, 480p, 720p)
-- 🔊 **Audio language switching** (English, Portuguese, etc.)
-- 📝 **Subtitle switching** with language selection
-- 🌐 **HTTP & local file** support via byte-range HLS
-- ⚡ **No re-encoding** — media is generated instantly
-- 📱 **Android & iOS** support via Tauri Mobile
+   * 🏷️ **Metadata** — title, artist, duration, and other tags
+   * 🎞️ **Tracks** — video/audio/subtitle track listing with codec details
+   * 📝 **Subtitles** — timed cue extraction with track/language selection
+   * 🖼️ **Thumbnails** — trimmer-style JPEG thumbnail strips, extracted in
+     parallel and delivered over binary IPC (`data` is a `Uint8Array`)
+   * 🌐 **HTTP & local file** support via byte-range reads
+   * 📱 **Android & iOS** support via Tauri Mobile
+
+> Dev builds compile dependencies with `opt-level = 2`
+> (see `src-tauri/Cargo.toml`); without it, H.264 decoding and image encoding
+> are roughly 7x slower in `tauri dev`.
 
 ## Desktop
 
@@ -32,7 +37,8 @@ No extra dependencies needed. WebKit and H.264 codecs are built-in.
 
 ### Windows
 
-Install [Visual Studio Build Tools](https://visualstudio.microsoft.com/downloads/) with C++ workload.
+Install [Visual Studio Build Tools](https://visualstudio.microsoft.com/downloads/)
+with C++ workload.
 
 ### Run Desktop
 
@@ -60,7 +66,7 @@ npm run tauri build -- --target x86_64-pc-windows-msvc
 
 ### Android
 
-#### Prerequisites
+#### Prerequisites (Android)
 
 ```bash
 # Java 17 (required by Android SDK)
@@ -76,7 +82,7 @@ export ANDROID_HOME=$HOME/Android/Sdk
 export PATH=$PATH:$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools
 ```
 
-#### Initialize & Run
+#### Initialize & Run (Android)
 
 ```bash
 # Initialize Android project (one-time)
@@ -91,19 +97,21 @@ npm run tauri android build
 
 #### Android Notes
 
-- hls.js uses **MediaSource Extensions (MSE)** which works on Android WebView (Chrome 94+)
-- For older Android versions (< 10), native HLS playback may not work with hls.js
-- The app requests **Internet permission** automatically
+   * All parsing/decoding happens in Rust — no WebView codec support needed
+   * The app requests **Internet permission** automatically (required for
+     HTTP/HTTPS sources)
+   * Local files must be real filesystem paths; `content://` URIs are not
+     supported by the plugin's file reader
 
 ### iOS
 
-#### Prerequisites
+#### Prerequisites (iOS)
 
-- macOS machine (required by Apple)
-- Xcode 14+ with iOS SDK
-- CocoaPods: `sudo gem install cocoapods`
+   * macOS machine (required by Apple)
+   * Xcode 14+ with iOS SDK
+   * CocoaPods: `sudo gem install cocoapods`
 
-#### Initialize & Run
+#### Initialize & Run (iOS)
 
 ```bash
 # Initialize iOS project (one-time, macOS only)
@@ -118,46 +126,47 @@ npm run tauri ios build
 
 #### iOS Notes
 
-- **iOS Safari / WKWebView has native HLS support** — hls.js is optional
-- Both `<video src="master.m3u8">` and hls.js work on iOS
-- iOS handles H.264 decoding natively — no extra codecs needed
+   * All parsing/decoding happens in Rust (bundled OpenH264) — no WebView codec
+     support needed
+   * App Transport Security (ATS) requires HTTPS for remote sources
 
 ---
 
 ## Platform Support Matrix
 
-| Platform | MSE (hls.js) | Native HLS | H.264 Decode | Status |
-|----------|-------------|------------|-------------|--------|
-| Linux | ✅ WebKit2GTK 2.52+ | ❌ | ⚠️ Needs gst-libav | Works with setup |
-| macOS | ✅ WebKit | ✅ | ✅ Built-in | Works out-of-box |
-| Windows | ✅ WebView2 | ❌ | ✅ Built-in | Works out-of-box |
-| Android | ✅ Chrome WebView | ❌ | ✅ Hardware | Works |
-| iOS | ✅ WKWebView | ✅ | ✅ Hardware | Works best |
+| Platform | Plugin (Rust parsing + decode) | Notes |
+|----------|-------------------------------|-------|
+| Linux | ✅ | |
+| macOS | ✅ | |
+| Windows | ✅ | |
+| Android | ✅ | Compiled via NDK; `content://` URIs not supported |
+| iOS | ✅ | Build requires macOS/Xcode |
 
 ---
 
 ## Architecture
 
-```
+```text
 Frontend (HTML/JS)          Backend (Rust)
-├─ hls.js player            ├─ tauri-plugin-media-parser
-├─ Quality selector         │  └─ media-parser (MP4 parsing)
-├─ Audio track selector     └─ media (HLS playlist generation)
-└─ Subtitle selector           └─ Byte-range segment extraction
+├─ Metadata tab             ├─ tauri-plugin-media-parser
+├─ Tracks tab               │  ├─ commands (IPC + session cache)
+├─ Subtitle tab             │  └─ binary thumbnail envelope
+└─ Thumbnails tab           └─ media-parser (MP4 parsing,
+   └─ media-parser.js          H.264 decode, JPEG encode)
+      (envelope decoding)
 ```
 
 ## Tested Sources
 
-Pre-configured with JW.org public video URLs:
-- `502015502_E_cnt_1_r240P.mp4` (English 240p)
-- `502015502_E_cnt_1_r720P.mp4` (English 720p)
-- `502015502_T_cnt_1_r240P.mp4` (Portuguese 240p)
+Pre-configured with JW.org public video URLs (any MP4 with H.264 video works,
+local path or HTTP/HTTPS URL).
 
 ## Troubleshooting
 
 ### Black screen on Linux
 
 Install GStreamer H.264 codecs:
+
 ```bash
 sudo apt install gstreamer1.0-libav   # Ubuntu/Debian
 sudo dnf install gstreamer1-libav      # Fedora
@@ -167,6 +176,7 @@ sudo pacman -S gst-libav               # Arch
 ### Android build fails
 
 Ensure `JAVA_HOME` and `ANDROID_HOME` are set:
+
 ```bash
 echo $JAVA_HOME
 echo $ANDROID_HOME
@@ -175,6 +185,7 @@ echo $ANDROID_HOME
 ### iOS build fails (macOS only)
 
 Ensure Xcode is installed and command line tools are selected:
+
 ```bash
 xcode-select --install
 sudo xcode-select -s /Applications/Xcode.app/Contents/Developer

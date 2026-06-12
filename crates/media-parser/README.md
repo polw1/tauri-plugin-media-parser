@@ -53,7 +53,8 @@ async fn main() -> media_parser::Result<()> {
 
 ### 3) Subtitles
 
-MP4 subtitle extraction reads timed cues from `tx3g` tracks, with best-effort text extraction for `wvtt` and simple text/XML samples.
+MP4 subtitle extraction reads timed cues from `tx3g` tracks, with best-effort
+text extraction for `wvtt` and simple text/XML samples.
 
 ```rust
 use media_parser::{MediaParser, FileStreamReader, TrackFilter};
@@ -72,6 +73,10 @@ async fn main() -> media_parser::Result<()> {
 ```
 
 ### 4) Frames
+
+For H.264/AVC video tracks, decoded frames are returned as JPEG
+(`PixelFormat::Jpeg`, quality 60). When decoding is unavailable, extraction
+falls back to the raw encoded video sample (`PixelFormat::EncodedVideoSample`).
 
 #### Single Frame
 
@@ -143,6 +148,53 @@ async fn main() -> media_parser::Result<()> {
    Ok(())
 }
 ```
+
+### 5) Fast keyframe thumbnails
+
+For timeline/trimmer thumbnail strips, `read_keyframes` decodes only the sync
+(key) sample nearest to each timestamp instead of the whole GOP. Duplicate
+keyframes are decoded once, sample reads run concurrently (parallel HTTP range
+requests for remote files), and H.264 decoding is spread across CPU cores.
+
+```rust
+use media_parser::HttpStreamReader;
+use media_parser::format::mp4::read_keyframes;
+use std::time::Duration;
+
+#[tokio::main]
+async fn main() -> media_parser::Result<()> {
+   let reader = HttpStreamReader::new("https://example.com/video.mp4").await?;
+
+   let timestamps: Vec<Duration> = (0..60).map(|i| Duration::from_secs(i * 5)).collect();
+   let frames = read_keyframes(&reader, 0, &timestamps).await?;
+
+   for frame in &frames {
+      println!("{:?}: {}x{} JPEG, {} bytes", frame.timestamp, frame.width, frame.height, frame.data.len());
+   }
+
+   Ok(())
+}
+```
+
+Callers that extract thumbnails repeatedly from the same source can fetch the
+`moov` box once and reuse it with `read_keyframes_from_moov`, skipping the
+index locate/download round-trips on every call:
+
+```rust
+use media_parser::format::mp4::atoms::find_and_read_moov_box;
+use media_parser::format::mp4::read_keyframes_from_moov;
+
+let moov = find_and_read_moov_box(&reader).await?;
+
+let strip_a = read_keyframes_from_moov(&reader, &moov, 0, &timestamps_a).await?;
+let strip_b = read_keyframes_from_moov(&reader, &moov, 0, &timestamps_b).await?;
+```
+
+### Remote (HTTP) sources
+
+`HttpStreamReader` reads via HTTP range requests. Construction is lazy: no
+request is made until the first read, and the total file size is learned from
+the first response's `Content-Range` header (no upfront `HEAD` round-trip).
 
 ## Development
 

@@ -12,19 +12,62 @@ pub struct AvcConfig {
    pub pps: Vec<Vec<u8>>,
 }
 
-/// Decoded PNG thumbnail.
+/// JPEG quality used for decoded thumbnails.
+const JPEG_QUALITY: u8 = 60;
+
+/// Decoded encoded-image thumbnail (PNG or JPEG bytes).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DecodedPng {
+pub struct DecodedImage {
    pub width: u32,
    pub height: u32,
    pub data: Vec<u8>,
+}
+
+/// Decoded PNG thumbnail.
+pub type DecodedPng = DecodedImage;
+
+struct DecodedRgb {
+   width: u32,
+   height: u32,
+   rgb: Vec<u8>,
 }
 
 /// Decodes MP4 H.264 samples and returns the last decoded picture as PNG.
 pub fn decode_samples_to_png(
    config: &AvcConfig,
    samples: &[Vec<u8>],
-) -> Result<DecodedPng, String> {
+) -> Result<DecodedImage, String> {
+   let decoded = decode_samples_to_rgb(config, samples)?;
+   let data = encode_rgb_png(decoded.width, decoded.height, &decoded.rgb)?;
+
+   Ok(DecodedImage {
+      width: decoded.width,
+      height: decoded.height,
+      data,
+   })
+}
+
+/// Decodes MP4 H.264 samples and returns the last decoded picture as JPEG.
+///
+/// JPEG encoding is significantly faster and produces much smaller payloads
+/// than PNG for photographic video frames, which makes it the preferred
+/// format for thumbnail strips.
+pub fn decode_samples_to_jpeg(
+   config: &AvcConfig,
+   samples: &[Vec<u8>],
+) -> Result<DecodedImage, String> {
+   let decoded = decode_samples_to_rgb(config, samples)?;
+   let data = encode_rgb_jpeg(decoded.width, decoded.height, &decoded.rgb)?;
+
+   Ok(DecodedImage {
+      width: decoded.width,
+      height: decoded.height,
+      data,
+   })
+}
+
+/// Decodes MP4 H.264 samples and returns the last decoded picture as RGB24.
+fn decode_samples_to_rgb(config: &AvcConfig, samples: &[Vec<u8>]) -> Result<DecodedRgb, String> {
    if samples.is_empty() {
       return Err("no H.264 samples to decode".to_string());
    }
@@ -34,34 +77,44 @@ pub fn decode_samples_to_png(
    let mut decoded = None;
 
    if let Some(yuv) = decoder.decode(&headers).map_err(|e| e.to_string())? {
-      decoded = Some(yuv_to_png(&yuv)?);
+      decoded = Some(yuv_to_rgb(&yuv));
    }
 
    for sample in samples {
       let annex_b = sample_to_annex_b(sample, config.length_size)?;
       if let Some(yuv) = decoder.decode(&annex_b).map_err(|e| e.to_string())? {
-         decoded = Some(yuv_to_png(&yuv)?);
+         decoded = Some(yuv_to_rgb(&yuv));
       }
    }
 
    for yuv in decoder.flush_remaining().map_err(|e| e.to_string())? {
-      decoded = Some(yuv_to_png(&yuv)?);
+      decoded = Some(yuv_to_rgb(&yuv));
    }
 
    decoded.ok_or_else(|| "OpenH264 produced no decoded frame".to_string())
 }
 
-fn yuv_to_png(yuv: &DecodedYUV<'_>) -> Result<DecodedPng, String> {
+fn yuv_to_rgb(yuv: &DecodedYUV<'_>) -> DecodedRgb {
    let (width, height) = yuv.dimensions();
    let mut rgb = vec![0; yuv.rgb8_len()];
    yuv.write_rgb8(&mut rgb);
-   let data = encode_rgb_png(width as u32, height as u32, &rgb)?;
 
-   Ok(DecodedPng {
+   DecodedRgb {
       width: width as u32,
       height: height as u32,
-      data,
-   })
+      rgb,
+   }
+}
+
+fn encode_rgb_jpeg(width: u32, height: u32, rgb: &[u8]) -> Result<Vec<u8>, String> {
+   let width = u16::try_from(width).map_err(|_| "frame too wide for JPEG".to_string())?;
+   let height = u16::try_from(height).map_err(|_| "frame too tall for JPEG".to_string())?;
+   let mut jpeg = Vec::new();
+   let encoder = jpeg_encoder::Encoder::new(&mut jpeg, JPEG_QUALITY);
+   encoder
+      .encode(rgb, width, height, jpeg_encoder::ColorType::Rgb)
+      .map_err(|e| e.to_string())?;
+   Ok(jpeg)
 }
 
 fn encode_rgb_png(width: u32, height: u32, rgb: &[u8]) -> Result<Vec<u8>, String> {

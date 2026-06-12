@@ -25,13 +25,29 @@ export async function getSubtitles(source, options) {
 
 
 export async function getThumbnails(source, options) {
-  return await invoke('plugin:media-parser|get_thumbnails', {
+  const raw = await invoke('plugin:media-parser|get_thumbnails', {
     source,
     timestamps: options.timestamps,
     trackId: options?.trackId,
     accurate: options?.accurate,
     headers: options?.headers,
   });
+
+  return decodeThumbnailEnvelope(raw);
+}
+
+// Binary envelope: [u32 LE header length][JSON metadata header][image bytes]
+function decodeThumbnailEnvelope(raw) {
+  const buf = raw instanceof Uint8Array ? raw : new Uint8Array(raw);
+  const view = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
+  const headerLen = view.getUint32(0, true);
+  const dataStart = 4 + headerLen;
+  const entries = JSON.parse(new TextDecoder().decode(buf.subarray(4, dataStart)));
+
+  return entries.map(({ offset, length, ...info }) => ({
+    ...info,
+    data: buf.subarray(dataStart + offset, dataStart + offset + length),
+  }));
 }
 
 export function getDurationInSeconds(metadata) {

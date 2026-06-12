@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tauri::command;
 use url::Url;
@@ -9,6 +10,93 @@ use media_parser::{
 };
 
 use crate::Result;
+
+/// Cached reader + `moov` box for a media source, so repeated thumbnail
+/// requests (e.g. while scrubbing a timeline) skip re-opening the source and
+/// re-downloading the index on every IPC call.
+#[derive(Clone)]
+struct ThumbnailSession {
+   reader: Arc<dyn StreamReader>,
+   moov: Arc<Vec<u8>>,
+}
+
+const MAX_THUMBNAIL_SESSIONS: usize = 8;
+
+static THUMBNAIL_SESSIONS: Mutex<Vec<(String, ThumbnailSession)>> = Mutex::new(Vec::new());
+
+fn session_key(source: &str, headers: &Option<HashMap<String, String>>) -> String {
+   let mut key = String::from(source);
+
+   // Local files can change on disk; include size + mtime so edits invalidate.
+   if let Ok(meta) = std::fs::metadata(source) {
+      key.push_str(&format!("|len:{}", meta.len()));
+      if let Ok(mtime) = meta.modified()
+         && let Ok(elapsed) = mtime.duration_since(std::time::UNIX_EPOCH)
+      {
+         key.push_str(&format!("|mtime:{}", elapsed.as_nanos()));
+      }
+   }
+
+   if let Some(headers) = headers {
+      let mut pairs: Vec<_> = headers.iter().collect();
+      pairs.sort();
+      for (name, value) in pairs {
+         key.push_str(&format!("|{}:{}", name, value));
+      }
+   }
+
+   key
+}
+
+fn cached_session(key: &str) -> Option<ThumbnailSession> {
+   let mut sessions = THUMBNAIL_SESSIONS.lock().ok()?;
+   let index = sessions.iter().position(|(k, _)| k == key)?;
+   let entry = sessions.remove(index);
+   let session = entry.1.clone();
+   sessions.push(entry);
+   Some(session)
+}
+
+fn store_session(key: String, session: ThumbnailSession) {
+   if let Ok(mut sessions) = THUMBNAIL_SESSIONS.lock() {
+      sessions.retain(|(k, _)| k != &key);
+      if sessions.len() >= MAX_THUMBNAIL_SESSIONS {
+         sessions.remove(0);
+      }
+      sessions.push((key, session));
+   }
+}
+
+async fn thumbnail_session(
+   source: &str,
+   headers: &Option<HashMap<String, String>>,
+) -> Result<ThumbnailSession> {
+   let key = session_key(source, headers);
+   if let Some(session) = cached_session(&key) {
+      return Ok(session);
+   }
+
+   let is_http_url = Url::parse(source)
+      .map(|url| matches!(url.scheme(), "http" | "https"))
+      .unwrap_or(false);
+
+   let reader: Arc<dyn StreamReader> = if is_http_url {
+      match headers {
+         Some(h) => Arc::new(HttpStreamReader::with_headers(source, h.clone()).await?),
+         None => Arc::new(HttpStreamReader::new(source).await?),
+      }
+   } else {
+      Arc::new(FileStreamReader::new(source)?)
+   };
+
+   let moov = Arc::new(
+      media_parser::format::mp4::atoms::find_and_read_moov_box(reader.as_ref()).await?,
+   );
+
+   let session = ThumbnailSession { reader, moov };
+   store_session(key, session.clone());
+   Ok(session)
+}
 
 /// Helper macro to handle stream instantiation based on the source (URL or File).
 macro_rules! with_reader {
@@ -115,6 +203,13 @@ pub(crate) async fn get_subtitles(
 }
 
 /// Extract multiple thumbnails/frames from a media file (local path or URL).
+///
+/// Returns a raw binary envelope instead of JSON so image bytes cross the IPC
+/// boundary without number-array serialization:
+///
+/// ```text
+/// [u32 LE: header length][JSON header: per-frame metadata + offsets][image bytes...]
+/// ```
 #[command]
 pub(crate) async fn get_thumbnails(
    source: String,
@@ -122,31 +217,71 @@ pub(crate) async fn get_thumbnails(
    track_id: Option<u32>,
    accurate: Option<bool>,
    headers: Option<HashMap<String, String>>,
-) -> Result<Vec<ThumbnailInfo>> {
+) -> Result<tauri::ipc::Response> {
    let track_id = track_id.unwrap_or(0);
    let timestamps = thumbnail_durations(&timestamps);
    let use_accurate_frames = accurate.unwrap_or(false);
 
-   let frames = with_reader!(source, headers, |reader| {
-      read_thumbnail_frames(&reader, track_id, &timestamps, use_accurate_frames).await
-   })?;
-
-   Ok(frames.into_iter().map(ThumbnailInfo::from).collect())
-}
-
-async fn read_thumbnail_frames(
-   reader: &dyn StreamReader,
-   track_id: u32,
-   timestamps: &[Duration],
-   accurate: bool,
-) -> Result<Vec<Frame>> {
-   let frames = if accurate {
-      media_parser::format::registry::parse_frames(reader, track_id, timestamps).await?
+   let frames = if use_accurate_frames {
+      with_reader!(source, headers, |reader| {
+         media_parser::format::registry::parse_frames(&reader, track_id, &timestamps).await
+      })?
    } else {
-      media_parser::format::mp4::read_keyframes(reader, track_id, timestamps).await?
+      let session = thumbnail_session(&source, &headers).await?;
+      media_parser::format::mp4::read_keyframes_from_moov(
+         session.reader.as_ref(),
+         &session.moov,
+         track_id,
+         &timestamps,
+      )
+      .await?
    };
 
-   Ok(frames)
+   Ok(tauri::ipc::Response::new(encode_thumbnail_envelope(frames)))
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ThumbnailEnvelopeEntry {
+   track_id: u32,
+   width: u32,
+   height: u32,
+   timestamp_sec: f64,
+   format: String,
+   mime_type: String,
+   /// Byte offset of this frame's data, relative to the end of the header.
+   offset: usize,
+   length: usize,
+}
+
+fn encode_thumbnail_envelope(frames: Vec<Frame>) -> Vec<u8> {
+   let mut offset = 0usize;
+   let entries: Vec<ThumbnailEnvelopeEntry> = frames
+      .iter()
+      .map(|frame| {
+         let entry = ThumbnailEnvelopeEntry {
+            track_id: frame.track_id,
+            width: frame.width,
+            height: frame.height,
+            timestamp_sec: frame.timestamp.as_secs_f64(),
+            format: frame.format.label().to_string(),
+            mime_type: frame.format.mime_type().to_string(),
+            offset,
+            length: frame.data.len(),
+         };
+         offset += frame.data.len();
+         entry
+      })
+      .collect();
+
+   let header = serde_json::to_vec(&entries).unwrap_or_else(|_| b"[]".to_vec());
+   let mut envelope = Vec::with_capacity(4 + header.len() + offset);
+   envelope.extend_from_slice(&(header.len() as u32).to_le_bytes());
+   envelope.extend_from_slice(&header);
+   for frame in frames {
+      envelope.extend_from_slice(&frame.data);
+   }
+   envelope
 }
 
 fn thumbnail_durations(timestamps_ms: &[u64]) -> Vec<Duration> {
@@ -303,32 +438,6 @@ impl From<media_parser::SubtitleCue> for SubtitleCueInfo {
          start_sec: cue.start_time.as_secs_f64(),
          end_sec: cue.end_time.as_secs_f64(),
          text: cue.text,
-      }
-   }
-}
-
-#[derive(serde::Serialize, Clone, Debug)]
-#[serde(rename_all = "camelCase")]
-pub struct ThumbnailInfo {
-   pub track_id: u32,
-   pub width: u32,
-   pub height: u32,
-   pub timestamp_sec: f64,
-   pub format: String,
-   pub mime_type: String,
-   pub data: Vec<u8>,
-}
-
-impl From<Frame> for ThumbnailInfo {
-   fn from(frame: Frame) -> Self {
-      Self {
-         track_id: frame.track_id,
-         width: frame.width,
-         height: frame.height,
-         timestamp_sec: frame.timestamp.as_secs_f64(),
-         format: frame.format.label().to_string(),
-         mime_type: frame.format.mime_type().to_string(),
-         data: frame.data,
       }
    }
 }
