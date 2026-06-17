@@ -18,6 +18,13 @@ pub const MAX_SYNC_SEARCH: u64 = 64 * 1024;
 /// (e.g., near EOF or in truncated files).
 const MIN_SEARCH_BEFORE_FALLBACK: u64 = 1024;
 
+/// Cap on next-frame validations that fall outside the current buffer.
+/// In-buffer validations are free; out-of-buffer ones cost a real read (an HTTP
+/// range GET for `HttpStreamReader`), so a crafted stream of header-like bytes
+/// could otherwise fan a single call out into many requests. The common case
+/// (frame smaller than the buffer) never needs these reads.
+const MAX_OUT_OF_BUFFER_VALIDATIONS: usize = 16;
+
 /// Frame sync word (11 bits set).
 const SYNC_MASK: u16 = 0xFFE0;
 const SYNC_WORD: u16 = 0xFFE0;
@@ -239,6 +246,7 @@ pub async fn find_first_frame(
    let mut buffer = vec![0u8; BUFFER_SIZE];
    let mut offset = start_offset;
    let end_offset = start_offset + max_search;
+   let mut external_validations = 0usize;
 
    while offset < end_offset {
       let read_size = ((end_offset - offset) as usize).min(BUFFER_SIZE);
@@ -267,29 +275,48 @@ pub async fn find_first_frame(
          let header_bytes = [buffer[i], buffer[i + 1], buffer[i + 2], buffer[i + 3]];
 
          if let Some(header) = parse_header(header_bytes) {
-            // Validate frame by checking if next frame exists
+            // Validate frame by checking that the next frame parses as a header.
             if let Some(frame_size) = header.size() {
-               let next_offset = offset + i as u64 + frame_size as u64;
-               let mut next_header = [0u8; 2];
+               let frame_offset = offset + i as u64;
+               let next_offset = frame_offset + frame_size as u64;
+               // Position of the next header within the current buffer.
+               let rel = (next_offset - offset) as usize;
 
-               if let Ok(n) = reader.read_at(next_offset, &mut next_header).await
-                  && n >= 2
-                  && next_header[0] == 0xFF
-                  && (next_header[1] & 0xE0) == 0xE0
-               {
-                  // Found valid frame with valid next frame
+               let next_is_valid = if rel + FRAME_HEADER_SIZE <= bytes_read {
+                  // Common case: next frame is already buffered, validate for free.
+                  let next_bytes = [
+                     buffer[rel],
+                     buffer[rel + 1],
+                     buffer[rel + 2],
+                     buffer[rel + 3],
+                  ];
+                  parse_header(next_bytes).is_some()
+               } else if external_validations < MAX_OUT_OF_BUFFER_VALIDATIONS {
+                  // Next frame falls outside the buffer; pay for a bounded read.
+                  external_validations += 1;
+                  let mut next_header = [0u8; FRAME_HEADER_SIZE];
+                  matches!(
+                     reader.read_at(next_offset, &mut next_header).await,
+                     Ok(n) if n >= FRAME_HEADER_SIZE && parse_header(next_header).is_some()
+                  )
+               } else {
+                  false
+               };
+
+               if next_is_valid {
+                  // Found valid frame with valid next frame.
                   return FrameParseResult::Found {
                      header,
-                     offset: offset + i as u64,
+                     offset: frame_offset,
                   };
                }
 
-               // No valid next frame, but this frame looks valid
-               // Accept it if we've searched enough bytes
-               if offset + i as u64 > start_offset + MIN_SEARCH_BEFORE_FALLBACK {
+               // No valid next frame, but this frame looks valid.
+               // Accept it if we've searched enough bytes.
+               if frame_offset > start_offset + MIN_SEARCH_BEFORE_FALLBACK {
                   return FrameParseResult::Found {
                      header,
-                     offset: offset + i as u64,
+                     offset: frame_offset,
                   };
                }
             }

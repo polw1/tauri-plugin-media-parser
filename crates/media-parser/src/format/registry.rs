@@ -47,10 +47,7 @@ pub async fn parse_metadata(reader: &dyn StreamReader) -> Result<Metadata> {
    reader.read_at(0, &mut header).await?;
 
    let format = detect_format(&header).ok_or_else(|| {
-      MediaParserError::InvalidFormat(format!(
-         "Could not detect format from header: {:02X?}",
-         &header[..header.len().min(16)]
-      ))
+      MediaParserError::InvalidFormat("Could not detect format from file header".to_string())
    })?;
 
    // Dispatch to the appropriate parser

@@ -6,8 +6,8 @@ A Tauri plugin to parse media files (MP3, MP4): extract metadata,
 tracks, frames, and subtitles. Async API for getting info from local
 files or HTTP streams.
 
-[ci-badge]: https://github.com/silvermine/tauri-plugin-sqlite/actions/workflows/ci.yml/badge.svg
-[ci-url]: https://github.com/silvermine/tauri-plugin-sqlite/actions/workflows/ci.yml
+[ci-badge]: https://github.com/silvermine/tauri-plugin-media-parser/actions/workflows/ci.yml/badge.svg
+[ci-url]: https://github.com/silvermine/tauri-plugin-media-parser/actions/workflows/ci.yml
 
 ## Project Structure
 
