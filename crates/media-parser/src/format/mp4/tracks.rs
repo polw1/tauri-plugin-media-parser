@@ -55,7 +55,7 @@ pub async fn read_tracks(reader: &dyn StreamReader) -> Result<Vec<TrackType>> {
       // doesn't drop every other track.
       match parse_trak(trak) {
          Ok(track) => tracks.push(track),
-         Err(e) => log::warn!("skipping malformed trak: {e}"),
+         Err(e) => tracing::warn!("skipping malformed trak: {e}"),
       }
    }
 
