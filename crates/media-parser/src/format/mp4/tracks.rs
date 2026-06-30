@@ -196,3 +196,119 @@ fn classify_handler(handler: [u8; 4]) -> TrackKind {
 fn language_string(language: [u8; 3]) -> String {
    String::from_utf8_lossy(&language).into_owned()
 }
+
+#[cfg(test)]
+mod tests {
+   use super::*;
+   use async_trait::async_trait;
+
+   fn mp4_box(fourcc: &[u8; 4], payload: &[u8]) -> Vec<u8> {
+      let mut b = ((8 + payload.len()) as u32).to_be_bytes().to_vec();
+      b.extend_from_slice(fourcc);
+      b.extend_from_slice(payload);
+      b
+   }
+
+   fn tkhd(id: u32) -> Vec<u8> {
+      // version 0; track_id at offset 12, width/height (fixed 16.16) at 76/80.
+      let mut p = vec![0u8; 84];
+      p[12..16].copy_from_slice(&id.to_be_bytes());
+      p
+   }
+
+   fn mdhd() -> Vec<u8> {
+      // version 0; timescale at offset 12, language (0 => None) at offset 20.
+      let mut p = vec![0u8; 24];
+      p[12..16].copy_from_slice(&1000u32.to_be_bytes());
+      p
+   }
+
+   fn hdlr(handler: &[u8; 4]) -> Vec<u8> {
+      // handler_type at offset 8.
+      let mut p = vec![0u8; 12];
+      p[8..12].copy_from_slice(handler);
+      p
+   }
+
+   /// A spec-minimal `trak` payload (tkhd + mdia{mdhd, hdlr}).
+   fn trak_payload(id: u32, handler: &[u8; 4]) -> Vec<u8> {
+      let mdia = [mp4_box(b"mdhd", &mdhd()), mp4_box(b"hdlr", &hdlr(handler))].concat();
+      [mp4_box(b"tkhd", &tkhd(id)), mp4_box(b"mdia", &mdia)].concat()
+   }
+
+   #[test]
+   fn classify_handler_maps_known_and_unknown_types() {
+      assert_eq!(classify_handler(*b"vide"), TrackKind::Video);
+      assert_eq!(classify_handler(*b"soun"), TrackKind::Audio);
+      for h in [b"sbtl", b"subt", b"text", b"clcp"] {
+         assert_eq!(classify_handler(*h), TrackKind::Subtitle);
+      }
+      assert_eq!(classify_handler(*b"meta"), TrackKind::Unknown);
+   }
+
+   #[test]
+   fn parse_trak_dispatches_by_handler() {
+      assert!(matches!(
+         parse_trak(&trak_payload(1, b"vide")).unwrap(),
+         TrackType::Video(_)
+      ));
+      assert!(matches!(
+         parse_trak(&trak_payload(2, b"soun")).unwrap(),
+         TrackType::Audio(_)
+      ));
+      assert!(matches!(
+         parse_trak(&trak_payload(3, b"subt")).unwrap(),
+         TrackType::Subtitle(_)
+      ));
+      let unknown = parse_trak(&trak_payload(4, b"meta")).unwrap();
+      assert!(matches!(&unknown, TrackType::Unknown(_)));
+      if let TrackType::Unknown(meta) = unknown {
+         assert_eq!(meta.base.id, 4);
+      }
+   }
+
+   #[test]
+   fn parse_trak_errors_on_missing_required_boxes() {
+      // Missing tkhd.
+      let mdia = mp4_box(b"mdia", &mp4_box(b"mdhd", &mdhd()));
+      assert!(parse_trak(&mdia).is_err());
+      // Missing mdia.
+      assert!(parse_trak(&mp4_box(b"tkhd", &tkhd(1))).is_err());
+      // mdia present but missing mdhd.
+      let trak = [
+         mp4_box(b"tkhd", &tkhd(1)),
+         mp4_box(b"mdia", &mp4_box(b"hdlr", &hdlr(b"vide"))),
+      ]
+      .concat();
+      assert!(parse_trak(&trak).is_err());
+   }
+
+   struct BytesReader(Vec<u8>);
+
+   #[async_trait]
+   impl StreamReader for BytesReader {
+      async fn read_at(&self, offset: u64, buf: &mut [u8]) -> Result<usize> {
+         let start = (offset as usize).min(self.0.len());
+         let n = buf.len().min(self.0.len() - start);
+         buf[..n].copy_from_slice(&self.0[start..start + n]);
+         Ok(n)
+      }
+
+      async fn size(&self) -> Result<u64> {
+         Ok(self.0.len() as u64)
+      }
+   }
+
+   #[tokio::test]
+   async fn read_tracks_skips_malformed_trak_and_keeps_valid_ones() {
+      let good = mp4_box(b"trak", &trak_payload(1, b"vide"));
+      // Malformed: has tkhd but no mdia, so parse_trak fails.
+      let bad = mp4_box(b"trak", &mp4_box(b"tkhd", &tkhd(2)));
+      let moov = mp4_box(b"moov", &[good, bad].concat());
+
+      let tracks = read_tracks(&BytesReader(moov)).await.unwrap();
+
+      assert_eq!(tracks.len(), 1);
+      assert!(matches!(tracks[0], TrackType::Video(_)));
+   }
+}
