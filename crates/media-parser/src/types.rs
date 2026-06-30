@@ -47,7 +47,7 @@ impl<'a> IntoIterator for &'a Metadata {
 }
 
 /// Base metadata.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct BaseTrackMeta {
    pub id: u32,
    pub codec: String,
@@ -58,7 +58,7 @@ pub struct BaseTrackMeta {
 }
 
 /// Video track metadata.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct VideoTrackMeta {
    pub base: BaseTrackMeta,
    pub width: u32,
@@ -66,7 +66,7 @@ pub struct VideoTrackMeta {
 }
 
 /// Audio track metadata.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct AudioTrackMeta {
    pub base: BaseTrackMeta,
    pub channels: u16,
@@ -74,19 +74,19 @@ pub struct AudioTrackMeta {
 }
 
 /// Subtitle track metadata.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct SubtitleTrackMeta {
    pub base: BaseTrackMeta,
 }
 
 /// Unknown/other track metadata.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct UnknownTrackMeta {
    pub base: BaseTrackMeta,
 }
 
 /// Discriminated union of track kinds.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum TrackType {
    Video(VideoTrackMeta),
    Audio(AudioTrackMeta),
