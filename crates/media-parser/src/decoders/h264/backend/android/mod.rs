@@ -48,3 +48,9 @@ pub(crate) fn validate_job_dimensions(width: u32, height: u32) -> Result<(), sup
 pub(crate) fn validate_sps_dimensions(width: u64, height: u64) -> Result<(), super::DecodeError> {
    validate_dimensions(width, height, DimensionSource::Sps)
 }
+
+#[cfg(target_os = "android")]
+mod codec;
+
+#[cfg(target_os = "android")]
+pub(crate) use codec::AndroidDecoder;

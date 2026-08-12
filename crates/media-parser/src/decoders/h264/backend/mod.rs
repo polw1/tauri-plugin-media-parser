@@ -21,8 +21,11 @@ pub(crate) trait H264Decoder: Sized {
    fn drain(&mut self, sink: &mut FrameSink<'_>) -> Result<(), DecodeError>;
 }
 
-#[cfg(test)]
+#[cfg(any(test, all(target_os = "android", feature = "android-mediacodec")))]
 pub(crate) mod android;
+
+#[cfg(all(target_os = "android", feature = "android-mediacodec"))]
+pub(crate) use android::AndroidDecoder as SelectedDecoder;
 
 #[cfg(test)]
 pub(crate) mod fake;

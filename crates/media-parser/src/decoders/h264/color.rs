@@ -10,9 +10,9 @@ pub(super) enum MatrixCoefficients {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct ParsedSps {
    sps_id: u32,
-   #[cfg(test)]
+   #[cfg(any(test, all(target_os = "android", feature = "android-mediacodec")))]
    coded_width: u64,
-   #[cfg(test)]
+   #[cfg(any(test, all(target_os = "android", feature = "android-mediacodec")))]
    coded_height: u64,
 }
 
@@ -205,18 +205,18 @@ fn parse_sps_prefix(bits: &mut BitReader<'_>) -> Result<ParsedSps, String> {
    bits.read_bit()?; // gaps_in_frame_num_value_allowed_flag
    let pic_width_in_mbs_minus1 = bits.read_ue()?;
    let pic_height_in_map_units_minus1 = bits.read_ue()?;
-   #[cfg(not(test))]
+   #[cfg(not(any(test, all(target_os = "android", feature = "android-mediacodec"))))]
    let _ = (pic_width_in_mbs_minus1, pic_height_in_map_units_minus1);
    let frame_mbs_only = bits.read_bit()?;
    if !frame_mbs_only {
       bits.read_bit()?; // mb_adaptive_frame_field_flag
    }
-   #[cfg(test)]
+   #[cfg(any(test, all(target_os = "android", feature = "android-mediacodec")))]
    let coded_width = u64::from(pic_width_in_mbs_minus1)
       .checked_add(1)
       .and_then(|width| width.checked_mul(16))
       .ok_or_else(|| "H.264 SPS coded width overflow".to_string())?;
-   #[cfg(test)]
+   #[cfg(any(test, all(target_os = "android", feature = "android-mediacodec")))]
    let coded_height = u64::from(pic_height_in_map_units_minus1)
       .checked_add(1)
       .and_then(|height| height.checked_mul(16))
@@ -224,14 +224,14 @@ fn parse_sps_prefix(bits: &mut BitReader<'_>) -> Result<ParsedSps, String> {
       .ok_or_else(|| "H.264 SPS coded height overflow".to_string())?;
    Ok(ParsedSps {
       sps_id,
-      #[cfg(test)]
+      #[cfg(any(test, all(target_os = "android", feature = "android-mediacodec")))]
       coded_width,
-      #[cfg(test)]
+      #[cfg(any(test, all(target_os = "android", feature = "android-mediacodec")))]
       coded_height,
    })
 }
 
-#[cfg(test)]
+#[cfg(any(test, all(target_os = "android", feature = "android-mediacodec")))]
 pub(super) fn sps_coded_dimensions(nal: &[u8]) -> Option<(u64, u64)> {
    let mut bits = bit_reader_from_nal(nal, 7).ok()?;
    let parsed = parse_sps_prefix(&mut bits).ok()?;

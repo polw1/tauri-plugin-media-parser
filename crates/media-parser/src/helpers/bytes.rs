@@ -47,7 +47,7 @@ pub fn read_u64_be(buf: &[u8], offset: usize) -> Option<u64> {
 ///
 /// Returns `None` if `offset + 4 > buf.len()`.
 #[inline]
-#[cfg(test)]
+#[cfg(any(test, all(target_os = "android", feature = "android-mediacodec")))]
 pub fn read_u32_ne(buf: &[u8], offset: usize) -> Option<u32> {
    let end = offset.checked_add(4)?;
    let bytes: [u8; 4] = buf.get(offset..end)?.try_into().ok()?;
@@ -61,7 +61,7 @@ pub fn read_u32_ne(buf: &[u8], offset: usize) -> Option<u32> {
 ///
 /// Returns `None` if `offset + 4 > buf.len()`.
 #[inline]
-#[cfg(test)]
+#[cfg(any(test, all(target_os = "android", feature = "android-mediacodec")))]
 pub fn read_i32_ne(buf: &[u8], offset: usize) -> Option<i32> {
    let end = offset.checked_add(4)?;
    let bytes: [u8; 4] = buf.get(offset..end)?.try_into().ok()?;

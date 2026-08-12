@@ -39,6 +39,7 @@ fn extend_annex_b_total(total: usize, additional: usize) -> Result<usize, Decode
    Ok(total)
 }
 
+#[cfg(any(test, not(all(target_os = "android", feature = "android-mediacodec"))))]
 pub(crate) fn config_with_max_input_size(
    config: &AvcConfig,
    samples: &[Vec<u8>],
@@ -234,12 +235,12 @@ pub(crate) fn parameter_sets_annex_b(config: &AvcConfig) -> Result<Vec<u8>, Deco
 
 // Mirrors the gate on `mod android` in backend/mod.rs. MediaCodec is the only
 // consumer, so its gate mirrors `mod android` in backend/mod.rs.
-#[cfg(test)]
+#[cfg(any(test, all(target_os = "android", feature = "android-mediacodec")))]
 pub(crate) fn nals_annex_b(nals: &[Vec<u8>]) -> Result<Vec<u8>, DecodeError> {
    collect_annex_b(nals.iter().map(Vec::as_slice))
 }
 
-#[cfg(test)]
+#[cfg(any(test, all(target_os = "android", feature = "android-mediacodec")))]
 fn collect_annex_b<'a>(nals: impl IntoIterator<Item = &'a [u8]>) -> Result<Vec<u8>, DecodeError> {
    let mut data = Vec::new();
    for parameter_set in nals {
@@ -263,7 +264,7 @@ pub(crate) fn sample_to_annex_b(
    sample_to_annex_b_into_reserved(sample, length_size, output)
 }
 
-#[cfg(test)]
+#[cfg(any(test, all(target_os = "android", feature = "android-mediacodec")))]
 pub(crate) fn sample_to_annex_b_into_reserved(
    sample: &[u8],
    length_size: usize,
@@ -294,7 +295,7 @@ pub(crate) fn prepend_annex_b(output: &mut Vec<u8>, prefix: &[u8]) -> Result<(),
    Ok(())
 }
 
-#[cfg(test)]
+#[cfg(any(test, all(target_os = "android", feature = "android-mediacodec")))]
 fn append_annex_b_nal(output: &mut Vec<u8>, nal: &[u8]) -> Result<(), DecodeError> {
    let additional = annex_b_nal_len(nal)?;
    extend_annex_b_total(output.len(), additional)?;

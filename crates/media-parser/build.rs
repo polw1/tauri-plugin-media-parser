@@ -7,16 +7,30 @@
 //! - `h264_backend`: thumbnails are enabled and exactly one permitted backend
 //!   is usable, so the thumbnail code paths compile.
 //! - `h264_backend_conflict`: thumbnails are enabled and several backends are
-//!   usable at once.
+//!   usable at once, or a backend was requested on a target that cannot serve
+//!   it.
 //!
 //! The crate turns the remaining two cases — thumbnails without any backend,
 //! and `h264_backend_conflict` — into the same `compile_error!`.
-//!
-//! No backend registers itself yet, so `thumbnails` currently always fails
-//! that check; each platform backend adds its own arm here as it lands.
 
 fn main() {
    println!("cargo::rerun-if-changed=build.rs");
    println!("cargo::rustc-check-cfg=cfg(h264_backend)");
    println!("cargo::rustc-check-cfg=cfg(h264_backend_conflict)");
+
+   let feature = |name: &str| std::env::var_os(name).is_some();
+   let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+   let android = target_os == "android";
+   let thumbnails = feature("CARGO_FEATURE_THUMBNAILS");
+   let mediacodec_feature = feature("CARGO_FEATURE_ANDROID_MEDIACODEC");
+   let mediacodec = android && mediacodec_feature;
+   let invalid_native_backend = mediacodec_feature && !android;
+   let backend_count = usize::from(mediacodec);
+
+   if thumbnails && backend_count == 1 {
+      println!("cargo::rustc-cfg=h264_backend");
+   }
+   if thumbnails && (backend_count > 1 || invalid_native_backend) {
+      println!("cargo::rustc-cfg=h264_backend_conflict");
+   }
 }

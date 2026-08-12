@@ -40,9 +40,9 @@ pub(crate) struct CompactNv12Lengths {
    pub(crate) uv_bytes: usize,
 }
 
-#[cfg(test)]
+#[cfg(any(test, all(target_os = "android", feature = "android-mediacodec")))]
 pub(crate) const MAX_DECODED_NV12_DIMENSION: usize = 16_384;
-#[cfg(test)]
+#[cfg(any(test, all(target_os = "android", feature = "android-mediacodec")))]
 pub(crate) const MAX_DECODED_NV12_BYTES: usize = 64 * 1024 * 1024;
 
 #[cfg(test)]

@@ -43,10 +43,11 @@ mod jpeg;
 #[cfg(feature = "thumbnails")]
 mod pipeline;
 
+#[cfg(not(all(target_os = "android", feature = "android-mediacodec")))]
 use bitstream::config_with_max_input_size;
-#[cfg(test)]
+#[cfg(any(test, all(target_os = "android", feature = "android-mediacodec")))]
 use bitstream::config_with_max_input_size_and_sps;
-#[cfg(test)]
+#[cfg(any(test, all(target_os = "android", feature = "android-mediacodec")))]
 use color::sps_coded_dimensions;
 #[cfg(feature = "thumbnails")]
 pub(crate) use error::DecodeError;
@@ -153,17 +154,20 @@ fn prepare_job_config(
    samples: &[Vec<u8>],
    resolved_full_range: bool,
 ) -> Result<AvcConfig, DecodeError> {
+   #[cfg(all(target_os = "android", feature = "android-mediacodec"))]
+   let mut prepared = prepare_android_job_config(config, samples)?;
+   #[cfg(not(all(target_os = "android", feature = "android-mediacodec")))]
    let mut prepared = config_with_max_input_size(config, samples)?;
    prepared.resolved_full_range = Some(resolved_full_range);
    Ok(prepared)
 }
 
-#[cfg(test)]
+#[cfg(any(test, all(target_os = "android", feature = "android-mediacodec")))]
 fn validate_android_job_dimensions(width: u32, height: u32) -> Result<(), DecodeError> {
    backend::android::validate_job_dimensions(width, height)
 }
 
-#[cfg(test)]
+#[cfg(any(test, all(target_os = "android", feature = "android-mediacodec")))]
 fn prepare_android_job_config(
    config: &AvcConfig,
    samples: &[Vec<u8>],

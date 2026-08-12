@@ -261,6 +261,14 @@ application's `src-tauri/Cargo.toml` for usable development performance:
 opt-level = 2
 ```
 
+On Android, thumbnails use the platform MediaCodec decoder and require its
+output format to expose the standard `image-data` (`MediaImage2`) description.
+The plugin deliberately does not guess a vendor-specific YUV layout when that
+metadata is absent or incompatible: the request fails with an Android
+MediaCodec `image-data` error instead of returning a silently color-shifted
+thumbnail. Devices whose codec omits this metadata therefore cannot generate
+H.264 thumbnails in this release.
+
 The project does not bundle a software H.264 decoder. Linux keeps the
 `get_thumbnails` command available for API compatibility, but currently returns
 `thumbnail extraction is not supported on this platform`. A native Linux
