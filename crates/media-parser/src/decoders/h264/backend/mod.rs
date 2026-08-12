@@ -22,4 +22,7 @@ pub(crate) trait H264Decoder: Sized {
 }
 
 #[cfg(test)]
+pub(crate) mod android;
+
+#[cfg(test)]
 pub(crate) mod fake;
