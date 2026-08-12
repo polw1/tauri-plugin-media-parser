@@ -1,7 +1,7 @@
 //! MP4 sample-table parsing and sample reads.
 
 use super::sample_timing::{CompositionOffset, stts_sample_count};
-use super::{Mp4Nav, iter_boxes};
+use super::{Mp4Nav, iter_boxes, visual_dimensions};
 use crate::decoders::h264::{AvcColorMetadata, AvcConfig};
 use crate::helpers::{read_u16_be, read_u32_be, read_u64_be};
 
@@ -130,6 +130,7 @@ fn parse_colr(payload: &[u8], color: &mut AvcColorMetadata) -> bool {
 }
 
 pub fn parse_avc_config(sample_entry_payload: &[u8]) -> Option<AvcConfig> {
+   let (display_width, display_height) = visual_dimensions(sample_entry_payload);
    let children = sample_entry_payload.get(78..)?;
    let mut avcc = None;
    let mut color = AvcColorMetadata::default();
@@ -176,6 +177,9 @@ pub fn parse_avc_config(sample_entry_payload: &[u8]) -> Option<AvcConfig> {
       sps,
       pps,
       color,
+      display_width: display_width?,
+      display_height: display_height?,
+      max_input_size: None,
    })
 }
 
@@ -598,6 +602,8 @@ mod tests {
    #[test]
    fn parses_nclx_matrix_and_range_with_avc_config() {
       let mut sample_entry = vec![0; 78];
+      sample_entry[24..26].copy_from_slice(&1920u16.to_be_bytes());
+      sample_entry[26..28].copy_from_slice(&1080u16.to_be_bytes());
       append_box(&mut sample_entry, b"avcC", &[1, 66, 0, 30, 0xff, 0xe0, 0]);
       let mut colr = Vec::from(&b"nclx"[..]);
       colr.extend_from_slice(&1u16.to_be_bytes());
@@ -610,6 +616,9 @@ mod tests {
 
       assert_eq!(config.color.matrix_coefficients, Some(1));
       assert_eq!(config.color.full_range, Some(true));
+      assert_eq!(config.display_width, 1920);
+      assert_eq!(config.display_height, 1080);
+      assert_eq!(config.max_input_size, None);
    }
 
    #[test]

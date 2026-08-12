@@ -3,6 +3,42 @@ use super::{AvcConfig, DecodeError};
 
 const MAX_ANNEX_B_SAMPLE_BYTES: usize = 64 * 1024 * 1024;
 
+pub(crate) fn config_with_max_input_size(
+   config: &AvcConfig,
+   samples: &[Vec<u8>],
+) -> Result<AvcConfig, DecodeError> {
+   let max_input_size = samples
+      .iter()
+      .map(|sample| annex_b_sample_len(sample, config.length_size))
+      .try_fold(None, |largest, size| {
+         let size = size?;
+         Ok::<_, DecodeError>(Some(
+            largest.map_or(size, |largest: usize| largest.max(size)),
+         ))
+      })?
+      .ok_or_else(|| DecodeError::Bitstream("no H.264 samples to decode".to_string()))?;
+   let mut prepared = config.clone();
+   prepared.max_input_size = Some(max_input_size);
+   Ok(prepared)
+}
+
+pub(crate) fn annex_b_sample_len(sample: &[u8], length_size: usize) -> Result<usize, DecodeError> {
+   let mut total = 0usize;
+   visit_avc_nals(sample, length_size, |nal| {
+      if nal.is_empty() {
+         return Err("empty H.264 NAL unit".to_string());
+      }
+      total = total
+         .checked_add(4)
+         .and_then(|total| total.checked_add(nal.len()))
+         .filter(|total| *total <= MAX_ANNEX_B_SAMPLE_BYTES)
+         .ok_or_else(|| "H.264 sample exceeds the decode size limit".to_string())?;
+      Ok(())
+   })
+   .map_err(DecodeError::Bitstream)?;
+   Ok(total)
+}
+
 pub(crate) fn parameter_sets_annex_b(config: &AvcConfig) -> Result<Vec<u8>, DecodeError> {
    let mut data = Vec::new();
    for parameter_set in config.sps.iter().chain(&config.pps) {
@@ -73,6 +109,32 @@ mod tests {
    }
 
    #[test]
+   fn computes_the_post_conversion_annex_b_length() {
+      let sample = [2, 0x65, 0x88, 1, 0x41];
+
+      assert_eq!(annex_b_sample_len(&sample, 1), Ok(11));
+   }
+
+   #[test]
+   fn prepares_the_largest_post_conversion_input_size() {
+      let config = AvcConfig {
+         length_size: 1,
+         sps: Vec::new(),
+         pps: Vec::new(),
+         color: AvcColorMetadata::default(),
+         display_width: 2,
+         display_height: 2,
+         max_input_size: None,
+      };
+      let samples = vec![vec![1, 0x41], vec![2, 0x65, 0x88, 1, 0x41]];
+
+      let prepared = config_with_max_input_size(&config, &samples).expect("valid samples");
+
+      assert_eq!(prepared.max_input_size, Some(11));
+      assert_eq!(config.max_input_size, None);
+   }
+
+   #[test]
    fn rejects_empty_nals_as_bitstream_errors() {
       let mut output = Vec::new();
 
@@ -89,6 +151,9 @@ mod tests {
          sps: vec![vec![0x67, 0x42]],
          pps: vec![vec![0x68, 0xce]],
          color: AvcColorMetadata::default(),
+         display_width: 2,
+         display_height: 2,
+         max_input_size: None,
       };
       assert_eq!(
          parameter_sets_annex_b(&config).expect("valid parameter sets"),
@@ -100,6 +165,9 @@ mod tests {
          sps: Vec::new(),
          pps: Vec::new(),
          color: AvcColorMetadata::default(),
+         display_width: 2,
+         display_height: 2,
+         max_input_size: None,
       };
       assert_eq!(parameter_sets_annex_b(&avc3), Ok(Vec::new()));
    }

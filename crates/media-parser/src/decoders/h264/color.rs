@@ -667,6 +667,9 @@ mod tests {
             matrix_coefficients: Some(6),
             full_range: Some(false),
          },
+         display_width: 2,
+         display_height: 2,
+         max_input_size: None,
       };
       let sample = avc_sample(&[baseline_sps(1, 1, true), pps(3, 1), idr_slice(3)]);
 
@@ -686,6 +689,9 @@ mod tests {
             matrix_coefficients: Some(1),
             full_range: Some(false),
          },
+         display_width: 2,
+         display_height: 2,
+         max_input_size: None,
       };
       let sample = avc_sample(&[sps(66, 2, None, true, 0, 0), pps(2, 2), idr_slice(2)]);
 
@@ -702,6 +708,9 @@ mod tests {
          sps: Vec::new(),
          pps: Vec::new(),
          color: AvcColorMetadata::default(),
+         display_width: 2,
+         display_height: 2,
+         max_input_size: None,
       };
       let first = avc_sample(&[baseline_sps(0, 6, false), pps(0, 0), idr_slice(0)]);
       let second = avc_sample(&[baseline_sps(1, 1, false), pps(1, 1), idr_slice(1)]);
@@ -718,6 +727,9 @@ mod tests {
          sps: vec![baseline_sps(9, 9, false), baseline_sps(1, 1, false)],
          pps: vec![pps(1, 1)],
          color: AvcColorMetadata::default(),
+         display_width: 2,
+         display_height: 2,
+         max_input_size: None,
       };
       let sample = avc_sample(&[idr_slice(1)]);
 
@@ -733,6 +745,9 @@ mod tests {
          sps: vec![baseline_sps(9, 9, false)],
          pps: vec![pps(9, 9)],
          color: AvcColorMetadata::default(),
+         display_width: 2,
+         display_height: 2,
+         max_input_size: None,
       };
       let sample = avc_sample(&[idr_slice(9)]);
 
@@ -753,6 +768,9 @@ mod tests {
             matrix_coefficients: Some(1),
             full_range: None,
          },
+         display_width: 2,
+         display_height: 2,
+         max_input_size: None,
       };
       let sample = avc_sample(&[idr_slice(0)]);
 
@@ -768,6 +786,9 @@ mod tests {
          sps: vec![vec![0x67, 0xff]],
          pps: vec![vec![0x68, 0xff]],
          color: AvcColorMetadata::default(),
+         display_width: 2,
+         display_height: 2,
+         max_input_size: None,
       };
       // An unsupported profile, a slice naming an unknown PPS, and a sample
       // with no slice at all must all decode with the default policy.

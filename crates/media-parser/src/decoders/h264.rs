@@ -20,6 +20,9 @@ pub struct AvcConfig {
    pub sps: Vec<Vec<u8>>,
    pub pps: Vec<Vec<u8>>,
    pub color: AvcColorMetadata,
+   pub display_width: u32,
+   pub display_height: u32,
+   pub(crate) max_input_size: Option<usize>,
 }
 
 #[cfg(feature = "thumbnails")]
@@ -37,6 +40,8 @@ mod jpeg;
 
 #[cfg(feature = "thumbnails")]
 use backend::H264Decoder;
+#[cfg(feature = "thumbnails")]
+use bitstream::config_with_max_input_size;
 #[cfg(feature = "thumbnails")]
 use color::{GopColor, resolve_gop_color};
 #[cfg(feature = "thumbnails")]
@@ -216,7 +221,8 @@ pub(crate) fn decode_frames_to_jpeg(
    output_budget: &OutputBudget,
 ) -> Result<Vec<(FrameToken, DecodedImage)>, DecodeError> {
    let color = resolve_gop_color(config, samples);
-   let decoder = backend::SelectedDecoder::open(config)?;
+   let job_config = config_with_max_input_size(config, samples)?;
+   let decoder = backend::SelectedDecoder::open(&job_config)?;
    decode_frames_to_jpeg_with(
       decoder,
       samples,
@@ -457,6 +463,9 @@ mod tests {
          sps: Vec::new(),
          pps: Vec::new(),
          color: AvcColorMetadata::default(),
+         display_width: 2,
+         display_height: 2,
+         max_input_size: None,
       };
 
       assert_eq!(parameter_sets_annex_b(&config), Ok(Vec::new()));
