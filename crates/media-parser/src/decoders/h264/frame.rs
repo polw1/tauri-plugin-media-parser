@@ -7,12 +7,122 @@ pub(crate) struct Plane<'a> {
    pub(crate) pixel_stride: usize,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Crop {
    pub(crate) x: usize,
    pub(crate) y: usize,
    pub(crate) width: usize,
    pub(crate) height: usize,
+}
+
+/// Platform-neutral failures shared by native 4:2:0 surface adapters.
+#[cfg(any(test, windows_media_foundation_backend, apple_videotoolbox_backend))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Geometry420Error {
+   InvalidCodedDimensions,
+   EmptyCrop,
+   ChromaMisalignedCrop,
+   CropOutsideCodedGeometry,
+   SizeOverflow,
+   ResourceLimit,
+}
+
+#[cfg(any(test, apple_videotoolbox_backend))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct CompactNv12Lengths {
+   pub(crate) y_bytes: usize,
+   pub(crate) uv_bytes: usize,
+}
+
+#[cfg(any(
+   test,
+   android_mediacodec_backend,
+   windows_media_foundation_backend,
+   apple_videotoolbox_backend
+))]
+pub(crate) const MAX_DECODED_NV12_DIMENSION: usize = 16_384;
+#[cfg(any(
+   test,
+   android_mediacodec_backend,
+   windows_media_foundation_backend,
+   apple_videotoolbox_backend
+))]
+pub(crate) const MAX_DECODED_NV12_BYTES: usize = 64 * 1024 * 1024;
+
+#[cfg(any(test, windows_media_foundation_backend, apple_videotoolbox_backend))]
+pub(crate) fn validate_420_dimensions(
+   coded_width: usize,
+   coded_height: usize,
+) -> Result<(), Geometry420Error> {
+   if coded_width == 0
+      || coded_height == 0
+      || !coded_width.is_multiple_of(2)
+      || !coded_height.is_multiple_of(2)
+   {
+      Err(Geometry420Error::InvalidCodedDimensions)
+   } else {
+      Ok(())
+   }
+}
+
+#[cfg(any(test, windows_media_foundation_backend, apple_videotoolbox_backend))]
+pub(crate) fn validate_420_crop(
+   coded_width: usize,
+   coded_height: usize,
+   crop: Crop,
+) -> Result<(), Geometry420Error> {
+   validate_420_dimensions(coded_width, coded_height)?;
+   if crop.width == 0 || crop.height == 0 {
+      return Err(Geometry420Error::EmptyCrop);
+   }
+   if !crop.x.is_multiple_of(2) || !crop.y.is_multiple_of(2) {
+      return Err(Geometry420Error::ChromaMisalignedCrop);
+   }
+   if crop
+      .x
+      .checked_add(crop.width)
+      .is_none_or(|right| right > coded_width)
+      || crop
+         .y
+         .checked_add(crop.height)
+         .is_none_or(|bottom| bottom > coded_height)
+   {
+      return Err(Geometry420Error::CropOutsideCodedGeometry);
+   }
+   Ok(())
+}
+
+#[cfg(any(test, apple_videotoolbox_backend))]
+fn checked_compact_nv12_lengths(
+   coded_width: usize,
+   coded_height: usize,
+) -> Result<(CompactNv12Lengths, usize), Geometry420Error> {
+   let y_bytes = coded_width
+      .checked_mul(coded_height)
+      .ok_or(Geometry420Error::SizeOverflow)?;
+   let uv_bytes = coded_width
+      .checked_mul(coded_height / 2)
+      .ok_or(Geometry420Error::SizeOverflow)?;
+   let total_bytes = y_bytes
+      .checked_add(uv_bytes)
+      .ok_or(Geometry420Error::SizeOverflow)?;
+   Ok((CompactNv12Lengths { y_bytes, uv_bytes }, total_bytes))
+}
+
+#[cfg(any(test, apple_videotoolbox_backend))]
+pub(crate) fn compact_nv12_lengths(
+   coded_width: usize,
+   coded_height: usize,
+) -> Result<CompactNv12Lengths, Geometry420Error> {
+   validate_420_dimensions(coded_width, coded_height)?;
+   if coded_width > MAX_DECODED_NV12_DIMENSION || coded_height > MAX_DECODED_NV12_DIMENSION {
+      return Err(Geometry420Error::ResourceLimit);
+   }
+   let (lengths, total_bytes) = checked_compact_nv12_lengths(coded_width, coded_height)?;
+   if total_bytes > MAX_DECODED_NV12_BYTES {
+      return Err(Geometry420Error::ResourceLimit);
+   }
+   Ok(lengths)
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -424,5 +534,83 @@ mod tests {
          },
       };
       assert!(validate_visible(&overflowing, &[0; 12]).is_err());
+   }
+
+   #[test]
+   fn shared_420_geometry_accepts_a_visible_crop_and_rejects_invalid_geometry() {
+      let crop = Crop {
+         x: 2,
+         y: 4,
+         width: 10,
+         height: 6,
+      };
+      assert_eq!(validate_420_crop(16, 12, crop), Ok(()));
+
+      assert_eq!(
+         validate_420_crop(15, 12, crop),
+         Err(Geometry420Error::InvalidCodedDimensions)
+      );
+      assert_eq!(
+         validate_420_crop(16, 12, Crop { x: 3, ..crop }),
+         Err(Geometry420Error::ChromaMisalignedCrop)
+      );
+      assert_eq!(
+         validate_420_crop(
+            16,
+            12,
+            Crop {
+               x: 8,
+               width: 10,
+               ..crop
+            }
+         ),
+         Err(Geometry420Error::CropOutsideCodedGeometry)
+      );
+      assert_eq!(
+         validate_420_crop(16, 12, Crop { width: 0, ..crop }),
+         Err(Geometry420Error::EmptyCrop)
+      );
+   }
+
+   #[test]
+   fn compact_nv12_lengths_are_checked() {
+      assert_eq!(
+         compact_nv12_lengths(16, 12),
+         Ok(CompactNv12Lengths {
+            y_bytes: 192,
+            uv_bytes: 96,
+         })
+      );
+      assert_eq!(
+         compact_nv12_lengths(15, 12),
+         Err(Geometry420Error::InvalidCodedDimensions)
+      );
+      assert_eq!(
+         compact_nv12_lengths(usize::MAX - 1, usize::MAX - 1),
+         Err(Geometry420Error::ResourceLimit)
+      );
+      assert_eq!(
+         checked_compact_nv12_lengths(usize::MAX - 1, usize::MAX - 1),
+         Err(Geometry420Error::SizeOverflow)
+      );
+   }
+
+   #[test]
+   fn compact_nv12_lengths_enforce_native_surface_limits() {
+      assert_eq!(
+         compact_nv12_lengths(7680, 4320),
+         Ok(CompactNv12Lengths {
+            y_bytes: 33_177_600,
+            uv_bytes: 16_588_800,
+         })
+      );
+      assert_eq!(
+         compact_nv12_lengths(16_386, 2),
+         Err(Geometry420Error::ResourceLimit)
+      );
+      assert_eq!(
+         compact_nv12_lengths(16_384, 2_732),
+         Err(Geometry420Error::ResourceLimit)
+      );
    }
 }
