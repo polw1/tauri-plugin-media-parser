@@ -112,6 +112,8 @@ export async function getCover(
  * `new Uint8Array(thumbnail.data)` when a small image must be retained alone.
  * Parsed thumbnail sessions are cached with an eight-entry LRU: remote
  * sessions expire after five minutes and local sessions after one minute.
+ * Linux currently preserves this API but rejects the request until a native
+ * H.264 backend is available.
  *
  * @param source - Absolute path to a local file or URL of a remote media file
  * @param options - Timestamps, optional track, accuracy, JPEG bounds/quality, and URL headers
@@ -119,6 +121,7 @@ export async function getCover(
  * @throws TypeError if `timestamps` has more than 4,096 entries, is not an
  *    array of non-negative safe integers, if `quality` is outside 1-100, or
  *    if a thumbnail dimension is outside 1-65535
+ * @throws Error on Linux because thumbnail extraction is not yet supported
  */
 export async function getThumbnails(
    source: string,

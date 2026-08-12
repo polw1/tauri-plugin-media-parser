@@ -1792,6 +1792,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "jpeg-decoder"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "00810f1d8b74be64b13dbf3db89ac67740615d6c891f0e7b6179326533011a07"
+
+[[package]]
 name = "jpeg-encoder"
 version = "0.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1956,8 +1962,8 @@ dependencies = [
  "async-trait",
  "bytes",
  "futures",
+ "jpeg-decoder",
  "jpeg-encoder",
- "openh264",
  "reqwest",
  "serde",
  "tempfile",
@@ -2028,15 +2034,6 @@ dependencies = [
  "serde",
  "thiserror 2.0.19",
  "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "nasm-rs"
-version = "0.3.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "706bf8a5e8c8ddb99128c3291d31bd21f4bcde17f0f4c20ec678d85c74faa149"
-dependencies = [
- "log",
 ]
 
 [[package]]
@@ -2316,27 +2313,6 @@ name = "once_cell"
 version = "1.21.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
-
-[[package]]
-name = "openh264"
-version = "0.9.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e6b2b561d2103303e233779545da757ecd35bad82188d619a6d8901f3007e1ff"
-dependencies = [
- "openh264-sys2",
- "wide",
-]
-
-[[package]]
-name = "openh264-sys2"
-version = "0.9.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "75a8867e48183bbd9147380227448c065fe456eb30b0ebc68929809c36c30985"
-dependencies = [
- "cc",
- "nasm-rs",
- "walkdir",
-]
 
 [[package]]
 name = "openssl-probe"
@@ -2944,15 +2920,6 @@ name = "rustversion"
 version = "1.0.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
-
-[[package]]
-name = "safe_arch"
-version = "1.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3a52ec151f024d703f9fd65abb7cbe81e7cdb39f18917a3a37e3014470dc7c59"
-dependencies = [
- "bytemuck",
-]
 
 [[package]]
 name = "same-file"
@@ -4551,16 +4518,6 @@ dependencies = [
  "thiserror 2.0.19",
  "windows",
  "windows-core 0.61.2",
-]
-
-[[package]]
-name = "wide"
-version = "1.6.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "be99e8317aa9f08e7d16e13033ca43faab59ab582b1d0feab7b385424c42f8b1"
-dependencies = [
- "bytemuck",
- "safe_arch",
 ]
 
 [[package]]

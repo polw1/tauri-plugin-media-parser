@@ -10,6 +10,15 @@ pub(super) enum MatrixCoefficients {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct ParsedSps {
    sps_id: u32,
+   #[cfg(test)]
+   coded_width: u64,
+   #[cfg(test)]
+   coded_height: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ParsedSpsColor {
+   sps: ParsedSps,
    color: AvcColorMetadata,
 }
 
@@ -21,7 +30,7 @@ pub(crate) struct GopColor {
 
 impl GopColor {
    /// The policy applied whenever the stream carries no usable colour
-   /// metadata. BT.601 limited is what OpenH264 0.9.7 has always produced, so
+   /// metadata. BT.601 limited preserves the historical software baseline, so
    /// unannotated streams keep their existing output byte for byte.
    pub(super) const DEFAULT: Self = Self {
       matrix: MatrixCoefficients::Bt601,
@@ -138,8 +147,7 @@ fn bit_reader_from_nal(nal: &[u8], expected_type: u8) -> Result<BitReader<'_>, S
    Ok(BitReader::new(ebsp))
 }
 
-fn parse_sps_color(nal: &[u8]) -> Result<ParsedSps, String> {
-   let mut bits = bit_reader_from_nal(nal, 7)?;
+fn parse_sps_prefix(bits: &mut BitReader<'_>) -> Result<ParsedSps, String> {
    let profile_idc = bits.read_bits(8)?;
    bits.read_bits(8)?; // constraint flags and reserved bits
    bits.read_bits(8)?; // level_idc
@@ -165,7 +173,7 @@ fn parse_sps_color(nal: &[u8]) -> Result<ParsedSps, String> {
          let scaling_list_count = if chroma_format_idc == 3 { 12 } else { 8 };
          for list in 0..scaling_list_count {
             if bits.read_bit()? {
-               skip_scaling_list(&mut bits, if list < 6 { 16 } else { 64 })?;
+               skip_scaling_list(bits, if list < 6 { 16 } else { 64 })?;
             }
          }
       }
@@ -195,12 +203,44 @@ fn parse_sps_color(nal: &[u8]) -> Result<ParsedSps, String> {
    }
    bits.read_ue()?; // max_num_ref_frames
    bits.read_bit()?; // gaps_in_frame_num_value_allowed_flag
-   bits.read_ue()?; // pic_width_in_mbs_minus1
-   bits.read_ue()?; // pic_height_in_map_units_minus1
+   let pic_width_in_mbs_minus1 = bits.read_ue()?;
+   let pic_height_in_map_units_minus1 = bits.read_ue()?;
+   #[cfg(not(test))]
+   let _ = (pic_width_in_mbs_minus1, pic_height_in_map_units_minus1);
    let frame_mbs_only = bits.read_bit()?;
    if !frame_mbs_only {
       bits.read_bit()?; // mb_adaptive_frame_field_flag
    }
+   #[cfg(test)]
+   let coded_width = u64::from(pic_width_in_mbs_minus1)
+      .checked_add(1)
+      .and_then(|width| width.checked_mul(16))
+      .ok_or_else(|| "H.264 SPS coded width overflow".to_string())?;
+   #[cfg(test)]
+   let coded_height = u64::from(pic_height_in_map_units_minus1)
+      .checked_add(1)
+      .and_then(|height| height.checked_mul(16))
+      .and_then(|height| height.checked_mul(2 - u64::from(frame_mbs_only)))
+      .ok_or_else(|| "H.264 SPS coded height overflow".to_string())?;
+   Ok(ParsedSps {
+      sps_id,
+      #[cfg(test)]
+      coded_width,
+      #[cfg(test)]
+      coded_height,
+   })
+}
+
+#[cfg(test)]
+pub(super) fn sps_coded_dimensions(nal: &[u8]) -> Option<(u64, u64)> {
+   let mut bits = bit_reader_from_nal(nal, 7).ok()?;
+   let parsed = parse_sps_prefix(&mut bits).ok()?;
+   Some((parsed.coded_width, parsed.coded_height))
+}
+
+fn parse_sps_color(nal: &[u8]) -> Result<ParsedSpsColor, String> {
+   let mut bits = bit_reader_from_nal(nal, 7)?;
+   let sps = parse_sps_prefix(&mut bits)?;
    bits.read_bit()?; // direct_8x8_inference_flag
    if bits.read_bit()? {
       for _ in 0..4 {
@@ -208,8 +248,8 @@ fn parse_sps_color(nal: &[u8]) -> Result<ParsedSps, String> {
       }
    }
    if !bits.read_bit()? {
-      return Ok(ParsedSps {
-         sps_id,
+      return Ok(ParsedSpsColor {
+         sps,
          color: AvcColorMetadata::default(),
       });
    }
@@ -236,7 +276,7 @@ fn parse_sps_color(nal: &[u8]) -> Result<ParsedSps, String> {
          };
       }
    }
-   Ok(ParsedSps { sps_id, color })
+   Ok(ParsedSpsColor { sps, color })
 }
 
 fn parse_pps_ids(nal: &[u8]) -> Result<(u32, u32), String> {
@@ -262,10 +302,10 @@ fn parse_vcl_pps_id(nal: &[u8]) -> Result<u32, String> {
    bits.read_ue()
 }
 
-pub(super) fn visit_avc_nals(
-   sample: &[u8],
+pub(super) fn visit_avc_nals<'a>(
+   sample: &'a [u8],
    length_size: usize,
-   mut visit: impl FnMut(&[u8]) -> Result<(), String>,
+   mut visit: impl FnMut(&'a [u8]) -> Result<(), String>,
 ) -> Result<(), String> {
    if !(1..=4).contains(&length_size) {
       return Err(format!("invalid H.264 NAL length size: {length_size}"));
@@ -352,7 +392,7 @@ pub(super) fn resolve_gop_color(config: &AvcConfig, samples: &[Vec<u8>]) -> GopC
    let mut pps_to_sps = HashMap::new();
    for nal in &config.sps {
       if let Ok(parsed) = parse_sps_color(nal) {
-         sps_by_id.insert(parsed.sps_id, parsed.color);
+         sps_by_id.insert(parsed.sps.sps_id, parsed.color);
       }
    }
    for nal in &config.pps {
@@ -369,7 +409,7 @@ pub(super) fn resolve_gop_color(config: &AvcConfig, samples: &[Vec<u8>]) -> GopC
          match nal[0] & 0x1f {
             7 => {
                if let Ok(parsed) = parse_sps_color(nal) {
-                  sps_by_id.insert(parsed.sps_id, parsed.color);
+                  sps_by_id.insert(parsed.sps.sps_id, parsed.color);
                }
             }
             8 => {
@@ -560,11 +600,92 @@ mod tests {
       sample
    }
 
+   fn geometry_sps(
+      profile_idc: u8,
+      width_in_mbs_minus1: u32,
+      height_in_map_units_minus1: u32,
+      frame_mbs_only: bool,
+      truncate_in_vui: bool,
+   ) -> Vec<u8> {
+      let mut bits = BitWriter::new();
+      bits.bits(u32::from(profile_idc), 8);
+      bits.bits(0, 8);
+      bits.bits(30, 8);
+      bits.ue(0);
+      if profile_idc == 100 {
+         bits.ue(1);
+         bits.ue(0);
+         bits.ue(0);
+         bits.bit(false);
+         bits.bit(false);
+      }
+      bits.ue(0);
+      bits.ue(0);
+      bits.ue(0);
+      bits.ue(1);
+      bits.bit(false);
+      bits.ue(width_in_mbs_minus1);
+      bits.ue(height_in_map_units_minus1);
+      bits.bit(frame_mbs_only);
+      if !frame_mbs_only {
+         bits.bit(false);
+      }
+      if truncate_in_vui {
+         bits.bit(true);
+         bits.bit(false);
+         bits.bit(true);
+      }
+      let mut nal = vec![0x67];
+      nal.extend(bits.finish());
+      nal
+   }
+
+   #[test]
+   fn exposes_progressive_sps_coded_dimensions() {
+      assert_eq!(
+         sps_coded_dimensions(&geometry_sps(66, 1, 2, true, false)),
+         Some((32, 48))
+      );
+   }
+
+   #[test]
+   fn doubles_interlaced_sps_coded_height() {
+      assert_eq!(
+         sps_coded_dimensions(&geometry_sps(66, 1, 2, false, false)),
+         Some((32, 96))
+      );
+   }
+
+   #[test]
+   fn preserves_large_parseable_sps_dimensions_in_u64() {
+      assert_eq!(
+         sps_coded_dimensions(&geometry_sps(66, u32::MAX - 1, 0, true, false)),
+         Some((u64::from(u32::MAX) * 16, 16))
+      );
+   }
+
+   #[test]
+   fn unsupported_or_truncated_sps_geometry_falls_back_to_none() {
+      assert_eq!(
+         sps_coded_dimensions(&geometry_sps(144, 1, 1, true, false)),
+         None
+      );
+      assert_eq!(sps_coded_dimensions(&[0x67, 66]), None);
+   }
+
+   #[test]
+   fn malformed_vui_does_not_erase_parsed_sps_geometry() {
+      let nal = geometry_sps(66, 1, 2, true, true);
+
+      assert!(parse_sps_color(&nal).is_err());
+      assert_eq!(sps_coded_dimensions(&nal), Some((32, 48)));
+   }
+
    #[test]
    fn parses_matrix_and_range_from_sps_vui() {
       let parsed = parse_sps_color(&baseline_sps(3, 1, true)).expect("valid SPS parses");
 
-      assert_eq!(parsed.sps_id, 3);
+      assert_eq!(parsed.sps.sps_id, 3);
       assert_eq!(parsed.color.matrix_coefficients, Some(1));
       assert_eq!(parsed.color.full_range, Some(true));
    }
@@ -615,7 +736,7 @@ mod tests {
       let parsed = parse_sps_color(&sps(100, 8, Some(1), false, 0, 2))
          .expect("custom scaling list is skipped");
 
-      assert_eq!(parsed.sps_id, 8);
+      assert_eq!(parsed.sps.sps_id, 8);
       assert_eq!(parsed.color.matrix_coefficients, Some(1));
    }
 
@@ -624,7 +745,7 @@ mod tests {
       let parsed =
          parse_sps_color(&sps(100, 7, Some(6), false, 0, 0)).expect("valid high SPS parses");
 
-      assert_eq!(parsed.sps_id, 7);
+      assert_eq!(parsed.sps.sps_id, 7);
       assert_eq!(parsed.color.matrix_coefficients, Some(6));
       assert_eq!(parsed.color.full_range, Some(false));
    }
@@ -634,7 +755,7 @@ mod tests {
       let parsed = parse_sps_color(&sps(100, 4, Some(1), true, 0, 1))
          .expect("high SPS with default scaling lists parses");
 
-      assert_eq!(parsed.sps_id, 4);
+      assert_eq!(parsed.sps.sps_id, 4);
       assert_eq!(parsed.color.matrix_coefficients, Some(1));
       assert_eq!(parsed.color.full_range, Some(true));
    }
@@ -644,7 +765,7 @@ mod tests {
       let parsed = parse_sps_color(&sps(66, 5, Some(1), false, 2, 0))
          .expect("POC type 2 does not add SPS fields");
 
-      assert_eq!(parsed.sps_id, 5);
+      assert_eq!(parsed.sps.sps_id, 5);
       assert_eq!(parsed.color.matrix_coefficients, Some(1));
    }
 
@@ -653,7 +774,7 @@ mod tests {
       let parsed =
          parse_sps_color(&sps(66, 6, Some(6), false, 1, 0)).expect("POC type 1 fields are skipped");
 
-      assert_eq!(parsed.sps_id, 6);
+      assert_eq!(parsed.sps.sps_id, 6);
       assert_eq!(parsed.color.matrix_coefficients, Some(6));
    }
 
@@ -670,6 +791,7 @@ mod tests {
          display_width: 2,
          display_height: 2,
          max_input_size: None,
+         resolved_full_range: None,
       };
       let sample = avc_sample(&[baseline_sps(1, 1, true), pps(3, 1), idr_slice(3)]);
 
@@ -692,6 +814,7 @@ mod tests {
          display_width: 2,
          display_height: 2,
          max_input_size: None,
+         resolved_full_range: None,
       };
       let sample = avc_sample(&[sps(66, 2, None, true, 0, 0), pps(2, 2), idr_slice(2)]);
 
@@ -711,6 +834,7 @@ mod tests {
          display_width: 2,
          display_height: 2,
          max_input_size: None,
+         resolved_full_range: None,
       };
       let first = avc_sample(&[baseline_sps(0, 6, false), pps(0, 0), idr_slice(0)]);
       let second = avc_sample(&[baseline_sps(1, 1, false), pps(1, 1), idr_slice(1)]);
@@ -730,6 +854,7 @@ mod tests {
          display_width: 2,
          display_height: 2,
          max_input_size: None,
+         resolved_full_range: None,
       };
       let sample = avc_sample(&[idr_slice(1)]);
 
@@ -748,6 +873,7 @@ mod tests {
          display_width: 2,
          display_height: 2,
          max_input_size: None,
+         resolved_full_range: None,
       };
       let sample = avc_sample(&[idr_slice(9)]);
 
@@ -771,6 +897,7 @@ mod tests {
          display_width: 2,
          display_height: 2,
          max_input_size: None,
+         resolved_full_range: None,
       };
       let sample = avc_sample(&[idr_slice(0)]);
 
@@ -789,6 +916,7 @@ mod tests {
          display_width: 2,
          display_height: 2,
          max_input_size: None,
+         resolved_full_range: None,
       };
       // An unsupported profile, a slice naming an unknown PPS, and a sample
       // with no slice at all must all decode with the default policy.

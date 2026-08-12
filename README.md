@@ -261,6 +261,11 @@ application's `src-tauri/Cargo.toml` for usable development performance:
 opt-level = 2
 ```
 
+The project does not bundle a software H.264 decoder. Linux keeps the
+`get_thumbnails` command available for API compatibility, but currently returns
+`thumbnail extraction is not supported on this platform`. A native Linux
+backend will be added separately.
+
 ## Development Standards
 
 This project follows the

@@ -35,9 +35,9 @@
 pub mod atoms;
 pub mod metadata;
 pub mod subtitles;
-#[cfg(all(feature = "thumbnails", feature = "software-h264"))]
+#[cfg(h264_backend)]
 mod thumbnail_io;
-#[cfg(all(feature = "thumbnails", feature = "software-h264"))]
+#[cfg(h264_backend)]
 pub mod thumbnails;
 pub mod tracks;
 
@@ -87,11 +87,25 @@ pub async fn read_cover(reader: &dyn StreamReader) -> Result<Option<CoverArt>> {
    Ok(atoms::parse_cover_art(moov_payload))
 }
 
+/// Reads MP4 tracks and, when supported, builds a thumbnail index from the
+/// same `moov` bytes. Track discovery still succeeds for audio-only,
+/// non-H.264, or otherwise non-thumbnailable MP4 files.
+#[cfg(h264_backend)]
+pub async fn read_tracks_and_thumbnail_index(
+   reader: &dyn StreamReader,
+   track_id: u32,
+) -> Result<(Vec<TrackType>, Option<ThumbnailIndex>)> {
+   let moov = atoms::find_and_read_moov_box(reader).await?;
+   let tracks = tracks::parse_tracks_from_moov(&moov)?;
+   let index = ThumbnailIndex::from_moov(&moov, track_id).ok();
+   Ok((tracks, index))
+}
+
 // Re-export for direct access
-#[cfg(all(feature = "thumbnails", feature = "software-h264"))]
+#[cfg(h264_backend)]
 pub use crate::decoders::h264::ThumbnailSize;
 pub use metadata::read_metadata;
-#[cfg(all(feature = "thumbnails", feature = "software-h264"))]
+#[cfg(h264_backend)]
 pub use thumbnails::{
    MAX_THUMBNAIL_OUTPUTS, ThumbnailIndex, ThumbnailOptions, read_frame, read_frames, read_keyframes,
 };

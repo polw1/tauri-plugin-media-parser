@@ -1,9 +1,8 @@
 //! Adversarial decoder used by orchestration unit tests.
 
-use super::{BackendCaps, FrameSink, H264Decoder};
+use super::{FrameSink, H264Decoder};
 use crate::decoders::h264::frame::{Crop, PlanarYuv, Plane};
 use crate::decoders::h264::{AvcConfig, DecodeError, FrameToken};
-use std::num::NonZeroUsize;
 
 pub(crate) struct FakeDecoder {
    emissions: Vec<FrameToken>,
@@ -27,12 +26,6 @@ impl FakeDecoder {
 }
 
 impl H264Decoder for FakeDecoder {
-   fn caps() -> BackendCaps {
-      BackendCaps {
-         recommended_concurrency: NonZeroUsize::new(4).expect("four is non-zero"),
-      }
-   }
-
    fn open(_config: &AvcConfig) -> Result<Self, DecodeError> {
       Err(DecodeError::Backend(
          "tests construct FakeDecoder with explicit behavior".to_string(),

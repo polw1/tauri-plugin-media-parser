@@ -10,13 +10,12 @@
 //! - [`image`] - Image format detection from magic bytes
 //! - [`text`] - Text encoding/decoding (UTF-8, UTF-16, Latin-1)
 
-mod bytes;
-mod ffi;
+pub(crate) mod bytes;
+pub(crate) mod ffi;
 mod image;
 mod text;
 
-pub use bytes::{read_i32_ne, read_u16_be, read_u16_le, read_u32_be, read_u32_ne, read_u64_be};
-pub use ffi::valid_ffi_region;
+pub use bytes::{read_u16_be, read_u16_le, read_u32_be, read_u64_be};
 pub use image::detect_image_format;
 pub use text::{
    TextEncoding, decode_latin1, decode_text, decode_utf8, decode_utf16_be, decode_utf16_le,

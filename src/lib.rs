@@ -49,6 +49,7 @@ use tauri::{Manager, Runtime, plugin::TauriPlugin};
 mod commands;
 mod envelope;
 mod error;
+#[cfg(native_h264_backend)]
 mod session_cache;
 
 pub use error::{Error, Result};
@@ -71,7 +72,10 @@ pub use error::{Error, Result};
 pub fn init<R: Runtime>() -> TauriPlugin<R> {
    tauri::plugin::Builder::new("media-parser")
       .setup(|app, _api| {
+         #[cfg(native_h264_backend)]
          app.manage(commands::ThumbnailSessions::default());
+         #[cfg(not(native_h264_backend))]
+         app.manage(commands::ThumbnailSessions);
          Ok(())
       })
       .invoke_handler(tauri::generate_handler![

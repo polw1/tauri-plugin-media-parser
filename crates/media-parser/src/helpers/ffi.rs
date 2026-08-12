@@ -11,6 +11,7 @@
 /// This is necessary but not sufficient: the caller still has to know the
 /// memory is really there and stays alive for the borrow.
 #[inline]
+#[cfg(test)]
 pub fn valid_ffi_region(data: *const u8, size: usize) -> bool {
    !data.is_null() && size <= isize::MAX as usize && data.addr().checked_add(size).is_some()
 }

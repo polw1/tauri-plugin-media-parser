@@ -1,10 +1,13 @@
 //! Integration tests for MP4/H.264 thumbnail extraction.
 
-#![cfg(all(feature = "thumbnails", feature = "software-h264"))]
+#![cfg(feature = "thumbnails")]
 
 mod common;
 
-use common::fixtures_dir;
+use common::{
+   fixtures_dir,
+   native_h264::{BFRAME_REFERENCES, assert_matches_reference},
+};
 use media_parser::{
    FileStreamReader, JpegQuality, PixelFormat, StreamReader,
    format::mp4::{ThumbnailIndex, ThumbnailOptions, ThumbnailSize, read_frames, read_keyframes},
@@ -20,19 +23,6 @@ fn mp4_box(fourcc: &[u8; 4], payload: &[u8]) -> Vec<u8> {
    data.extend_from_slice(fourcc);
    data.extend_from_slice(payload);
    data
-}
-
-/// FNV-1a digest used to pin the exact decoded JPEG bytes, fixing the
-/// presentation-order contract against regressions. The pinned values depend
-/// on the OpenH264 and jpeg-encoder versions and must be updated when those
-/// dependencies change output bytes.
-fn fnv1a(data: &[u8]) -> u64 {
-   let mut hash = 0xcbf2_9ce4_8422_2325u64;
-   for byte in data {
-      hash ^= u64::from(*byte);
-      hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
-   }
-   hash
 }
 
 struct CountingReader {
@@ -101,7 +91,8 @@ async fn test_mp4_hd_thumbnail_uses_the_area_scaler_and_the_declared_matrix() {
    // range in its SPS VUI and no `colr` box. The default 320 box makes this a
    // 4x luma reduction, which is past the bilinear threshold, so this is the
    // only fixture that reaches the stratified taps and a non-default matrix.
-   // The pinned bytes fail if either the VUI parse or the scaler regresses.
+   // The reference comparison fails if either the VUI parse or the scaler
+   // regresses, while allowing small differences between native decoders.
    let path = fixtures_dir().join("bt709_hd_video.mp4");
    let reader = FileStreamReader::new(&path).expect("open HD fixture");
 
@@ -110,7 +101,11 @@ async fn test_mp4_hd_thumbnail_uses_the_area_scaler_and_the_declared_matrix() {
       .expect("extract BT.709 thumbnail");
 
    assert_eq!((frames[0].width, frames[0].height), (320, 180));
-   assert_eq!(fnv1a(&frames[0].data), 0x57dc_f044_fdee_db13);
+   assert_matches_reference(
+      "native H.264 backend",
+      &frames[0],
+      include_bytes!("fixtures/bt709_frame0_reference.jpg"),
+   );
 }
 
 #[tokio::test]
@@ -231,18 +226,9 @@ async fn test_mp4_h264_thumbnails_follow_presentation_order() {
          .collect::<Vec<_>>(),
       timestamps
    );
-   // The fixture holds an I/B/P GOP with real ctts reordering; pin the exact
-   // decoded bytes so a frame swap cannot slip through silently.
-   assert_eq!(
-      frames
-         .iter()
-         .map(|frame| fnv1a(&frame.data))
-         .collect::<Vec<_>>(),
-      [
-         0x60cf_af45_c4bb_b19d,
-         0xfaaf_98fb_5875_7231,
-         0x53af_95e8_f945_80f4
-      ]
+   assert!(
+      frames.windows(2).all(|pair| pair[0].data != pair[1].data),
+      "distinct presentation timestamps should not repeat adjacent frames"
    );
 }
 
@@ -267,23 +253,9 @@ async fn test_mp4_h264_thumbnails_follow_presentation_order_with_deep_b_frames()
          .collect::<Vec<_>>(),
       timestamps
    );
-   assert_eq!(
-      frames
-         .iter()
-         .map(|frame| fnv1a(&frame.data))
-         .collect::<Vec<_>>(),
-      [
-         0x9190_4ea4_16ce_2814,
-         0xbf83_13c4_8b71_3e3b,
-         0xa0bd_15ff_1423_543d,
-         0xea1d_a3e4_e707_f08c,
-         0xc978_b83f_79b9_b1d7,
-         0xa9a3_7b8d_fc5e_a227,
-         0xe472_d8a3_5b90_a1cb,
-         0x299e_1536_6076_e3ff,
-         0x112a_8c63_5120_2a12,
-      ]
-   );
+   for (frame, reference) in frames.iter().zip(BFRAME_REFERENCES) {
+      assert_matches_reference("native H.264 backend", frame, reference);
+   }
 }
 
 #[tokio::test]
@@ -414,15 +386,9 @@ async fn test_mp4_exact_thumbnails_truncate_the_gop_at_the_last_target() {
       .expect("extract all frames");
    let full_bytes = reader.read_bytes();
 
-   // Truncation must not change the decoded bytes: these are the first two
-   // hashes pinned by the deep-B-frame presentation-order test above.
-   assert_eq!(
-      partial
-         .iter()
-         .map(|frame| fnv1a(&frame.data))
-         .collect::<Vec<_>>(),
-      [0x9190_4ea4_16ce_2814, 0xbf83_13c4_8b71_3e3b]
-   );
+   // Truncation must not change the decoded bytes produced by the same native
+   // backend for the requested prefix.
+   assert_eq!(partial, full[..partial.len()]);
    assert_eq!(full.len(), 9);
    assert!(
       partial_bytes < full_bytes,

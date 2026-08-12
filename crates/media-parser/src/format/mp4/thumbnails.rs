@@ -2,27 +2,26 @@
 
 use super::atoms::{
    CompositionOffset, Mp4Nav, PresentationTimeline, SampleSizes, StscEntry, duration_to_ticks,
-   find_and_read_moov_box, iter_boxes, nearest_sync_sample, next_sync_sample, parse_avc_config,
-   parse_chunk_offsets, parse_ctts, parse_hdlr, parse_mdhd, parse_moov_payload, parse_sample_sizes,
-   parse_stsc, parse_stss, parse_tkhd, range_uses_description_index, sample_description_index,
-   stts_duration_ticks, table_entries, ticks_to_duration, validate_sample_tables,
+   find_and_read_moov_box, iter_boxes, nearest_sync_sample, next_sync_sample,
+   parse_avc_config_checked, parse_chunk_offsets, parse_ctts, parse_hdlr, parse_mdhd,
+   parse_moov_payload, parse_sample_sizes, parse_stsc, parse_stss, parse_tkhd,
+   range_uses_description_index, sample_description_index, stts_duration_ticks, table_entries,
+   ticks_to_duration, validate_sample_tables,
 };
 use super::thumbnail_io::{MAX_SAMPLES_PER_THUMBNAIL_BATCH, read_samples_coalesced};
 use crate::decoders::h264::{
-   AvcConfig, DecodeError, DecodedImage, FrameToken, JpegQuality, OutputBudget, ThumbnailSize,
-   backend, decode_frames_to_jpeg,
+   AvcConfig, DecodeError, DecodedImage, FrameToken, H264DecodeBatch, JpegQuality, OutputBudget,
+   ThumbnailSize, decode_native_frame_batches_to_jpeg,
 };
 use crate::errors::{MediaParserError, Result};
 use crate::helpers::{read_u32_be, read_u64_be};
 use crate::stream::StreamReader;
 use crate::types::{Frame, PixelFormat};
-use futures::stream::{self, StreamExt, TryStreamExt};
 use std::collections::{BTreeMap, HashMap};
+use std::sync::Arc;
 use std::time::Duration;
 
 pub const MAX_THUMBNAIL_OUTPUTS: usize = 4_096;
-const MAX_CONCURRENT_DECODES: usize = 4;
-
 /// Encoding options for extracted thumbnails.
 ///
 /// A struct rather than positional parameters because more knobs are expected
@@ -55,7 +54,7 @@ struct VideoSampleTables {
    stsc: Vec<StscEntry>,
    chunk_offsets: Vec<u64>,
    sync_samples: Option<Vec<u32>>,
-   avc_configs: Vec<Option<AvcConfig>>,
+   avc_configs: Vec<Option<Arc<AvcConfig>>>,
 }
 
 /// Parsed MP4 video index that can be reused across thumbnail requests.
@@ -85,7 +84,7 @@ struct ExactTarget {
 #[derive(Debug)]
 struct DecodeJob {
    gop: Gop,
-   avc_config: AvcConfig,
+   avc_config: Arc<AvcConfig>,
    samples: Vec<Vec<u8>>,
    tokens: Vec<FrameToken>,
    wanted: Vec<(FrameToken, usize)>,
@@ -104,7 +103,11 @@ impl ThumbnailIndex {
    /// Reads and parses the selected video track's sample index.
    pub async fn read(reader: &dyn StreamReader, track_id: u32) -> Result<Self> {
       let moov = find_and_read_moov_box(reader).await?;
-      let moov_payload = parse_moov_payload(&moov)?;
+      Self::from_moov(&moov, track_id)
+   }
+
+   pub(super) fn from_moov(moov: &[u8], track_id: u32) -> Result<Self> {
+      let moov_payload = parse_moov_payload(moov)?;
       let (track, tables) = find_video_track(moov_payload, track_id)?.ok_or(
          MediaParserError::TrackNotFound(if track_id == 0 { 1 } else { track_id }),
       )?;
@@ -122,6 +125,11 @@ impl ThumbnailIndex {
          tables,
          timeline,
       })
+   }
+
+   /// Returns the concrete MP4 track selected by this index.
+   pub fn track_id(&self) -> u32 {
+      self.track.id
    }
 
    /// Extracts exact frames while reusing the parsed index.
@@ -295,60 +303,55 @@ impl ThumbnailIndex {
    }
 }
 
-/// Decodes every job with bounded concurrency, returning the selected images
-/// keyed by GOP and presentation-order position.
+/// Native backends keep one compatible decoder alive across
+/// GOPs. Recreating MediaCodec, Media Foundation, or VideoToolbox for every
+/// requested thumbnail is substantially more expensive than decoding a GOP.
 async fn run_decode_jobs(
    jobs: Vec<DecodeJob>,
    quality: JpegQuality,
    size: ThumbnailSize,
    max_output_bytes: Option<usize>,
 ) -> Result<HashMap<(Gop, FrameToken), DecodedImage>> {
-   let output_budget = OutputBudget::new(max_output_bytes);
-   let decoded = stream::iter(jobs.into_iter().map(|job| {
-      let output_budget = output_budget.clone();
-      async move {
-         let DecodeJob {
-            gop,
-            avc_config,
-            samples,
-            tokens,
-            wanted,
-         } = job;
-         let decoded = tokio::task::spawn_blocking(move || {
-            decode_frames_to_jpeg(
-               &avc_config,
-               &samples,
-               &tokens,
-               &wanted,
-               quality,
-               size,
-               &output_budget,
-            )
+   let decoded = tokio::task::spawn_blocking(move || {
+      let output_budget = OutputBudget::new(max_output_bytes);
+      let batches = jobs
+         .iter()
+         .map(|job| H264DecodeBatch {
+            config: &job.avc_config,
+            samples: &job.samples,
+            tokens: &job.tokens,
+            wanted: &job.wanted,
          })
-         .await
-         .map_err(|error| {
-            MediaParserError::BlockingTask(format!("thumbnail decode task failed: {error}"))
-         })?
+         .collect::<Vec<_>>();
+      let outputs = decode_native_frame_batches_to_jpeg(&batches, quality, size, &output_budget)
          .map_err(map_decode_error)?;
-         Ok::<_, MediaParserError>((gop, decoded))
-      }
-   }))
-   .buffer_unordered(
-      backend::caps()
-         .recommended_concurrency
-         .get()
-         .min(MAX_CONCURRENT_DECODES),
-   )
-   .try_collect::<Vec<_>>()
-   .await?;
+      drop(batches);
+      Ok::<_, MediaParserError>(
+         jobs
+            .into_iter()
+            .zip(outputs)
+            .map(|(job, decoded)| (job.gop, decoded))
+            .collect::<Vec<_>>(),
+      )
+   })
+   .await
+   .map_err(|error| {
+      MediaParserError::BlockingTask(format!("thumbnail decode task failed: {error}"))
+   })??;
 
+   Ok(collect_decoded_images(decoded))
+}
+
+fn collect_decoded_images(
+   decoded: Vec<(Gop, Vec<(FrameToken, DecodedImage)>)>,
+) -> HashMap<(Gop, FrameToken), DecodedImage> {
    let mut images = HashMap::new();
    for (gop, decoded_images) in decoded {
       for (token, image) in decoded_images {
          images.insert((gop, token), image);
       }
    }
-   Ok(images)
+   images
 }
 
 fn map_decode_error(error: DecodeError) -> MediaParserError {
@@ -537,9 +540,10 @@ fn parse_video_sample_tables(stbl: &[u8]) -> Result<VideoSampleTables> {
             .ok_or_else(|| MediaParserError::InvalidFormat("invalid video ctts".to_string()))
       })
       .transpose()?;
-   let avc_configs = stbl
+   let stsd = stbl
       .nav(&[*b"stsd"])
-      .and_then(parse_avc_descriptions)
+      .ok_or_else(|| MediaParserError::InvalidFormat("video track missing stsd".to_string()))?;
+   let avc_configs = parse_avc_descriptions(stsd)?
       .ok_or_else(|| MediaParserError::InvalidFormat("video track missing stsd".to_string()))?;
    validate_sample_tables(
       stts,
@@ -799,7 +803,7 @@ fn avc_config_for_range(
    tables: &VideoSampleTables,
    start_sample: u32,
    end_sample: u32,
-) -> Result<&AvcConfig> {
+) -> Result<&Arc<AvcConfig>> {
    let description_index = sample_description_index(
       start_sample,
       &tables.sizes,
@@ -831,23 +835,36 @@ fn avc_config_for_range(
       .ok_or_else(|| MediaParserError::UnsupportedCodec("video track is not H.264/AVC".to_string()))
 }
 
-fn parse_avc_descriptions(stsd: &[u8]) -> Option<Vec<Option<AvcConfig>>> {
+fn parse_avc_descriptions(stsd: &[u8]) -> Result<Option<Vec<Option<Arc<AvcConfig>>>>> {
    // Each sample description is a box, so an 8-byte minimum header bounds the count.
-   let entry_count = table_entries(stsd, 8)?;
+   let Some(entry_count) = table_entries(stsd, 8) else {
+      return Ok(None);
+   };
    if entry_count == 0 {
-      return None;
+      return Ok(None);
    }
-   let entries = stsd.get(8..)?;
+   let Some(entries) = stsd.get(8..) else {
+      return Ok(None);
+   };
    let mut descriptions = Vec::new();
-   descriptions.try_reserve(entry_count).ok()?;
+   descriptions.try_reserve(entry_count).map_err(|_| {
+      MediaParserError::ResourceLimit("too many AVC sample descriptions".to_string())
+   })?;
    for (fourcc, payload) in iter_boxes(entries).take(entry_count) {
-      descriptions.push(
-         (&fourcc == b"avc1" || &fourcc == b"avc3")
-            .then(|| parse_avc_config(payload))
-            .flatten(),
-      );
+      let config = if &fourcc == b"avc1" || &fourcc == b"avc3" {
+         parse_avc_config_checked(payload)
+            .map_err(|_| {
+               MediaParserError::ResourceLimit(
+                  "AVC parameter sets exceed the resource limit".to_string(),
+               )
+            })?
+            .map(Arc::new)
+      } else {
+         None
+      };
+      descriptions.push(config);
    }
-   (descriptions.len() == entry_count).then_some(descriptions)
+   Ok((descriptions.len() == entry_count).then_some(descriptions))
 }
 
 fn parse_elst_media_time(elst: &[u8]) -> Option<i64> {
@@ -890,6 +907,13 @@ fn parse_elst_media_time(elst: &[u8]) -> Option<i64> {
 mod tests {
    use super::*;
 
+   fn append_test_box(target: &mut Vec<u8>, fourcc: &[u8; 4], payload: &[u8]) {
+      let size = u32::try_from(payload.len() + 8).expect("test box fits u32");
+      target.extend_from_slice(&size.to_be_bytes());
+      target.extend_from_slice(fourcc);
+      target.extend_from_slice(payload);
+   }
+
    #[test]
    fn maps_each_decode_error_without_collapsing_the_taxonomy() {
       let cases = [
@@ -914,6 +938,35 @@ mod tests {
       for (decode, expected) in cases {
          assert_eq!(map_decode_error(decode).to_string(), expected);
       }
+   }
+
+   #[test]
+   fn maps_oversized_avc_parameter_sets_to_a_resource_limit() {
+      const LARGE_SET_LEN: usize = u16::MAX as usize;
+      let limit = crate::decoders::h264::MAX_AVC_PARAMETER_SET_BYTES;
+      let mut avcc = vec![1, 66, 0, 30, 0xff, 0xe0 | 16];
+      let large_sps = vec![0x67; LARGE_SET_LEN];
+      for _ in 0..16 {
+         avcc.extend_from_slice(&u16::MAX.to_be_bytes());
+         avcc.extend_from_slice(&large_sps);
+      }
+      avcc.push(1);
+      let pps_len = limit - LARGE_SET_LEN * 16 + 1;
+      avcc.extend_from_slice(&u16::try_from(pps_len).unwrap().to_be_bytes());
+      avcc.extend(std::iter::repeat_n(0x68, pps_len));
+
+      let mut sample_entry = vec![0; 78];
+      sample_entry[24..26].copy_from_slice(&2u16.to_be_bytes());
+      sample_entry[26..28].copy_from_slice(&2u16.to_be_bytes());
+      append_test_box(&mut sample_entry, b"avcC", &avcc);
+      let mut stsd = vec![0; 4];
+      stsd.extend_from_slice(&1u32.to_be_bytes());
+      append_test_box(&mut stsd, b"avc1", &sample_entry);
+
+      let error =
+         parse_avc_descriptions(&stsd).expect_err("oversized avcC must be a resource limit");
+
+      assert!(matches!(error, MediaParserError::ResourceLimit(_)));
    }
 
    fn test_track() -> VideoTrack {
@@ -1180,15 +1233,19 @@ mod tests {
          chunk_offsets: vec![0],
          sync_samples: None,
          avc_configs: vec![
-            Some(AvcConfig {
-               length_size: 4,
-               sps: vec![vec![1]],
-               pps: vec![vec![2]],
-               color: Default::default(),
-               display_width: 2,
-               display_height: 2,
-               max_input_size: None,
-            }),
+            Some(
+               AvcConfig {
+                  length_size: 4,
+                  sps: vec![vec![1]],
+                  pps: vec![vec![2]],
+                  color: Default::default(),
+                  display_width: 2,
+                  display_height: 2,
+                  max_input_size: None,
+                  resolved_full_range: None,
+               }
+               .into(),
+            ),
             None,
          ],
       };
@@ -1197,6 +1254,43 @@ mod tests {
          .expect_err("description 2 is not AVC and must not reuse description 1");
 
       assert!(matches!(error, MediaParserError::UnsupportedCodec(_)));
+   }
+
+   #[test]
+   fn cloning_the_selected_avc_config_does_not_clone_parameter_set_bytes() {
+      let stts = [0; 16];
+      let tables = VideoSampleTables {
+         stts: stts.to_vec(),
+         composition_offsets: None,
+         sizes: SampleSizes::fixed(1, 1).unwrap(),
+         stsc: vec![StscEntry {
+            first_chunk: 1,
+            samples_per_chunk: 1,
+            sample_description_index: 1,
+         }],
+         chunk_offsets: vec![0],
+         sync_samples: None,
+         avc_configs: vec![Some(
+            AvcConfig {
+               length_size: 4,
+               sps: vec![vec![1, 2, 3]],
+               pps: vec![vec![4, 5, 6]],
+               color: Default::default(),
+               display_width: 2,
+               display_height: 2,
+               max_input_size: None,
+               resolved_full_range: None,
+            }
+            .into(),
+         )],
+      };
+      let stored_sps = tables.avc_configs[0].as_ref().unwrap().sps[0].as_ptr();
+      let stored_pps = tables.avc_configs[0].as_ref().unwrap().pps[0].as_ptr();
+
+      let selected = avc_config_for_range(&tables, 1, 1).unwrap().clone();
+
+      assert_eq!(selected.sps[0].as_ptr(), stored_sps);
+      assert_eq!(selected.pps[0].as_ptr(), stored_pps);
    }
 
    #[test]

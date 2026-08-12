@@ -16,40 +16,36 @@ pub(crate) struct Crop {
 }
 
 /// Platform-neutral failures shared by native 4:2:0 surface adapters.
-#[cfg(any(test, windows_media_foundation_backend, apple_videotoolbox_backend))]
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Geometry420Error {
    InvalidCodedDimensions,
    EmptyCrop,
    ChromaMisalignedCrop,
    CropOutsideCodedGeometry,
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CompactNv12Error {
+   Geometry(Geometry420Error),
    SizeOverflow,
    ResourceLimit,
 }
 
-#[cfg(any(test, apple_videotoolbox_backend))]
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct CompactNv12Lengths {
    pub(crate) y_bytes: usize,
    pub(crate) uv_bytes: usize,
 }
 
-#[cfg(any(
-   test,
-   android_mediacodec_backend,
-   windows_media_foundation_backend,
-   apple_videotoolbox_backend
-))]
+#[cfg(test)]
 pub(crate) const MAX_DECODED_NV12_DIMENSION: usize = 16_384;
-#[cfg(any(
-   test,
-   android_mediacodec_backend,
-   windows_media_foundation_backend,
-   apple_videotoolbox_backend
-))]
+#[cfg(test)]
 pub(crate) const MAX_DECODED_NV12_BYTES: usize = 64 * 1024 * 1024;
 
-#[cfg(any(test, windows_media_foundation_backend, apple_videotoolbox_backend))]
+#[cfg(test)]
 pub(crate) fn validate_420_dimensions(
    coded_width: usize,
    coded_height: usize,
@@ -65,7 +61,7 @@ pub(crate) fn validate_420_dimensions(
    }
 }
 
-#[cfg(any(test, windows_media_foundation_backend, apple_videotoolbox_backend))]
+#[cfg(test)]
 pub(crate) fn validate_420_crop(
    coded_width: usize,
    coded_height: usize,
@@ -92,35 +88,35 @@ pub(crate) fn validate_420_crop(
    Ok(())
 }
 
-#[cfg(any(test, apple_videotoolbox_backend))]
+#[cfg(test)]
 fn checked_compact_nv12_lengths(
    coded_width: usize,
    coded_height: usize,
-) -> Result<(CompactNv12Lengths, usize), Geometry420Error> {
+) -> Result<(CompactNv12Lengths, usize), CompactNv12Error> {
    let y_bytes = coded_width
       .checked_mul(coded_height)
-      .ok_or(Geometry420Error::SizeOverflow)?;
+      .ok_or(CompactNv12Error::SizeOverflow)?;
    let uv_bytes = coded_width
       .checked_mul(coded_height / 2)
-      .ok_or(Geometry420Error::SizeOverflow)?;
+      .ok_or(CompactNv12Error::SizeOverflow)?;
    let total_bytes = y_bytes
       .checked_add(uv_bytes)
-      .ok_or(Geometry420Error::SizeOverflow)?;
+      .ok_or(CompactNv12Error::SizeOverflow)?;
    Ok((CompactNv12Lengths { y_bytes, uv_bytes }, total_bytes))
 }
 
-#[cfg(any(test, apple_videotoolbox_backend))]
+#[cfg(test)]
 pub(crate) fn compact_nv12_lengths(
    coded_width: usize,
    coded_height: usize,
-) -> Result<CompactNv12Lengths, Geometry420Error> {
-   validate_420_dimensions(coded_width, coded_height)?;
+) -> Result<CompactNv12Lengths, CompactNv12Error> {
+   validate_420_dimensions(coded_width, coded_height).map_err(CompactNv12Error::Geometry)?;
    if coded_width > MAX_DECODED_NV12_DIMENSION || coded_height > MAX_DECODED_NV12_DIMENSION {
-      return Err(Geometry420Error::ResourceLimit);
+      return Err(CompactNv12Error::ResourceLimit);
    }
    let (lengths, total_bytes) = checked_compact_nv12_lengths(coded_width, coded_height)?;
    if total_bytes > MAX_DECODED_NV12_BYTES {
-      return Err(Geometry420Error::ResourceLimit);
+      return Err(CompactNv12Error::ResourceLimit);
    }
    Ok(lengths)
 }
@@ -583,15 +579,17 @@ mod tests {
       );
       assert_eq!(
          compact_nv12_lengths(15, 12),
-         Err(Geometry420Error::InvalidCodedDimensions)
+         Err(CompactNv12Error::Geometry(
+            Geometry420Error::InvalidCodedDimensions
+         ))
       );
       assert_eq!(
          compact_nv12_lengths(usize::MAX - 1, usize::MAX - 1),
-         Err(Geometry420Error::ResourceLimit)
+         Err(CompactNv12Error::ResourceLimit)
       );
       assert_eq!(
          checked_compact_nv12_lengths(usize::MAX - 1, usize::MAX - 1),
-         Err(Geometry420Error::SizeOverflow)
+         Err(CompactNv12Error::SizeOverflow)
       );
    }
 
@@ -606,11 +604,11 @@ mod tests {
       );
       assert_eq!(
          compact_nv12_lengths(16_386, 2),
-         Err(Geometry420Error::ResourceLimit)
+         Err(CompactNv12Error::ResourceLimit)
       );
       assert_eq!(
          compact_nv12_lengths(16_384, 2_732),
-         Err(Geometry420Error::ResourceLimit)
+         Err(CompactNv12Error::ResourceLimit)
       );
    }
 }

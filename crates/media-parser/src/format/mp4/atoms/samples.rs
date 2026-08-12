@@ -2,10 +2,15 @@
 
 use super::sample_timing::{CompositionOffset, stts_sample_count};
 use super::{Mp4Nav, iter_boxes, visual_dimensions};
-use crate::decoders::h264::{AvcColorMetadata, AvcConfig};
+use crate::decoders::h264::{AvcColorMetadata, AvcConfig, MAX_AVC_PARAMETER_SET_BYTES};
 use crate::helpers::{read_u16_be, read_u32_be, read_u64_be};
 
 const SAMPLE_SIZE_PREFIX_INTERVAL: usize = 256;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AvcConfigParseError {
+   ResourceLimit,
+}
 
 #[derive(Debug, Clone, Copy)]
 pub struct StscEntry {
@@ -129,7 +134,29 @@ fn parse_colr(payload: &[u8], color: &mut AvcColorMetadata) -> bool {
    true
 }
 
-pub fn parse_avc_config(sample_entry_payload: &[u8]) -> Option<AvcConfig> {
+#[cfg(test)]
+fn parse_avc_config(sample_entry_payload: &[u8]) -> Option<AvcConfig> {
+   parse_avc_config_checked(sample_entry_payload)
+      .ok()
+      .flatten()
+}
+
+pub(crate) fn parse_avc_config_checked(
+   sample_entry_payload: &[u8],
+) -> Result<Option<AvcConfig>, AvcConfigParseError> {
+   let mut resource_limited = false;
+   let config = parse_avc_config_inner(sample_entry_payload, &mut resource_limited);
+   if resource_limited {
+      Err(AvcConfigParseError::ResourceLimit)
+   } else {
+      Ok(config)
+   }
+}
+
+fn parse_avc_config_inner(
+   sample_entry_payload: &[u8],
+   resource_limited: &mut bool,
+) -> Option<AvcConfig> {
    let (display_width, display_height) = visual_dimensions(sample_entry_payload);
    let children = sample_entry_payload.get(78..)?;
    let mut avcc = None;
@@ -150,25 +177,62 @@ pub fn parse_avc_config(sample_entry_payload: &[u8]) -> Option<AvcConfig> {
    let length_size = (avcc[4] & 0x03) as usize + 1;
    let sps_count = avcc[5] & 0x1f;
    let mut offset = 6usize;
+   let mut parameter_set_bytes = 0usize;
    let mut sps = Vec::new();
-   sps.try_reserve(sps_count as usize).ok()?;
+   if sps.try_reserve(sps_count as usize).is_err() {
+      *resource_limited = true;
+      return None;
+   }
    for _ in 0..sps_count {
       let length = read_u16_be(avcc, offset)? as usize;
       offset = offset.checked_add(2)?;
       let end = offset.checked_add(length)?;
-      sps.push(avcc.get(offset..end)?.to_vec());
+      let Some(total) = parameter_set_bytes
+         .checked_add(length)
+         .filter(|total| *total <= MAX_AVC_PARAMETER_SET_BYTES)
+      else {
+         *resource_limited = true;
+         return None;
+      };
+      parameter_set_bytes = total;
+      let source = avcc.get(offset..end)?;
+      let mut owned = Vec::new();
+      if owned.try_reserve_exact(length).is_err() {
+         *resource_limited = true;
+         return None;
+      }
+      owned.extend_from_slice(source);
+      sps.push(owned);
       offset = end;
    }
 
    let pps_count = *avcc.get(offset)?;
    offset = offset.checked_add(1)?;
    let mut pps = Vec::new();
-   pps.try_reserve(pps_count as usize).ok()?;
+   if pps.try_reserve(pps_count as usize).is_err() {
+      *resource_limited = true;
+      return None;
+   }
    for _ in 0..pps_count {
       let length = read_u16_be(avcc, offset)? as usize;
       offset = offset.checked_add(2)?;
       let end = offset.checked_add(length)?;
-      pps.push(avcc.get(offset..end)?.to_vec());
+      let Some(total) = parameter_set_bytes
+         .checked_add(length)
+         .filter(|total| *total <= MAX_AVC_PARAMETER_SET_BYTES)
+      else {
+         *resource_limited = true;
+         return None;
+      };
+      parameter_set_bytes = total;
+      let source = avcc.get(offset..end)?;
+      let mut owned = Vec::new();
+      if owned.try_reserve_exact(length).is_err() {
+         *resource_limited = true;
+         return None;
+      }
+      owned.extend_from_slice(source);
+      pps.push(owned);
       offset = end;
    }
 
@@ -180,6 +244,7 @@ pub fn parse_avc_config(sample_entry_payload: &[u8]) -> Option<AvcConfig> {
       display_width: display_width?,
       display_height: display_height?,
       max_input_size: None,
+      resolved_full_range: None,
    })
 }
 
@@ -673,6 +738,32 @@ mod tests {
 
       assert_eq!(config.color.matrix_coefficients, Some(1));
       assert_eq!(config.color.full_range, Some(false));
+   }
+
+   #[test]
+   fn rejects_avc_config_above_the_parameter_set_byte_limit() {
+      const LIMIT: usize = MAX_AVC_PARAMETER_SET_BYTES;
+      const LARGE_SET_LEN: usize = u16::MAX as usize;
+
+      let mut avcc = vec![1, 66, 0, 30, 0xff, 0xe0 | 16];
+      let large_sps = vec![0x67; LARGE_SET_LEN];
+      for _ in 0..16 {
+         avcc.extend_from_slice(&u16::MAX.to_be_bytes());
+         avcc.extend_from_slice(&large_sps);
+      }
+      avcc.push(1);
+      let pps_len = LIMIT - LARGE_SET_LEN * 16 + 1;
+      avcc.extend_from_slice(
+         &u16::try_from(pps_len)
+            .expect("test PPS length fits")
+            .to_be_bytes(),
+      );
+      avcc.extend(std::iter::repeat_n(0x68, pps_len));
+
+      let mut sample_entry = vec![0; 78];
+      append_box(&mut sample_entry, b"avcC", &avcc);
+
+      assert!(parse_avc_config(&sample_entry).is_none());
    }
 
    fn two_run_tables() -> (SampleSizes, Vec<StscEntry>, Vec<u64>) {
