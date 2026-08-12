@@ -9,7 +9,8 @@ use super::atoms::{
 };
 use super::thumbnail_io::{MAX_SAMPLES_PER_THUMBNAIL_BATCH, read_samples_coalesced};
 use crate::decoders::h264::{
-   AvcConfig, DecodedImage, JpegQuality, OutputBudget, ThumbnailSize, decode_frames_to_jpeg,
+   AvcConfig, DecodeError, DecodedImage, FrameToken, JpegQuality, OutputBudget, ThumbnailSize,
+   backend, decode_frames_to_jpeg,
 };
 use crate::errors::{MediaParserError, Result};
 use crate::helpers::{read_u32_be, read_u64_be};
@@ -76,7 +77,7 @@ struct ExactTarget {
    gop: Gop,
    sample_index: u32,
    presentation_tick: u64,
-   output_index: usize,
+   token: FrameToken,
 }
 
 /// One decode unit: the samples of a single GOP plus the presentation-order
@@ -86,8 +87,8 @@ struct DecodeJob {
    gop: Gop,
    avc_config: AvcConfig,
    samples: Vec<Vec<u8>>,
-   output_indices: Vec<usize>,
-   output_counts: Vec<usize>,
+   tokens: Vec<FrameToken>,
+   wanted: Vec<(FrameToken, usize)>,
 }
 
 /// A planned decode job: the truncated GOP plus the presentation-order
@@ -95,8 +96,8 @@ struct DecodeJob {
 #[derive(Debug)]
 struct JobPlan {
    gop: Gop,
-   output_indices: Vec<usize>,
-   output_counts: Vec<usize>,
+   tokens: Vec<FrameToken>,
+   wanted: Vec<(FrameToken, usize)>,
 }
 
 impl ThumbnailIndex {
@@ -194,8 +195,8 @@ impl ThumbnailIndex {
             gop: plan.gop,
             avc_config,
             samples: gop_samples,
-            output_indices: plan.output_indices,
-            output_counts: plan.output_counts,
+            tokens: plan.tokens,
+            wanted: plan.wanted,
          });
       }
 
@@ -259,8 +260,8 @@ impl ThumbnailIndex {
             },
             avc_config,
             samples: vec![sample],
-            output_indices: vec![0],
-            output_counts: vec![output_count_by_sample[&sample_index]],
+            tokens: vec![FrameToken::new(0)],
+            wanted: vec![(FrameToken::new(0), output_count_by_sample[&sample_index])],
          });
       }
 
@@ -301,7 +302,7 @@ async fn run_decode_jobs(
    quality: JpegQuality,
    size: ThumbnailSize,
    max_output_bytes: Option<usize>,
-) -> Result<HashMap<(Gop, usize), DecodedImage>> {
+) -> Result<HashMap<(Gop, FrameToken), DecodedImage>> {
    let output_budget = OutputBudget::new(max_output_bytes);
    let decoded = stream::iter(jobs.into_iter().map(|job| {
       let output_budget = output_budget.clone();
@@ -310,42 +311,56 @@ async fn run_decode_jobs(
             gop,
             avc_config,
             samples,
-            output_indices,
-            output_counts,
+            tokens,
+            wanted,
          } = job;
          let decoded = tokio::task::spawn_blocking(move || {
             decode_frames_to_jpeg(
                &avc_config,
                &samples,
-               &output_indices,
-               &output_counts,
+               &tokens,
+               &wanted,
                quality,
                size,
                &output_budget,
             )
-            .map(|images| (output_indices, images))
          })
          .await
          .map_err(|error| {
             MediaParserError::BlockingTask(format!("thumbnail decode task failed: {error}"))
          })?
-         .map_err(|error| {
-            MediaParserError::UnsupportedCodec(format!("H.264 decode failed: {error}"))
-         })?;
+         .map_err(map_decode_error)?;
          Ok::<_, MediaParserError>((gop, decoded))
       }
    }))
-   .buffer_unordered(MAX_CONCURRENT_DECODES)
+   .buffer_unordered(
+      backend::caps()
+         .recommended_concurrency
+         .get()
+         .min(MAX_CONCURRENT_DECODES),
+   )
    .try_collect::<Vec<_>>()
    .await?;
 
    let mut images = HashMap::new();
-   for (gop, (output_indices, decoded_images)) in decoded {
-      for (output_index, image) in output_indices.into_iter().zip(decoded_images) {
-         images.insert((gop, output_index), image);
+   for (gop, decoded_images) in decoded {
+      for (token, image) in decoded_images {
+         images.insert((gop, token), image);
       }
    }
    Ok(images)
+}
+
+fn map_decode_error(error: DecodeError) -> MediaParserError {
+   match error {
+      DecodeError::Bitstream(message) => MediaParserError::InvalidFormat(message),
+      DecodeError::UnsupportedFormat(message) => MediaParserError::UnsupportedCodec(message),
+      DecodeError::Backend(message)
+      | DecodeError::BackendContract(message)
+      | DecodeError::Convert(message) => MediaParserError::Decode(message),
+      DecodeError::OutputLimit(message) => MediaParserError::OutputLimit(message),
+      DecodeError::ResourceLimit(message) => MediaParserError::ResourceLimit(message),
+   }
 }
 
 /// Maps each target to its decoded image, preserving the request order.
@@ -355,13 +370,11 @@ async fn run_decode_jobs(
 fn assemble_frames(
    track: &VideoTrack,
    targets: Vec<ExactTarget>,
-   mut images: HashMap<(Gop, usize), DecodedImage>,
+   mut images: HashMap<(Gop, FrameToken), DecodedImage>,
 ) -> Result<Vec<Frame>> {
    let mut pending = HashMap::new();
    for target in &targets {
-      *pending
-         .entry((target.gop, target.output_index))
-         .or_insert(0) += 1usize;
+      *pending.entry((target.gop, target.token)).or_insert(0) += 1usize;
    }
 
    let mut frames = Vec::new();
@@ -369,7 +382,7 @@ fn assemble_frames(
       .try_reserve(targets.len())
       .map_err(|_| MediaParserError::InvalidFormat("too many thumbnail timestamps".to_string()))?;
    for target in targets {
-      let key = (target.gop, target.output_index);
+      let key = (target.gop, target.token);
       let remaining = pending.get_mut(&key).map_or(0, |count| {
          *count -= 1;
          *count
@@ -578,7 +591,7 @@ fn exact_target(
       sample_index: selection.sample_index,
       presentation_tick: selection.presentation_tick,
       // Assigned by plan_gop_job once the GOP is truncated to its targets.
-      output_index: 0,
+      token: FrameToken::new(0),
    })
 }
 
@@ -623,8 +636,19 @@ fn plan_gop_job(
       *slot = Some(output_index);
    }
 
-   let mut output_indices = Vec::new();
-   output_indices
+   let tokens = output_index_by_sample
+      .iter()
+      .map(|output_index| {
+         output_index
+            .and_then(|index| u64::try_from(index).ok())
+            .map(FrameToken::new)
+            .ok_or_else(|| {
+               MediaParserError::InvalidFormat("invalid video timing tables".to_string())
+            })
+      })
+      .collect::<Result<Vec<_>>>()?;
+   let mut wanted_tokens = Vec::new();
+   wanted_tokens
       .try_reserve(target_indices.len())
       .map_err(|_| MediaParserError::InvalidFormat("too many thumbnail targets".to_string()))?;
    for index in target_indices {
@@ -635,26 +659,27 @@ fn plan_gop_job(
             MediaParserError::InvalidFormat("selected sample is outside its GOP".to_string())
          })?;
       target.gop = truncated;
-      target.output_index = output_index;
-      output_indices.push(output_index);
+      let token = FrameToken::new(u64::try_from(output_index).map_err(|_| {
+         MediaParserError::InvalidFormat("thumbnail token is too large".to_string())
+      })?);
+      target.token = token;
+      wanted_tokens.push(token);
    }
-   output_indices.sort_unstable();
-   let mut unique_output_indices = Vec::new();
-   let mut output_counts = Vec::new();
-   for output_index in output_indices {
-      if unique_output_indices.last() == Some(&output_index) {
-         *output_counts
-            .last_mut()
-            .expect("an output index has a count") += 1;
+   wanted_tokens.sort_unstable();
+   let mut wanted = Vec::new();
+   for token in wanted_tokens {
+      if let Some((last_token, count)) = wanted.last_mut()
+         && *last_token == token
+      {
+         *count += 1;
       } else {
-         unique_output_indices.push(output_index);
-         output_counts.push(1);
+         wanted.push((token, 1));
       }
    }
    Ok(JobPlan {
       gop: truncated,
-      output_indices: unique_output_indices,
-      output_counts,
+      tokens,
+      wanted,
    })
 }
 
@@ -732,7 +757,7 @@ fn keyframe_target(
       },
       sample_index: sync_sample,
       presentation_tick,
-      output_index: 0,
+      token: FrameToken::new(0),
    })
 }
 
@@ -865,6 +890,32 @@ fn parse_elst_media_time(elst: &[u8]) -> Option<i64> {
 mod tests {
    use super::*;
 
+   #[test]
+   fn maps_each_decode_error_without_collapsing_the_taxonomy() {
+      let cases = [
+         (DecodeError::Bitstream("x".into()), "Invalid MP4 format: x"),
+         (
+            DecodeError::UnsupportedFormat("x".into()),
+            "Unsupported codec: x",
+         ),
+         (DecodeError::Backend("x".into()), "Decoder error: x"),
+         (DecodeError::BackendContract("x".into()), "Decoder error: x"),
+         (DecodeError::Convert("x".into()), "Decoder error: x"),
+         (
+            DecodeError::OutputLimit("x".into()),
+            "Output limit exceeded: x",
+         ),
+         (
+            DecodeError::ResourceLimit("x".into()),
+            "Resource limit reached: x",
+         ),
+      ];
+
+      for (decode, expected) in cases {
+         assert_eq!(map_decode_error(decode).to_string(), expected);
+      }
+   }
+
    fn test_track() -> VideoTrack {
       VideoTrack {
          id: 1,
@@ -890,7 +941,7 @@ mod tests {
          },
          sample_index: gop_start,
          presentation_tick,
-         output_index,
+         token: FrameToken::new(output_index as u64),
       }
    }
 
@@ -913,7 +964,7 @@ mod tests {
          },
          sample_index: oversized_end,
          presentation_tick: 0,
-         output_index: 0,
+         token: FrameToken::new(0),
       }];
 
       let error = plan_gop_job(&timeline, targets[0].gop, &[0], &mut targets)
@@ -938,7 +989,7 @@ mod tests {
             },
             sample_index: first_end,
             presentation_tick: 0,
-            output_index: 0,
+            token: FrameToken::new(0),
          },
          ExactTarget {
             gop: Gop {
@@ -947,7 +998,7 @@ mod tests {
             },
             sample_index: second_end,
             presentation_tick: 0,
-            output_index: 0,
+            token: FrameToken::new(0),
          },
       ];
       let targets_by_gop = BTreeMap::from([(targets[0].gop, vec![0]), (targets[1].gop, vec![1])]);
@@ -971,7 +1022,7 @@ mod tests {
          },
          sample_index: end_sample,
          presentation_tick: 0,
-         output_index: 0,
+         token: FrameToken::new(0),
       }];
       let targets_by_gop = BTreeMap::from([(targets[0].gop, vec![0])]);
 
@@ -1009,19 +1060,30 @@ mod tests {
          gop,
          sample_index,
          presentation_tick,
-         output_index: 0,
+         token: FrameToken::new(0),
       };
       let mut targets = vec![target(4, 2), target(2, 3), target(4, 2)];
 
       let plan = plan_gop_job(&timeline, gop, &[0, 1, 2], &mut targets).unwrap();
 
       // Presentation order is samples 1, 3, 4, 2.
-      assert_eq!(targets[0].output_index, 2);
-      assert_eq!(targets[1].output_index, 3);
-      assert_eq!(targets[2].output_index, 2);
+      assert_eq!(targets[0].token, FrameToken::new(2));
+      assert_eq!(targets[1].token, FrameToken::new(3));
+      assert_eq!(targets[2].token, FrameToken::new(2));
       assert_eq!(plan.gop, gop);
-      assert_eq!(plan.output_indices, vec![2, 3]);
-      assert_eq!(plan.output_counts, vec![2, 1]);
+      assert_eq!(
+         plan.tokens,
+         vec![
+            FrameToken::new(0),
+            FrameToken::new(3),
+            FrameToken::new(1),
+            FrameToken::new(2)
+         ]
+      );
+      assert_eq!(
+         plan.wanted,
+         vec![(FrameToken::new(2), 2), (FrameToken::new(3), 1)]
+      );
    }
 
    #[test]
@@ -1035,7 +1097,7 @@ mod tests {
          gop,
          sample_index,
          presentation_tick: 0,
-         output_index: 0,
+         token: FrameToken::new(0),
       };
       let mut targets = vec![target(1), target(4)];
 
@@ -1052,8 +1114,8 @@ mod tests {
    fn assembles_one_frame_per_target_in_request_order() {
       let targets = vec![test_target(5, 0, 200), test_target(0, 1, 100)];
       let images = HashMap::from([
-         ((targets[0].gop, 0), test_image(0xaa)),
-         ((targets[1].gop, 1), test_image(0xbb)),
+         ((targets[0].gop, FrameToken::new(0)), test_image(0xaa)),
+         ((targets[1].gop, FrameToken::new(1)), test_image(0xbb)),
       ]);
 
       let frames = assemble_frames(&test_track(), targets, images).unwrap();
@@ -1074,7 +1136,7 @@ mod tests {
          test_target(0, 0, 140),
          test_target(0, 0, 180),
       ];
-      let images = HashMap::from([((targets[0].gop, 0), test_image(0xcc))]);
+      let images = HashMap::from([((targets[0].gop, FrameToken::new(0)), test_image(0xcc))]);
 
       let frames = assemble_frames(&test_track(), targets, images).unwrap();
 

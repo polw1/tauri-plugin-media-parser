@@ -14,7 +14,7 @@ struct ParsedSps {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) struct GopColor {
+pub(crate) struct GopColor {
    pub(super) matrix: MatrixCoefficients,
    pub(super) full_range: bool,
 }

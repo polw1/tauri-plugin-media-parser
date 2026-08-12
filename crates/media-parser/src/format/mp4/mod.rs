@@ -35,7 +35,9 @@
 pub mod atoms;
 pub mod metadata;
 pub mod subtitles;
+#[cfg(all(feature = "thumbnails", feature = "software-h264"))]
 mod thumbnail_io;
+#[cfg(all(feature = "thumbnails", feature = "software-h264"))]
 pub mod thumbnails;
 pub mod tracks;
 
@@ -86,8 +88,10 @@ pub async fn read_cover(reader: &dyn StreamReader) -> Result<Option<CoverArt>> {
 }
 
 // Re-export for direct access
+#[cfg(all(feature = "thumbnails", feature = "software-h264"))]
 pub use crate::decoders::h264::ThumbnailSize;
 pub use metadata::read_metadata;
+#[cfg(all(feature = "thumbnails", feature = "software-h264"))]
 pub use thumbnails::{
    MAX_THUMBNAIL_OUTPUTS, ThumbnailIndex, ThumbnailOptions, read_frame, read_frames, read_keyframes,
 };

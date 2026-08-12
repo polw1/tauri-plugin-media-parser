@@ -1,5 +1,7 @@
 //! Integration tests for MP4/H.264 thumbnail extraction.
 
+#![cfg(all(feature = "thumbnails", feature = "software-h264"))]
+
 mod common;
 
 use common::fixtures_dir;
@@ -200,7 +202,11 @@ async fn test_mp4_thumbnail_budget_counts_each_requested_output() {
    .await
    .expect_err("two outputs sharing one keyframe still consume two output payloads");
 
-   assert!(error.to_string().contains("thumbnail payload is too large"));
+   assert!(matches!(
+      error,
+      media_parser::MediaParserError::OutputLimit(message)
+         if message.contains("thumbnail payload is too large")
+   ));
 }
 
 #[tokio::test]

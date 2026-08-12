@@ -22,7 +22,9 @@ mod media;
 mod moov;
 mod nav;
 mod read;
+#[cfg(all(feature = "thumbnails", feature = "software-h264"))]
 mod sample_timing;
+#[cfg(all(feature = "thumbnails", feature = "software-h264"))]
 mod samples;
 mod tags;
 mod types;
@@ -42,10 +44,12 @@ pub(super) use media::{
    audio_params, fourcc_string, parse_hdlr, parse_mdhd, parse_stsd, parse_tkhd, stts_sample_count,
    visual_dimensions,
 };
+#[cfg(all(feature = "thumbnails", feature = "software-h264"))]
 pub(super) use sample_timing::{
    CompositionOffset, PresentationTimeline, duration_to_ticks, parse_ctts, stts_duration_ticks,
    ticks_to_duration,
 };
+#[cfg(all(feature = "thumbnails", feature = "software-h264"))]
 pub(super) use samples::{
    SampleLocator, SampleSizes, StscEntry, nearest_sync_sample, next_sync_sample, parse_avc_config,
    parse_chunk_offsets, parse_sample_sizes, parse_stsc, parse_stss, range_uses_description_index,
