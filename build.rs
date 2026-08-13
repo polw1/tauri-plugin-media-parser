@@ -6,5 +6,5 @@ fn main() {
    if matches!(target_os.as_str(), "android" | "windows") {
       println!("cargo::rustc-cfg=native_h264_backend");
    }
-   tauri_plugin::Builder::new(COMMANDS).build();
+   tauri_plugin::Builder::new(COMMANDS).ios_path("ios").build();
 }

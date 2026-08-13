@@ -54,6 +54,11 @@ mod session_cache;
 
 pub use error::{Error, Result};
 
+#[cfg(target_os = "ios")]
+unsafe extern "C" {
+   fn tauri_plugin_media_parser_link_videotoolbox();
+}
+
 /// Initializes the media-parser plugin.
 ///
 /// Call this function in your Tauri application's builder to register
@@ -70,6 +75,11 @@ pub use error::{Error, Result};
 /// }
 /// ```
 pub fn init<R: Runtime>() -> TauriPlugin<R> {
+   #[cfg(target_os = "ios")]
+   unsafe {
+      tauri_plugin_media_parser_link_videotoolbox();
+   }
+
    tauri::plugin::Builder::new("media-parser")
       .setup(|app, _api| {
          #[cfg(native_h264_backend)]
