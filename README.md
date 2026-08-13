@@ -269,6 +269,13 @@ MediaCodec `image-data` error instead of returning a silently color-shifted
 thumbnail. Devices whose codec omits this metadata therefore cannot generate
 H.264 thumbnails in this release.
 
+On Windows, thumbnails use the inbox Media Foundation H.264 decoder and request
+CPU-readable NV12 output, so this path does not require a GPU. Windows editions
+without the Media Foundation H.264 component cannot generate H.264 thumbnails.
+The plugin also rejects output that has no NV12 type or does not expose
+`IMF2DBuffer`; it reports the unsupported layout instead of guessing native
+stride or plane offsets.
+
 The project does not bundle a software H.264 decoder. Linux keeps the
 `get_thumbnails` command available for API compatibility, but currently returns
 `thumbnail extraction is not supported on this platform`. A native Linux

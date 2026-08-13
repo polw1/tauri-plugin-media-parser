@@ -16,7 +16,7 @@ pub(crate) struct Crop {
 }
 
 /// Platform-neutral failures shared by native 4:2:0 surface adapters.
-#[cfg(test)]
+#[cfg(any(test, all(target_os = "windows", feature = "windows-media-foundation")))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Geometry420Error {
    InvalidCodedDimensions,
@@ -40,12 +40,20 @@ pub(crate) struct CompactNv12Lengths {
    pub(crate) uv_bytes: usize,
 }
 
-#[cfg(any(test, all(target_os = "android", feature = "android-mediacodec")))]
+#[cfg(any(
+   test,
+   all(target_os = "android", feature = "android-mediacodec"),
+   all(target_os = "windows", feature = "windows-media-foundation")
+))]
 pub(crate) const MAX_DECODED_NV12_DIMENSION: usize = 16_384;
-#[cfg(any(test, all(target_os = "android", feature = "android-mediacodec")))]
+#[cfg(any(
+   test,
+   all(target_os = "android", feature = "android-mediacodec"),
+   all(target_os = "windows", feature = "windows-media-foundation")
+))]
 pub(crate) const MAX_DECODED_NV12_BYTES: usize = 64 * 1024 * 1024;
 
-#[cfg(test)]
+#[cfg(any(test, all(target_os = "windows", feature = "windows-media-foundation")))]
 pub(crate) fn validate_420_dimensions(
    coded_width: usize,
    coded_height: usize,
@@ -61,7 +69,7 @@ pub(crate) fn validate_420_dimensions(
    }
 }
 
-#[cfg(test)]
+#[cfg(any(test, all(target_os = "windows", feature = "windows-media-foundation")))]
 pub(crate) fn validate_420_crop(
    coded_width: usize,
    coded_height: usize,

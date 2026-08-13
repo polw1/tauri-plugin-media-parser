@@ -17,6 +17,8 @@ pub(super) const SESSION_REQUIRES_MATCHING_PIXEL_RANGE: bool = false;
 
 #[cfg(all(target_os = "android", feature = "android-mediacodec"))]
 const _: () = assert!(!SESSION_REQUIRES_MATCHING_PIXEL_RANGE);
+#[cfg(all(target_os = "windows", feature = "windows-media-foundation"))]
+const _: () = assert!(!SESSION_REQUIRES_MATCHING_PIXEL_RANGE);
 
 /// Request-scoped accounting shared by concurrent decode jobs.
 #[derive(Debug, Clone)]

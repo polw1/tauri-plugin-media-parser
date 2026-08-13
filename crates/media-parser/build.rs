@@ -21,11 +21,15 @@ fn main() {
    let feature = |name: &str| std::env::var_os(name).is_some();
    let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
    let android = target_os == "android";
+   let windows = target_os == "windows";
    let thumbnails = feature("CARGO_FEATURE_THUMBNAILS");
    let mediacodec_feature = feature("CARGO_FEATURE_ANDROID_MEDIACODEC");
+   let media_foundation_feature = feature("CARGO_FEATURE_WINDOWS_MEDIA_FOUNDATION");
    let mediacodec = android && mediacodec_feature;
-   let invalid_native_backend = mediacodec_feature && !android;
-   let backend_count = usize::from(mediacodec);
+   let media_foundation = windows && media_foundation_feature;
+   let invalid_native_backend =
+      (mediacodec_feature && !android) || (media_foundation_feature && !windows);
+   let backend_count = usize::from(mediacodec) + usize::from(media_foundation);
 
    if thumbnails && backend_count == 1 {
       println!("cargo::rustc-cfg=h264_backend");

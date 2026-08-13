@@ -228,7 +228,7 @@ pub(crate) fn collect_avc_parameter_sets<'a>(
    Ok(parameter_sets)
 }
 
-#[cfg(test)]
+#[cfg(any(test, all(target_os = "windows", feature = "windows-media-foundation")))]
 pub(crate) fn parameter_sets_annex_b(config: &AvcConfig) -> Result<Vec<u8>, DecodeError> {
    collect_annex_b(config.sps.iter().chain(&config.pps).map(Vec::as_slice))
 }
@@ -240,7 +240,11 @@ pub(crate) fn nals_annex_b(nals: &[Vec<u8>]) -> Result<Vec<u8>, DecodeError> {
    collect_annex_b(nals.iter().map(Vec::as_slice))
 }
 
-#[cfg(any(test, all(target_os = "android", feature = "android-mediacodec")))]
+#[cfg(any(
+   test,
+   all(target_os = "android", feature = "android-mediacodec"),
+   all(target_os = "windows", feature = "windows-media-foundation")
+))]
 fn collect_annex_b<'a>(nals: impl IntoIterator<Item = &'a [u8]>) -> Result<Vec<u8>, DecodeError> {
    let mut data = Vec::new();
    for parameter_set in nals {
@@ -251,7 +255,7 @@ fn collect_annex_b<'a>(nals: impl IntoIterator<Item = &'a [u8]>) -> Result<Vec<u
 
 /// Rewrites a length-prefixed AVC sample into `output` as Annex B. `output` is
 /// cleared first, so callers can reuse one buffer across a whole GOP.
-#[cfg(test)]
+#[cfg(any(test, all(target_os = "windows", feature = "windows-media-foundation")))]
 pub(crate) fn sample_to_annex_b(
    sample: &[u8],
    length_size: usize,
@@ -264,7 +268,11 @@ pub(crate) fn sample_to_annex_b(
    sample_to_annex_b_into_reserved(sample, length_size, output)
 }
 
-#[cfg(any(test, all(target_os = "android", feature = "android-mediacodec")))]
+#[cfg(any(
+   test,
+   all(target_os = "android", feature = "android-mediacodec"),
+   all(target_os = "windows", feature = "windows-media-foundation")
+))]
 pub(crate) fn sample_to_annex_b_into_reserved(
    sample: &[u8],
    length_size: usize,
@@ -279,7 +287,7 @@ pub(crate) fn sample_to_annex_b_into_reserved(
 
 /// Prefixes an already validated Annex B access unit without exceeding the
 /// same checked limit used while rewriting it.
-#[cfg(test)]
+#[cfg(any(test, all(target_os = "windows", feature = "windows-media-foundation")))]
 pub(crate) fn prepend_annex_b(output: &mut Vec<u8>, prefix: &[u8]) -> Result<(), DecodeError> {
    if prefix.is_empty() {
       return Ok(());
@@ -295,7 +303,11 @@ pub(crate) fn prepend_annex_b(output: &mut Vec<u8>, prefix: &[u8]) -> Result<(),
    Ok(())
 }
 
-#[cfg(any(test, all(target_os = "android", feature = "android-mediacodec")))]
+#[cfg(any(
+   test,
+   all(target_os = "android", feature = "android-mediacodec"),
+   all(target_os = "windows", feature = "windows-media-foundation")
+))]
 fn append_annex_b_nal(output: &mut Vec<u8>, nal: &[u8]) -> Result<(), DecodeError> {
    let additional = annex_b_nal_len(nal)?;
    extend_annex_b_total(output.len(), additional)?;

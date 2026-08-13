@@ -24,11 +24,14 @@ pub(crate) trait H264Decoder: Sized {
 #[cfg(any(test, all(target_os = "android", feature = "android-mediacodec")))]
 pub(crate) mod android;
 
+#[cfg(any(test, all(target_os = "windows", feature = "windows-media-foundation")))]
+mod windows;
+
 #[cfg(all(target_os = "android", feature = "android-mediacodec"))]
 pub(crate) use android::AndroidDecoder as SelectedDecoder;
 
-#[cfg(test)]
-mod windows;
+#[cfg(all(target_os = "windows", feature = "windows-media-foundation"))]
+pub(crate) use windows::WindowsDecoder as SelectedDecoder;
 
 #[cfg(test)]
 pub(crate) mod fake;
