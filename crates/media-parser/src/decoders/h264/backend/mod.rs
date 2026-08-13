@@ -34,4 +34,7 @@ pub(crate) use android::AndroidDecoder as SelectedDecoder;
 pub(crate) use windows::WindowsDecoder as SelectedDecoder;
 
 #[cfg(test)]
+mod apple_videotoolbox;
+
+#[cfg(test)]
 pub(crate) mod fake;
