@@ -28,4 +28,7 @@ pub(crate) mod android;
 pub(crate) use android::AndroidDecoder as SelectedDecoder;
 
 #[cfg(test)]
+mod windows;
+
+#[cfg(test)]
 pub(crate) mod fake;
