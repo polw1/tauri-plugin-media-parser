@@ -224,6 +224,27 @@ impl OwnedNv12 {
          crop: self.crop,
       }
    }
+
+   #[cfg(test)]
+   pub(super) fn from_compact_for_test(
+      width: usize,
+      height: usize,
+      y: Vec<u8>,
+      uv: Vec<u8>,
+   ) -> Self {
+      Self {
+         width,
+         height,
+         crop: Crop {
+            x: 0,
+            y: 0,
+            width,
+            height,
+         },
+         y,
+         uv,
+      }
+   }
 }
 
 #[cfg(test)]

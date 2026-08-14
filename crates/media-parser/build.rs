@@ -17,6 +17,7 @@ fn main() {
    println!("cargo::rerun-if-changed=build.rs");
    println!("cargo::rustc-check-cfg=cfg(h264_backend)");
    println!("cargo::rustc-check-cfg=cfg(h264_backend_conflict)");
+   println!("cargo::rustc-check-cfg=cfg(apple_videotoolbox_backend)");
 
    let feature = |name: &str| std::env::var_os(name).is_some();
    let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
