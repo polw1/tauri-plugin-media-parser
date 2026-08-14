@@ -27,7 +27,13 @@ media-parser = { path = "crates/media-parser", default-features = false, feature
 [target.'cfg(target_os = "windows")'.dependencies]
 media-parser = { path = "crates/media-parser", default-features = false, features = ["thumbnails", "windows-media-foundation"] }
 
-[target.'cfg(not(any(target_os = "android", target_os = "windows")))'.dependencies]
+[target.'cfg(target_os = "macos")'.dependencies]
+media-parser = { path = "crates/media-parser", default-features = false, features = ["thumbnails", "apple-videotoolbox"] }
+
+[target.'cfg(target_os = "ios")'.dependencies]
+media-parser = { path = "crates/media-parser", default-features = false, features = ["thumbnails", "apple-videotoolbox"] }
+
+[target.'cfg(not(any(target_os = "android", target_os = "windows", target_os = "macos", target_os = "ios")))'.dependencies]
 media-parser = { path = "crates/media-parser", default-features = false }
 
 [build-dependencies]

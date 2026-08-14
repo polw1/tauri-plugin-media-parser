@@ -13,8 +13,10 @@ use std::sync::{
 };
 
 #[cfg(any(test, h264_backend))]
-pub(super) const SESSION_REQUIRES_MATCHING_PIXEL_RANGE: bool = false;
+pub(super) const SESSION_REQUIRES_MATCHING_PIXEL_RANGE: bool = cfg!(apple_videotoolbox_backend);
 
+#[cfg(apple_videotoolbox_backend)]
+const _: () = assert!(SESSION_REQUIRES_MATCHING_PIXEL_RANGE);
 #[cfg(all(target_os = "android", feature = "android-mediacodec"))]
 const _: () = assert!(!SESSION_REQUIRES_MATCHING_PIXEL_RANGE);
 #[cfg(all(target_os = "windows", feature = "windows-media-foundation"))]

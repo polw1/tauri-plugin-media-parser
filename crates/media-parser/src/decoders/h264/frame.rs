@@ -16,7 +16,11 @@ pub(crate) struct Crop {
 }
 
 /// Platform-neutral failures shared by native 4:2:0 surface adapters.
-#[cfg(any(test, all(target_os = "windows", feature = "windows-media-foundation")))]
+#[cfg(any(
+   test,
+   all(target_os = "windows", feature = "windows-media-foundation"),
+   apple_videotoolbox_backend
+))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Geometry420Error {
    InvalidCodedDimensions,
@@ -25,7 +29,7 @@ pub(crate) enum Geometry420Error {
    CropOutsideCodedGeometry,
 }
 
-#[cfg(test)]
+#[cfg(any(test, apple_videotoolbox_backend))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CompactNv12Error {
    Geometry(Geometry420Error),
@@ -33,7 +37,7 @@ pub(crate) enum CompactNv12Error {
    ResourceLimit,
 }
 
-#[cfg(test)]
+#[cfg(any(test, apple_videotoolbox_backend))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct CompactNv12Lengths {
    pub(crate) y_bytes: usize,
@@ -43,17 +47,23 @@ pub(crate) struct CompactNv12Lengths {
 #[cfg(any(
    test,
    all(target_os = "android", feature = "android-mediacodec"),
-   all(target_os = "windows", feature = "windows-media-foundation")
+   all(target_os = "windows", feature = "windows-media-foundation"),
+   apple_videotoolbox_backend
 ))]
 pub(crate) const MAX_DECODED_NV12_DIMENSION: usize = 16_384;
 #[cfg(any(
    test,
    all(target_os = "android", feature = "android-mediacodec"),
-   all(target_os = "windows", feature = "windows-media-foundation")
+   all(target_os = "windows", feature = "windows-media-foundation"),
+   apple_videotoolbox_backend
 ))]
 pub(crate) const MAX_DECODED_NV12_BYTES: usize = 64 * 1024 * 1024;
 
-#[cfg(any(test, all(target_os = "windows", feature = "windows-media-foundation")))]
+#[cfg(any(
+   test,
+   all(target_os = "windows", feature = "windows-media-foundation"),
+   apple_videotoolbox_backend
+))]
 pub(crate) fn validate_420_dimensions(
    coded_width: usize,
    coded_height: usize,
@@ -69,7 +79,11 @@ pub(crate) fn validate_420_dimensions(
    }
 }
 
-#[cfg(any(test, all(target_os = "windows", feature = "windows-media-foundation")))]
+#[cfg(any(
+   test,
+   all(target_os = "windows", feature = "windows-media-foundation"),
+   apple_videotoolbox_backend
+))]
 pub(crate) fn validate_420_crop(
    coded_width: usize,
    coded_height: usize,
@@ -96,7 +110,7 @@ pub(crate) fn validate_420_crop(
    Ok(())
 }
 
-#[cfg(test)]
+#[cfg(any(test, apple_videotoolbox_backend))]
 fn checked_compact_nv12_lengths(
    coded_width: usize,
    coded_height: usize,
@@ -113,7 +127,7 @@ fn checked_compact_nv12_lengths(
    Ok((CompactNv12Lengths { y_bytes, uv_bytes }, total_bytes))
 }
 
-#[cfg(test)]
+#[cfg(any(test, apple_videotoolbox_backend))]
 pub(crate) fn compact_nv12_lengths(
    coded_width: usize,
    coded_height: usize,

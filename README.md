@@ -276,6 +276,16 @@ The plugin also rejects output that has no NV12 type or does not expose
 `IMF2DBuffer`; it reports the unsupported layout instead of guessing native
 stride or plane offsets.
 
+On Apple platforms, thumbnails use one shared implementation of the system
+VideoToolbox H.264 decoder. On macOS, hardware acceleration is preferred but
+not required. On iOS, the backend lets VideoToolbox choose the decoder so the
+plugin remains compatible with Tauri's iOS 14 minimum; a physical device can
+use hardware decoding, while the Simulator may use Apple's software decoder.
+Direct `media-parser` consumers select this backend with `apple-videotoolbox`
+(the old `macos-videotoolbox` name remains a macOS-only compatibility alias).
+The backend copies CPU-readable NV12 output and requires neither Metal nor a
+visible desktop session.
+
 The project does not bundle a software H.264 decoder. Linux keeps the
 `get_thumbnails` command available for API compatibility, but currently returns
 `thumbnail extraction is not supported on this platform`. A native Linux

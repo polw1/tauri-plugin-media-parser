@@ -1,10 +1,10 @@
 use super::color::visit_avc_nals;
 use super::{AvcConfig, DecodeError};
-#[cfg(test)]
+#[cfg(any(test, apple_videotoolbox_backend))]
 use super::{
    MAX_AVC_PARAMETER_SET_BYTES, MAX_AVC_PICTURE_PARAMETER_SETS, MAX_AVC_SEQUENCE_PARAMETER_SETS,
 };
-#[cfg(test)]
+#[cfg(any(test, apple_videotoolbox_backend))]
 use std::collections::HashSet;
 
 const MAX_ANNEX_B_SAMPLE_BYTES: usize = 64 * 1024 * 1024;
@@ -100,7 +100,7 @@ fn annex_b_sample_len_with_sps(
    Ok(total)
 }
 
-#[cfg(test)]
+#[cfg(any(test, apple_videotoolbox_backend))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct AvcParameterSets {
    pub(crate) sps: Vec<Vec<u8>>,
@@ -111,7 +111,7 @@ pub(crate) struct AvcParameterSets {
 ///
 /// Traversal deliberately stays in `visit_avc_nals`, so deferred `avc3`
 /// initialization cannot disagree with color parsing about AVCC boundaries.
-#[cfg(test)]
+#[cfg(any(test, apple_videotoolbox_backend))]
 pub(crate) fn collect_avc_parameter_sets<'a>(
    config: &'a AvcConfig,
    sample: &'a [u8],

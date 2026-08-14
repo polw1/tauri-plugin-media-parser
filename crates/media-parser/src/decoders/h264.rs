@@ -21,9 +21,9 @@ pub struct AvcConfig {
 }
 
 pub(crate) const MAX_AVC_PARAMETER_SET_BYTES: usize = 1024 * 1024;
-#[cfg(test)]
+#[cfg(any(test, apple_videotoolbox_backend))]
 pub(crate) const MAX_AVC_SEQUENCE_PARAMETER_SETS: usize = 32;
-#[cfg(test)]
+#[cfg(any(test, apple_videotoolbox_backend))]
 pub(crate) const MAX_AVC_PICTURE_PARAMETER_SETS: usize = 256;
 
 #[cfg(feature = "thumbnails")]

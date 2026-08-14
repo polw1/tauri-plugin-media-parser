@@ -10,6 +10,13 @@ default = []
 thumbnails = ["dep:jpeg-encoder"]
 android-mediacodec = ["dep:ndk-sys"]
 windows-media-foundation = ["dep:windows"]
+apple-videotoolbox = [
+   "dep:objc2-core-foundation",
+   "dep:objc2-core-media",
+   "dep:objc2-core-video",
+   "dep:objc2-video-toolbox",
+]
+macos-videotoolbox = ["apple-videotoolbox"]
 
 [dependencies]
 thiserror = "2.0.16"
@@ -30,6 +37,23 @@ windows = { version = "0.61.3", optional = true, features = [
    "Win32_Foundation",
    "Win32_Media_MediaFoundation",
    "Win32_System_Com",
+] }
+
+[target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies]
+objc2-core-foundation = { version = "0.3.2", optional = true, default-features = false, features = [
+   "std", "CFBase", "CFDictionary", "CFNumber", "CFString",
+] }
+objc2-core-media = { version = "0.3.2", optional = true, default-features = false, features = [
+   "std", "CMBase", "CMBlockBuffer", "CMFormatDescription",
+   "CMSampleBuffer", "CMTime",
+] }
+objc2-core-video = { version = "0.3.2", optional = true, default-features = false, features = [
+   "std", "CVBase", "CVBuffer", "CVImageBuffer", "CVPixelBuffer", "CVReturn",
+] }
+objc2-video-toolbox = { version = "0.3.2", optional = true, default-features = false, features = [
+   "std", "objc2-core-media", "objc2-core-video", "VTBase",
+   "VTDecompressionProperties", "VTDecompressionSession", "VTErrors",
+   "VTSession",
 ] }
 
 [dev-dependencies]

@@ -27,14 +27,17 @@ pub(crate) mod android;
 #[cfg(any(test, all(target_os = "windows", feature = "windows-media-foundation")))]
 mod windows;
 
+#[cfg(any(test, apple_videotoolbox_backend))]
+mod apple_videotoolbox;
+
 #[cfg(all(target_os = "android", feature = "android-mediacodec"))]
 pub(crate) use android::AndroidDecoder as SelectedDecoder;
 
 #[cfg(all(target_os = "windows", feature = "windows-media-foundation"))]
 pub(crate) use windows::WindowsDecoder as SelectedDecoder;
 
-#[cfg(test)]
-mod apple_videotoolbox;
+#[cfg(apple_videotoolbox_backend)]
+pub(crate) use apple_videotoolbox::AppleVideoToolboxDecoder as SelectedDecoder;
 
 #[cfg(test)]
 pub(crate) mod fake;
