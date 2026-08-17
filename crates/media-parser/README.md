@@ -2,149 +2,170 @@
 
 ## Overview
 
-The `media-parser` crate provides an API for getting metadata, tracks, subtitles
-and frames from a local or remote MP4 media file.
+`media-parser` is an asynchronous library for reading local media files and remote
+media over HTTP range requests. It supports MP3 and the MP4 family (`.mp4`, `.m4a`,
+`.m4v`, and `.mov`) and can extract metadata, track information, and embedded cover
+art.
 
-## Examples
+With the `thumbnails` feature and one valid native decoder backend, it can also
+extract JPEG thumbnails from H.264/AVC video tracks in MP4-family containers.
 
-### 1) Metadata
+Subtitle parsing is a TODO. `MediaParser::subtitles` is part of the current API,
+but it does not parse subtitle data yet and always returns an empty list.
+
+## Reading media information
+
+The same `MediaParser` methods work with a `FileStreamReader` or an `HttpStreamReader`.
 
 ```rust
-use media_parser::{MediaParser, FileStreamReader};
+use media_parser::{FileStreamReader, MediaParser, TrackType};
 
 #[tokio::main]
 async fn main() -> media_parser::Result<()> {
-    let reader = FileStreamReader::new("video.mp4");
+    let reader = FileStreamReader::new("video.mp4")?;
     let parser = MediaParser::new(reader);
 
     let metadata = parser.metadata().await?;
-
+    println!("Format: {}", metadata.format);
     println!("Title: {:?}", metadata.get("title"));
-    println!("Artist: {:?}", metadata.get("artist"));
-    println!("Album: {:?}", metadata.get("album"));
-    // Duration is represented as raw ticks with a timescale.
-    let seconds = metadata.duration as f64 / metadata.timescale as f64;
-    println!("Duration: {:.3}s (timescale: {}, ticks: {})", seconds, metadata.timescale, metadata.duration);
+    println!("Duration: {} ticks at {} Hz", metadata.duration, metadata.timescale);
 
-    Ok(())
-}
-```
-
-### 2) Tracks
-
-```rust
-use media_parser::{MediaParser, FileStreamReader, TrackType};
-
-#[tokio::main]
-async fn main() -> media_parser::Result<()> {
-    let mut parser = MediaParser::new(FileStreamReader::new("video.mp4"));
-    let tracks = parser.tracks().await?; // Vec<TrackType>
-    for t in tracks {
-        match t {
-            TrackType::Video(v) => println!("Video #{} {}x{} ({})", v.base.id, v.width, v.height, v.base.codec),
-            TrackType::Audio(a) => println!("Audio #{} {}ch @{}Hz ({})", a.base.id, a.channels, a.sample_rate, a.base.codec),
-            TrackType::Subtitle(s) => println!("Subtitle #{} {:?}", s.base.id, s.base.language),
-            TrackType::Unknown(u) => println!("Unknown #{} {}", u.base.id, u.base.codec),
+    for track in parser.tracks().await? {
+        match track {
+            TrackType::Video(video) => {
+                println!("Video #{}: {}x{} ({})", video.base.id, video.width, video.height,
+                    video.base.codec);
+            }
+            TrackType::Audio(audio) => {
+                println!("Audio #{}: {} channels at {} Hz ({})", audio.base.id, audio.channels,
+                    audio.sample_rate, audio.base.codec);
+            }
+            TrackType::Subtitle(subtitle) => {
+                println!("Subtitle track #{}", subtitle.base.id);
+            }
+            TrackType::Unknown(unknown) => {
+                println!("Unknown track #{} ({})", unknown.base.id, unknown.base.codec);
+            }
         }
     }
-    Ok(())
-}
-```
 
-### 3) Subtitles
-
-```rust
-use media_parser::{MediaParser, FileStreamReader, TrackFilter};
-
-#[tokio::main]
-async fn main() -> media_parser::Result<()> {
-    let mut parser = MediaParser::new(FileStreamReader::new("video.mp4"));
-    let subs = parser.subtitles(Some(TrackFilter::Language("eng".into()))).await?; // Vec<SubtitleTrack>
-    for t in &subs {
-        for cue in &t.cues {
-            println!("[{:?} - {:?}] {}", cue.start_time, cue.end_time, cue.text);
-        }
+    if let Some(cover) = parser.cover().await? {
+        println!("Cover: {} ({} bytes)", cover.mime_type, cover.data.len());
     }
+
     Ok(())
 }
 ```
 
-### 4) Frames
-
-#### Single Frame
+For remote files, construct the parser with an HTTP reader. The reader uses byte-range
+requests so the parser does not need to download the entire file:
 
 ```rust
-use media_parser::{MediaParser, FileStreamReader, PixelFormat};
-use std::time::Duration;
+use media_parser::{HttpStreamReader, MediaParser};
 
 #[tokio::main]
 async fn main() -> media_parser::Result<()> {
-   let reader = FileStreamReader::new("video.mp4");
-   let parser = MediaParser::new(reader);
-
-   let frame = parser.frame(0, Duration::from_secs(30)).await?;
-
-   println!("Captured frame: {}x{} in {:?} format", frame.width, frame.height, frame.format);
-   println!("Frame data: {} bytes", frame.data.len());
-
-   match frame.format {
-      PixelFormat::Yuv420p => println!("YUV 4:2:0 format detected"),
-      PixelFormat::Rgb24 => println!("RGB format detected"),
-      _ => println!("Other format: {:?}", frame.format),
-   }
-
-   Ok(())
+    let reader = HttpStreamReader::new("https://example.com/video.mp4").await?;
+    let parser = MediaParser::new(reader);
+    let metadata = parser.metadata().await?;
+    println!("{}", metadata.format);
+    Ok(())
 }
 ```
 
-#### Multiple Frames
+## JPEG thumbnails
+
+`ThumbnailIndex` parses an MP4 video index once and reuses it across thumbnail
+requests. A track ID of `0` selects the first video track. `keyframes` returns the
+nearest preceding keyframe for each requested time; use `frames` with the same
+arguments when exact requested frames are needed. Both methods return JPEG `Frame`
+values whose timestamps report the frames actually decoded.
+
+This API is available only when `thumbnails` and a valid target backend are enabled.
 
 ```rust
-use media_parser::{MediaParser, FileStreamReader, PixelFormat};
 use std::time::Duration;
+
+use media_parser::{
+    FileStreamReader,
+    format::mp4::{ThumbnailIndex, ThumbnailOptions},
+};
 
 #[tokio::main]
 async fn main() -> media_parser::Result<()> {
-   let reader = FileStreamReader::new("video.mp4");
-   let parser = MediaParser::new(reader);
+    let reader = FileStreamReader::new("video.mp4")?;
+    let index = ThumbnailIndex::read(&reader, 0).await?;
+    let timestamps = [Duration::ZERO, Duration::from_secs(5)];
+    let frames = index
+        .keyframes(&reader, &timestamps, ThumbnailOptions::default())
+        .await?;
 
-   let timestamps = vec![
-      Duration::from_secs(10),
-      Duration::from_secs(30),
-      Duration::from_secs(60),
-      Duration::from_secs(120),
-   ];
+    for frame in frames {
+        println!("JPEG at {:?}: {} bytes", frame.timestamp, frame.data.len());
+    }
 
-   let frames = parser.frames(0, &timestamps).await?;
-
-   for (i, frame) in frames.iter().enumerate() {
-      println!("Frame {}: {}x{} ({:?})", i, frame.width, frame.height, frame.format);
-      println!("Data: {} bytes", frame.data.len());
-
-      match frame.format {
-         PixelFormat::Yuv420p => {
-            let y_size = (frame.width * frame.height) as usize;
-            let uv_size = y_size / 4;
-            println!("Y: {} bytes, U: {} bytes, V: {} bytes", y_size, uv_size, uv_size);
-         },
-         PixelFormat::Rgb24 => {
-            println!("RGB pixels: {}", frame.data.len() / 3);
-         },
-         _ => {},
-      }
-   }
-
-   println!("Generated {} frames total", frames.len());
-
-   Ok(())
+    Ok(())
 }
 ```
+
+### Thumbnail feature matrix
+
+The `thumbnails` feature requires exactly one backend that is valid for the
+compilation target. Enabling no valid backend, multiple valid backends, or a backend
+for the wrong target is a compile error.
+
+| Target | Features to enable | Availability |
+| --- | --- | --- |
+| Android | `thumbnails`, `android-mediacodec` | Android only |
+| Windows | `thumbnails`, `windows-media-foundation` | Windows only |
+| macOS or iOS | `thumbnails`, `apple-videotoolbox` | Apple targets |
+| macOS | `thumbnails`, `macos-videotoolbox` | Compatibility alias; macOS only |
+| Linux | None | No thumbnail backend is currently available |
+
+Metadata, tracks, and cover art remain available on every supported target without
+enabling `thumbnails` or a decoder backend.
+
+## Native backends and Rust bindings
+
+| Platform | System backend/API | Rust bindings | Binding license |
+| --- | --- | --- | --- |
+| Android | [MediaCodec NDK][am] | [`ndk-sys`][ndk] | MIT OR Apache-2.0 |
+| Windows | [Media Foundation][mf] | [`windows`][win] | MIT OR Apache-2.0 |
+| macOS/iOS | [VideoToolbox][vt] | [OS crates][apple-os] | Zlib OR Apache-2.0 OR MIT |
+
+The decoding backends are supplied by the target operating system or its SDK; this
+crate does not redistribute them. Their use is subject to the applicable platform
+terms: the [Android SDK terms][android-terms], the
+[Apple developer terms][apple-terms], or the applicable Windows and Windows SDK
+terms.
+
+### Apple OS crates
+
+The VideoToolbox backend uses these Rust bindings directly:
+
+   * [`objc2-video-toolbox`][objc2-video-toolbox]
+   * [`objc2-core-foundation`][objc2-core-foundation]
+   * [`objc2-core-media`][objc2-core-media]
+   * [`objc2-core-video`][objc2-core-video]
+
+[am]: https://developer.android.com/ndk/reference/group/media
+[ndk]: https://github.com/rust-mobile/ndk
+[mf]: https://learn.microsoft.com/en-us/windows/win32/medfound/about-the-media-foundation-sdk
+[win]: https://github.com/microsoft/windows-rs
+[vt]: https://developer.apple.com/documentation/videotoolbox
+[apple-os]: #apple-os-crates
+[android-terms]: https://developer.android.com/studio/terms
+[apple-terms]: https://developer.apple.com/support/terms/
+[objc2-video-toolbox]: https://docs.rs/objc2-video-toolbox/
+[objc2-core-foundation]: https://docs.rs/objc2-core-foundation/
+[objc2-core-media]: https://docs.rs/objc2-core-media/
+[objc2-core-video]: https://docs.rs/objc2-core-video/
 
 ## Development
 
-### Linting
+Run these commands from the workspace root:
 
-   * `npm run standards` - Runs all linting, including `clippy`, `rustfmt` (check only),
-     `commitlint`, `markdownlint`, etc.
-   * `npm run rust:lint` - Runs linting on Rust code only
-   * `npm run rust:lint:fix` - Formats Rust code
+   * `npm run standards` - Runs markdownlint, commitlint, Rust lint, and type tests.
+   * `npm run commitlint` - Checks commit messages from the configured base revision.
+   * `npm run rust:lint` - Runs linting on Rust code only.
+   * `npm run rust:lint:fix` - Formats and applies automatic fixes to Rust code.

@@ -2,9 +2,10 @@
 
 [![CI][ci-badge]][ci-url]
 
-A Tauri plugin to parse media files (MP3, MP4): extract metadata,
-tracks, frames, and subtitles. Async API for getting info from local
-files or HTTP streams.
+A Tauri plugin for MP3 and MP4-family media files. Its async API extracts
+metadata, track information, and embedded cover art from local files or HTTP
+streams. On supported native backends, it also extracts JPEG thumbnails from
+H.264/AVC video in MP4-family containers. Subtitle extraction is a TODO.
 
 [ci-badge]: https://github.com/silvermine/tauri-plugin-media-parser/actions/workflows/ci.yml/badge.svg
 [ci-url]: https://github.com/silvermine/tauri-plugin-media-parser/actions/workflows/ci.yml
@@ -16,32 +17,29 @@ This project is organized as a Cargo workspace with the following structure:
 ```text
 tauri-plugin-media-parser/
 ├── crates/
-│   └── media-parser/          # Rust media parser library
+│   └── media-parser/             # Tauri-independent Rust parser
 │       ├── src/
+│       │   ├── decoders/h264/  # H.264 pipeline and JPEG output
+│       │   │   └── backend/
+│       │   │       ├── android/            # MediaCodec
+│       │   │       ├── apple_videotoolbox/ # VideoToolbox
+│       │   │       └── windows/            # Media Foundation
 │       │   ├── format/
-│       │   │   ├── mp3/       # MP3 parsing (frames, duration, ID3 tags)
-│       │   │   ├── mp4/       # MP4 parsing (atoms, moov, metadata, tracks)
-│       │   │   │   └── atoms/ # Box/atom reading, iteration, navigation, media atom parsing
-│       │   │   ├── registry.rs # Format detection and parser dispatch
+│       │   │   ├── mp3/       # ID3 metadata, cover art, tracks, duration
+│       │   │   ├── mp4/       # Metadata, tracks, thumbnails, subtitle TODO
+│       │   │   │   └── atoms/ # MP4 box parsing and navigation
+│       │   │   ├── registry.rs # Detection and parser dispatch
 │       │   │   └── signatures.rs # Markers and extension mappings
-│       │   ├── helpers/       # Byte reading, text decoding utilities
-│       │   ├── errors.rs
-│       │   ├── lib.rs
-│       │   ├── stream.rs
-│       │   └── types.rs
+│       │   ├── helpers/       # Byte, text, image, and FFI utilities
+│       │   ├── stream.rs      # Local and HTTP range readers
+│       │   └── types.rs       # Metadata, track, cover, and thumbnail types
 │       └── Cargo.toml
-├── src/                        # Tauri plugin implementation
-│   ├── commands.rs             # Plugin commands
-│   ├── error.rs                 # Error types
-│   └── lib.rs                   # Main plugin code
-├── guest-js/                    # JavaScript/TypeScript bindings
-│   ├── index.ts
-│   └── tsconfig.json
-├── permissions/                 # Permission definitions (mostly generated)
-├── dist-js/                     # Compiled JS (generated)
-├── Cargo.toml                   # Workspace configuration
-├── package.json                 # NPM package configuration
-└── build.rs                     # Build script
+├── src/                           # Commands, binary envelopes, session cache
+├── guest-js/                      # TypeScript API, types, and validation
+├── permissions/                   # Tauri command permissions
+├── ios/                           # iOS package integration
+├── Cargo.toml                     # Workspace and platform feature wiring
+└── package.json                   # NPM package and development scripts
 ```
 
 ## Crates
@@ -49,9 +47,13 @@ tauri-plugin-media-parser/
 ### media-parser
 
 A Rust module with no dependencies on Tauri or its plugin architecture. It
-provides an async API for parsing MP4 media files, extracting metadata, tracks,
-subtitles, and frames from local files or HTTP streams. It's designed to be
-published as a standalone crate in the future with minimal changes.
+provides an async API for parsing MP3 and MP4-family files from local files or
+HTTP streams, including metadata, track information, embedded cover art, and
+MP4/H.264 JPEG thumbnails through `ThumbnailIndex`. Using `ThumbnailIndex`
+requires the `thumbnails` feature and exactly one platform-appropriate native
+backend feature. Subtitle extraction is a TODO; `MediaParser::subtitles`
+currently returns an empty list. It's designed to be published as a standalone
+crate in the future with minimal changes.
 
 See [`crates/media-parser/README.md`](crates/media-parser/README.md)
 for more details.
@@ -286,10 +288,38 @@ Direct `media-parser` consumers select this backend with `apple-videotoolbox`
 The backend copies CPU-readable NV12 output and requires neither Metal nor a
 visible desktop session.
 
-The project does not bundle a software H.264 decoder. Linux keeps the
-`get_thumbnails` command available for API compatibility, but currently returns
-`thumbnail extraction is not supported on this platform`. A native Linux
-backend will be added separately.
+Thumbnail decoding uses system backends: Android MediaCodec, Windows Media
+Foundation, and macOS/iOS VideoToolbox. Linux does not yet have a thumbnail
+backend; `get_thumbnails` remains available for API compatibility and returns
+`thumbnail extraction is not supported on this platform`.
+
+| Platform | System backend/API | Rust binding | Binding license |
+|----------|--------------------|--------------|-----------------|
+| Android | [MediaCodec NDK][android-mediacodec] | [`ndk-sys`][ndk-sys] | MIT OR Apache-2.0 |
+| Windows | [Media Foundation][media-foundation] | [`windows`][windows-rs] | MIT OR Apache-2.0 |
+| macOS / iOS | [VideoToolbox][videotoolbox] | `objc2` framework crates | Zlib OR Apache-2.0 OR MIT |
+
+The Apple backend directly uses [`objc2-video-toolbox`][objc2-video-toolbox],
+[`objc2-core-foundation`][objc2-core-foundation],
+[`objc2-core-media`][objc2-core-media], and
+[`objc2-core-video`][objc2-core-video].
+
+MediaCodec, Media Foundation, and VideoToolbox are system/SDK components and
+are not redistributed by this plugin. Their use is subject to the applicable
+platform terms: [Android SDK terms][android-sdk-terms], applicable Windows and
+Windows SDK terms, and [Apple agreements][apple-agreements].
+
+[android-mediacodec]: https://developer.android.com/ndk/reference/group/media
+[android-sdk-terms]: https://developer.android.com/studio/terms
+[ndk-sys]: https://github.com/rust-mobile/ndk
+[media-foundation]: https://learn.microsoft.com/en-us/windows/win32/medfound/about-the-media-foundation-sdk
+[windows-rs]: https://github.com/microsoft/windows-rs
+[videotoolbox]: https://developer.apple.com/documentation/videotoolbox
+[apple-agreements]: https://developer.apple.com/support/terms/
+[objc2-video-toolbox]: https://docs.rs/objc2-video-toolbox/
+[objc2-core-foundation]: https://docs.rs/objc2-core-foundation/
+[objc2-core-media]: https://docs.rs/objc2-core-media/
+[objc2-core-video]: https://docs.rs/objc2-core-video/
 
 ## Development Standards
 
