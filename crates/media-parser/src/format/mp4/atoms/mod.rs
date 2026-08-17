@@ -36,6 +36,7 @@ pub use moov::find_and_read_moov_box;
 pub(super) use moov::parse_moov_payload;
 pub use nav::{Mp4Nav, find_box_ref};
 pub use read::{BoxRead, read_box};
+pub(super) use tags::find_ilst_in_meta;
 pub use tags::{fourcc_to_key, tag_name};
 pub use types::Mp4Box;
 

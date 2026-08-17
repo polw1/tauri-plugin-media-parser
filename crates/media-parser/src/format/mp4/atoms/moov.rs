@@ -108,13 +108,25 @@ async fn read_moov_at(
       return Ok(buf[local_start..local_end].to_vec());
    }
 
-   // Read directly
    let mut moov_buf = vec![0u8; size_usize];
-   let read = reader.read_at(pos, &mut moov_buf).await?;
-   if read != size_usize {
+   let buffered = buf
+      .get(local_start..)
+      .map_or(0, |available| available.len().min(size_usize));
+   if buffered != 0 {
+      moov_buf[..buffered].copy_from_slice(&buf[local_start..local_start + buffered]);
+   }
+
+   let read_offset = pos.checked_add(buffered as u64).ok_or_else(|| {
+      crate::errors::MediaParserError::InvalidFormat("moov offset overflow".into())
+   })?;
+   let read = reader
+      .read_at(read_offset, &mut moov_buf[buffered..])
+      .await?;
+   let total_read = buffered + read;
+   if total_read != size_usize {
       return Err(crate::errors::MediaParserError::InvalidFormat(format!(
          "truncated moov box: expected {} bytes, read {}",
-         size_usize, read
+         size_usize, total_read
       )));
    }
    Ok(moov_buf)
@@ -175,7 +187,10 @@ fn find_moov_pattern(buf: &[u8], base_offset: u64, file_size: u64) -> Option<(u6
 #[cfg(test)]
 mod tests {
    use super::*;
-   use std::sync::atomic::{AtomicBool, Ordering};
+   use std::sync::{
+      Mutex,
+      atomic::{AtomicBool, Ordering},
+   };
 
    struct ReadBeforeSizeReader {
       data: Vec<u8>,
@@ -201,6 +216,28 @@ mod tests {
                "size was requested before the initial range read".to_string(),
             ));
          }
+         Ok(self.data.len() as u64)
+      }
+   }
+
+   struct RecordingReader {
+      data: Vec<u8>,
+      reads: Mutex<Vec<(u64, usize)>>,
+   }
+
+   #[async_trait::async_trait]
+   impl StreamReader for RecordingReader {
+      async fn read_at(&self, offset: u64, buf: &mut [u8]) -> Result<usize> {
+         self.reads.lock().unwrap().push((offset, buf.len()));
+         let start = usize::try_from(offset)
+            .unwrap_or(usize::MAX)
+            .min(self.data.len());
+         let read = buf.len().min(self.data.len() - start);
+         buf[..read].copy_from_slice(&self.data[start..start + read]);
+         Ok(read)
+      }
+
+      async fn size(&self) -> Result<u64> {
          Ok(self.data.len() as u64)
       }
    }
@@ -249,6 +286,33 @@ mod tests {
          .expect("the first read should make the size available");
 
       assert_eq!(moov, reader.data);
+   }
+
+   #[tokio::test]
+   async fn reuses_the_scanned_head_when_reading_a_larger_moov() {
+      let mut moov_payload = make_box(b"mvhd", 100);
+      moov_payload.extend(make_box(b"free", HEAD_SIZE));
+      let mut moov = ((8 + moov_payload.len()) as u32).to_be_bytes().to_vec();
+      moov.extend_from_slice(b"moov");
+      moov.extend(moov_payload);
+      let mut data = make_box(b"ftyp", 8);
+      let moov_offset = data.len();
+      data.extend_from_slice(&moov);
+      let reader = RecordingReader {
+         data,
+         reads: Mutex::new(Vec::new()),
+      };
+
+      let actual = find_and_read_moov_box(&reader).await.unwrap();
+
+      assert_eq!(actual, moov);
+      assert_eq!(
+         *reader.reads.lock().unwrap(),
+         vec![
+            (0, HEAD_SIZE),
+            (HEAD_SIZE as u64, moov_offset + moov.len() - HEAD_SIZE),
+         ]
+      );
    }
 
    #[test]

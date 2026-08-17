@@ -108,6 +108,10 @@ impl ThumbnailIndex {
 
    pub(super) fn from_moov(moov: &[u8], track_id: u32) -> Result<Self> {
       let moov_payload = parse_moov_payload(moov)?;
+      Self::from_moov_payload(moov_payload, track_id)
+   }
+
+   pub(super) fn from_moov_payload(moov_payload: &[u8], track_id: u32) -> Result<Self> {
       let (track, tables) = find_video_track(moov_payload, track_id)?.ok_or(
          MediaParserError::TrackNotFound(if track_id == 0 { 1 } else { track_id }),
       )?;
@@ -149,65 +153,35 @@ impl ThumbnailIndex {
       for (index, target) in targets.iter().enumerate() {
          targets_by_gop.entry(target.gop).or_default().push(index);
       }
-      validate_gop_sample_budget(&targets_by_gop, &targets)?;
+      let truncated_gops = truncate_and_validate_gops(targets_by_gop, &targets)?;
 
       let mut plans = Vec::new();
       plans
-         .try_reserve(targets_by_gop.len())
+         .try_reserve(truncated_gops.len())
          .map_err(|_| MediaParserError::InvalidFormat("too many thumbnail GOPs".to_string()))?;
-      for (gop, target_indices) in &targets_by_gop {
+      for (gop, target_indices) in truncated_gops {
          plans.push(plan_gop_job(
             &self.timeline,
-            *gop,
-            target_indices,
+            gop,
+            &target_indices,
             &mut targets,
          )?);
       }
 
-      let wanted_samples = samples_for_gops(plans.iter().map(|plan| plan.gop))?;
-      let mut samples = read_samples_coalesced(
-         reader,
-         &wanted_samples,
-         &self.tables.sizes,
-         &self.tables.stsc,
-         &self.tables.chunk_offsets,
-      )
-      .await?;
+      self
+         .execute_job_plans(reader, targets, plans, options, "too many thumbnail GOPs")
+         .await
+   }
 
-      let mut jobs = Vec::new();
-      jobs
-         .try_reserve(plans.len())
-         .map_err(|_| MediaParserError::InvalidFormat("too many thumbnail GOPs".to_string()))?;
-      for plan in plans {
-         let avc_config =
-            avc_config_for_range(&self.tables, plan.gop.start_sample, plan.gop.end_sample)?.clone();
-         let gop_len = plan
-            .gop
-            .end_sample
-            .checked_sub(plan.gop.start_sample)
-            .and_then(|count| count.checked_add(1))
-            .and_then(|count| usize::try_from(count).ok())
-            .ok_or_else(|| {
-               MediaParserError::InvalidFormat("thumbnail GOP is too large".to_string())
-            })?;
-         let mut gop_samples = Vec::new();
-         gop_samples.try_reserve(gop_len).map_err(|_| {
-            MediaParserError::InvalidFormat("thumbnail GOP is too large".to_string())
-         })?;
-         for sample_index in plan.gop.start_sample..=plan.gop.end_sample {
-            gop_samples.push(samples.remove(&sample_index).ok_or_else(|| {
-               MediaParserError::InvalidFormat(format!("missing thumbnail sample {sample_index}"))
-            })?);
-         }
-         jobs.push(DecodeJob {
-            gop: plan.gop,
-            avc_config,
-            samples: gop_samples,
-            tokens: plan.tokens,
-            wanted: plan.wanted,
-         });
-      }
-
+   async fn execute_job_plans(
+      &self,
+      reader: &dyn StreamReader,
+      targets: Vec<ExactTarget>,
+      plans: Vec<JobPlan>,
+      options: ThumbnailOptions,
+      reserve_error: &'static str,
+   ) -> Result<Vec<Frame>> {
+      let jobs = load_decode_jobs(reader, plans, &self.tables, reserve_error).await?;
       let images = run_decode_jobs(
          jobs,
          options.quality,
@@ -243,44 +217,31 @@ impl ThumbnailIndex {
             .entry(target.sample_index)
             .or_insert(0) += 1usize;
       }
-      let mut samples = read_samples_coalesced(
-         reader,
-         &unique_samples,
-         &self.tables.sizes,
-         &self.tables.stsc,
-         &self.tables.chunk_offsets,
-      )
-      .await?;
 
-      let mut jobs = Vec::new();
-      jobs.try_reserve(unique_samples.len()).map_err(|_| {
+      let mut plans = Vec::new();
+      plans.try_reserve(unique_samples.len()).map_err(|_| {
          MediaParserError::InvalidFormat("too many thumbnail keyframes".to_string())
       })?;
       for sample_index in unique_samples {
-         let avc_config = avc_config_for_range(&self.tables, sample_index, sample_index)?.clone();
-         let sample = samples.remove(&sample_index).ok_or_else(|| {
-            MediaParserError::InvalidFormat(format!("missing thumbnail sample {sample_index}"))
-         })?;
-         jobs.push(DecodeJob {
+         plans.push(JobPlan {
             gop: Gop {
                start_sample: sample_index,
                end_sample: sample_index,
             },
-            avc_config,
-            samples: vec![sample],
             tokens: vec![FrameToken::new(0)],
             wanted: vec![(FrameToken::new(0), output_count_by_sample[&sample_index])],
          });
       }
 
-      let images = run_decode_jobs(
-         jobs,
-         options.quality,
-         options.size,
-         options.max_output_bytes,
-      )
-      .await?;
-      assemble_frames(&self.track, targets, images)
+      self
+         .execute_job_plans(
+            reader,
+            targets,
+            plans,
+            options,
+            "too many thumbnail keyframes",
+         )
+         .await
    }
 
    fn validate_timestamps(&self, timestamps: &[Duration]) -> Result<()> {
@@ -301,6 +262,51 @@ impl ThumbnailIndex {
       }
       Ok(())
    }
+}
+
+async fn load_decode_jobs(
+   reader: &dyn StreamReader,
+   plans: Vec<JobPlan>,
+   tables: &VideoSampleTables,
+   reserve_error: &'static str,
+) -> Result<Vec<DecodeJob>> {
+   let wanted_samples = samples_for_gops(plans.iter().map(|plan| plan.gop))?;
+   let mut samples = read_samples_coalesced(
+      reader,
+      &wanted_samples,
+      &tables.sizes,
+      &tables.stsc,
+      &tables.chunk_offsets,
+   )
+   .await?;
+
+   let mut jobs = Vec::new();
+   jobs
+      .try_reserve(plans.len())
+      .map_err(|_| MediaParserError::InvalidFormat(reserve_error.to_string()))?;
+   for plan in plans {
+      let avc_config =
+         avc_config_for_range(tables, plan.gop.start_sample, plan.gop.end_sample)?.clone();
+      let gop_len = gop_sample_count(plan.gop)
+         .map_err(|_| MediaParserError::InvalidFormat("thumbnail GOP is too large".to_string()))?;
+      let mut gop_samples = Vec::new();
+      gop_samples
+         .try_reserve(gop_len)
+         .map_err(|_| MediaParserError::InvalidFormat("thumbnail GOP is too large".to_string()))?;
+      for sample_index in plan.gop.start_sample..=plan.gop.end_sample {
+         gop_samples.push(samples.remove(&sample_index).ok_or_else(|| {
+            MediaParserError::InvalidFormat(format!("missing thumbnail sample {sample_index}"))
+         })?);
+      }
+      jobs.push(DecodeJob {
+         gop: plan.gop,
+         avc_config,
+         samples: gop_samples,
+         tokens: plan.tokens,
+         wanted: plan.wanted,
+      });
+   }
+   Ok(jobs)
 }
 
 /// Native backends keep one compatible decoder alive across
@@ -608,11 +614,10 @@ fn exact_target(
 /// earlier samples, so positions differ from the full-GOP order.
 fn plan_gop_job(
    timeline: &PresentationTimeline,
-   gop: Gop,
+   truncated: Gop,
    target_indices: &[usize],
    targets: &mut [ExactTarget],
 ) -> Result<JobPlan> {
-   let truncated = truncated_gop(gop, target_indices, targets)?;
    let gop_len = gop_sample_count(truncated)?;
    if gop_len > MAX_SAMPLES_PER_THUMBNAIL_BATCH {
       return Err(too_many_thumbnail_samples());
@@ -722,21 +727,26 @@ fn too_many_thumbnail_samples() -> MediaParserError {
    MediaParserError::InvalidFormat("too many thumbnail samples".to_string())
 }
 
-fn validate_gop_sample_budget(
-   targets_by_gop: &BTreeMap<Gop, Vec<usize>>,
+fn truncate_and_validate_gops(
+   targets_by_gop: BTreeMap<Gop, Vec<usize>>,
    targets: &[ExactTarget],
-) -> Result<()> {
+) -> Result<Vec<(Gop, Vec<usize>)>> {
    let mut total = 0usize;
+   let mut truncated_gops = Vec::new();
+   truncated_gops
+      .try_reserve(targets_by_gop.len())
+      .map_err(|_| too_many_thumbnail_samples())?;
    for (gop, target_indices) in targets_by_gop {
-      let truncated = truncated_gop(*gop, target_indices, targets)?;
+      let truncated = truncated_gop(gop, &target_indices, targets)?;
       total = total
          .checked_add(gop_sample_count(truncated)?)
          .ok_or_else(too_many_thumbnail_samples)?;
       if total > MAX_SAMPLES_PER_THUMBNAIL_BATCH {
          return Err(too_many_thumbnail_samples());
       }
+      truncated_gops.push((truncated, target_indices));
    }
-   Ok(())
+   Ok(truncated_gops)
 }
 
 fn keyframe_target(
@@ -780,11 +790,7 @@ fn frame_from_image(track: &VideoTrack, presentation_tick: u64, image: DecodedIm
 fn samples_for_gops(gops: impl Iterator<Item = Gop>) -> Result<Vec<u32>> {
    let gops = gops.collect::<Vec<_>>();
    let sample_count = gops.iter().try_fold(0usize, |total, gop| {
-      let count = gop
-         .end_sample
-         .checked_sub(gop.start_sample)?
-         .checked_add(1)?;
-      total.checked_add(usize::try_from(count).ok()?)
+      total.checked_add(gop_sample_count(*gop).ok()?)
    });
    let sample_count = sample_count
       .filter(|count| *count <= MAX_SAMPLES_PER_THUMBNAIL_BATCH)
@@ -1056,7 +1062,7 @@ mod tests {
       ];
       let targets_by_gop = BTreeMap::from([(targets[0].gop, vec![0]), (targets[1].gop, vec![1])]);
 
-      let error = validate_gop_sample_budget(&targets_by_gop, &targets)
+      let error = truncate_and_validate_gops(targets_by_gop, &targets)
          .expect_err("the combined sample budget must be checked before planning jobs");
 
       assert_eq!(
@@ -1079,7 +1085,7 @@ mod tests {
       }];
       let targets_by_gop = BTreeMap::from([(targets[0].gop, vec![0])]);
 
-      validate_gop_sample_budget(&targets_by_gop, &targets).unwrap();
+      truncate_and_validate_gops(targets_by_gop, &targets).unwrap();
    }
 
    #[test]

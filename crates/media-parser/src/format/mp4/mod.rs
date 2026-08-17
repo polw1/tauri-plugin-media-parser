@@ -96,8 +96,9 @@ pub async fn read_tracks_and_thumbnail_index(
    track_id: u32,
 ) -> Result<(Vec<TrackType>, Option<ThumbnailIndex>)> {
    let moov = atoms::find_and_read_moov_box(reader).await?;
-   let tracks = tracks::parse_tracks_from_moov(&moov)?;
-   let index = ThumbnailIndex::from_moov(&moov, track_id).ok();
+   let moov_payload = atoms::parse_moov_payload(&moov)?;
+   let tracks = tracks::parse_tracks_from_moov_payload(moov_payload)?;
+   let index = ThumbnailIndex::from_moov_payload(moov_payload, track_id).ok();
    Ok((tracks, index))
 }
 

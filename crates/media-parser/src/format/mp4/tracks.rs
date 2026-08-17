@@ -45,7 +45,10 @@ pub async fn read_tracks(reader: &dyn StreamReader) -> Result<Vec<TrackType>> {
 
 pub(super) fn parse_tracks_from_moov(moov_data: &[u8]) -> Result<Vec<TrackType>> {
    let moov_payload = parse_moov_payload(moov_data)?;
+   parse_tracks_from_moov_payload(moov_payload)
+}
 
+pub(super) fn parse_tracks_from_moov_payload(moov_payload: &[u8]) -> Result<Vec<TrackType>> {
    let mut tracks = Vec::new();
    let mut trak_count = 0usize;
    let mut malformed_count = 0usize;
