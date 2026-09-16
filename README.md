@@ -329,6 +329,8 @@ batch.
 The plugin caches up to eight parsed thumbnail sessions. Remote sessions expire
 five minutes after they are built, and local sessions after one minute without
 reuse; concurrent requests for the same cold source share one index build.
+Up to two thumbnail extractions run at once across sessions. Additional requests
+wait before reading video samples; this limit is independent of the index cache.
 
 H.264 decoding and JPEG encoding are prohibitively slow when their dependencies
 use Cargo's unoptimized development profile. Add this to the Tauri

@@ -43,11 +43,22 @@ mod jpeg;
 #[cfg(feature = "thumbnails")]
 mod pipeline;
 
-#[cfg(not(all(target_os = "android", feature = "android-mediacodec")))]
-use bitstream::config_with_max_input_size;
-#[cfg(any(test, all(target_os = "android", feature = "android-mediacodec")))]
-use bitstream::config_with_max_input_size_and_sps;
-#[cfg(any(test, all(target_os = "android", feature = "android-mediacodec")))]
+#[cfg(not(any(
+   apple_videotoolbox_backend,
+   all(target_os = "android", feature = "android-mediacodec")
+)))]
+use bitstream::max_input_size;
+#[cfg(any(
+   test,
+   apple_videotoolbox_backend,
+   all(target_os = "android", feature = "android-mediacodec")
+))]
+use bitstream::max_input_size_and_sps;
+#[cfg(any(
+   test,
+   apple_videotoolbox_backend,
+   all(target_os = "android", feature = "android-mediacodec")
+))]
 use color::sps_coded_dimensions;
 #[cfg(feature = "thumbnails")]
 pub(crate) use error::DecodeError;
@@ -149,17 +160,45 @@ pub struct DecodedImage {
 }
 
 #[cfg(feature = "thumbnails")]
-fn prepare_job_config<S: AsRef<[u8]>>(
+fn prepare_job_config(
+   config: &AvcConfig,
+   max_input_size: usize,
+   resolved_full_range: bool,
+) -> AvcConfig {
+   let mut prepared = config.clone();
+   prepared.max_input_size = Some(max_input_size);
+   prepared.resolved_full_range = Some(resolved_full_range);
+   prepared
+}
+
+#[cfg(feature = "thumbnails")]
+fn prepare_job_max_input_size<S: AsRef<[u8]>>(
    config: &AvcConfig,
    samples: &[S],
-   resolved_full_range: bool,
-) -> Result<AvcConfig, DecodeError> {
+) -> Result<usize, DecodeError> {
    #[cfg(all(target_os = "android", feature = "android-mediacodec"))]
-   let mut prepared = prepare_android_job_config(config, samples)?;
-   #[cfg(not(all(target_os = "android", feature = "android-mediacodec")))]
-   let mut prepared = config_with_max_input_size(config, samples)?;
-   prepared.resolved_full_range = Some(resolved_full_range);
-   Ok(prepared)
+   let max_input_size = prepare_android_max_input_size(config, samples)?;
+   #[cfg(apple_videotoolbox_backend)]
+   let max_input_size = prepare_apple_max_input_size(config, samples)?;
+   #[cfg(not(any(
+      all(target_os = "android", feature = "android-mediacodec"),
+      apple_videotoolbox_backend
+   )))]
+   let max_input_size = max_input_size(config, samples)?;
+   Ok(max_input_size)
+}
+
+#[cfg(any(test, apple_videotoolbox_backend))]
+fn prepare_apple_max_input_size<S: AsRef<[u8]>>(
+   config: &AvcConfig,
+   samples: &[S],
+) -> Result<usize, DecodeError> {
+   max_input_size_and_sps(config, samples, |sps| {
+      let (width, height) = sps_coded_dimensions(sps).ok_or_else(|| {
+         DecodeError::Bitstream("cannot validate Apple VideoToolbox SPS dimensions".to_string())
+      })?;
+      backend::apple_videotoolbox::validate_sps_dimensions(width, height)
+   })
 }
 
 #[cfg(any(test, all(target_os = "android", feature = "android-mediacodec")))]
@@ -168,12 +207,12 @@ fn validate_android_job_dimensions(width: u32, height: u32) -> Result<(), Decode
 }
 
 #[cfg(any(test, all(target_os = "android", feature = "android-mediacodec")))]
-fn prepare_android_job_config<S: AsRef<[u8]>>(
+fn prepare_android_max_input_size<S: AsRef<[u8]>>(
    config: &AvcConfig,
    samples: &[S],
-) -> Result<AvcConfig, DecodeError> {
+) -> Result<usize, DecodeError> {
    validate_android_job_dimensions(config.display_width, config.display_height)?;
-   config_with_max_input_size_and_sps(config, samples, |sps| {
+   max_input_size_and_sps(config, samples, |sps| {
       let Some((width, height)) = sps_coded_dimensions(sps) else {
          return Ok(());
       };
@@ -293,7 +332,8 @@ mod tests {
       };
       let samples = vec![vec![1, 0x41]];
 
-      let prepared = prepare_job_config(&config, &samples, true).expect("valid job input");
+      let max_input_size = prepare_job_max_input_size(&config, &samples).expect("valid job input");
+      let prepared = prepare_job_config(&config, max_input_size, true);
 
       assert_eq!(prepared.max_input_size, Some(5));
       assert_eq!(prepared.resolved_full_range, Some(true));
@@ -327,10 +367,10 @@ mod tests {
    fn android_preflight_validates_each_real_sps_pair() {
       let config = android_preflight_config(vec![geometry_sps(1_023, 0), geometry_sps(0, 1_023)]);
 
-      let prepared = prepare_android_job_config(&config, &[vec![1, 0x65]])
+      let prepared = prepare_android_max_input_size(&config, &[vec![1, 0x65]])
          .expect("each wide/short and narrow/tall SPS fits independently");
 
-      assert_eq!(prepared.max_input_size, Some(5));
+      assert_eq!(prepared, 5);
    }
 
    #[test]
@@ -338,7 +378,7 @@ mod tests {
       let oversized = geometry_sps(1_024, 0);
       let config = android_preflight_config(vec![oversized.clone()]);
       assert!(matches!(
-         prepare_android_job_config(&config, &[vec![1, 0x65]]),
+         prepare_android_max_input_size(&config, &[vec![1, 0x65]]),
          Err(DecodeError::ResourceLimit(_))
       ));
 
@@ -346,13 +386,13 @@ mod tests {
       let mut sample = vec![u8::try_from(oversized.len()).expect("test SPS fits one-byte length")];
       sample.extend_from_slice(&oversized);
       assert!(matches!(
-         prepare_android_job_config(&config, &[sample]),
+         prepare_android_max_input_size(&config, &[sample]),
          Err(DecodeError::ResourceLimit(_))
       ));
 
       let huge_u64_geometry = android_preflight_config(vec![geometry_sps(u32::MAX - 1, 0)]);
       assert!(matches!(
-         prepare_android_job_config(&huge_u64_geometry, &[vec![1, 0x65]]),
+         prepare_android_max_input_size(&huge_u64_geometry, &[vec![1, 0x65]]),
          Err(DecodeError::ResourceLimit(_))
       ));
    }
@@ -361,6 +401,55 @@ mod tests {
    fn android_preflight_keeps_unparseable_sps_permissive() {
       let config = android_preflight_config(vec![vec![0x67, 144, 0, 30, 0x80]]);
 
-      assert!(prepare_android_job_config(&config, &[vec![1, 0x65]]).is_ok());
+      assert!(prepare_android_max_input_size(&config, &[vec![1, 0x65]]).is_ok());
+   }
+
+   #[test]
+   fn apple_preflight_rejects_oversized_config_and_in_band_sps() {
+      for sps in [
+         geometry_sps(1_024, 0),
+         geometry_sps(511, 511),
+         geometry_sps(u32::MAX - 1, 0),
+      ] {
+         let config = android_preflight_config(vec![sps.clone()]);
+         assert!(matches!(
+            prepare_apple_max_input_size(&config, &[vec![1, 0x65]]),
+            Err(DecodeError::ResourceLimit(_))
+         ));
+         let config = android_preflight_config(Vec::new());
+         let mut sample = vec![u8::try_from(sps.len()).unwrap()];
+         sample.extend_from_slice(&sps);
+         assert!(matches!(
+            prepare_apple_max_input_size(&config, &[vec![1, 0x65], sample]),
+            Err(DecodeError::ResourceLimit(_))
+         ));
+      }
+   }
+
+   #[test]
+   fn apple_preflight_rejects_unparseable_config_and_in_band_sps() {
+      let sps = vec![0x67, 144, 0, 30, 0x80];
+      let config = android_preflight_config(vec![sps.clone()]);
+      assert!(matches!(
+         prepare_apple_max_input_size(&config, &[vec![1, 0x65]]),
+         Err(DecodeError::Bitstream(_))
+      ));
+
+      let config = android_preflight_config(Vec::new());
+      let mut sample = vec![u8::try_from(sps.len()).unwrap()];
+      sample.extend_from_slice(&sps);
+      assert!(matches!(
+         prepare_apple_max_input_size(&config, &[sample]),
+         Err(DecodeError::Bitstream(_))
+      ));
+   }
+
+   #[test]
+   fn apple_preflight_accepts_bounded_sps_independent_of_display_crop() {
+      let mut config =
+         android_preflight_config(vec![geometry_sps(1_023, 0), geometry_sps(0, 1_023)]);
+      config.display_width = 3;
+      config.display_height = 3;
+      assert!(prepare_apple_max_input_size(&config, &[vec![1, 0x65]]).is_ok());
    }
 }

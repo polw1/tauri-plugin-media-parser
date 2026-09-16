@@ -246,6 +246,12 @@ aspect ratio without upscaling. Compatible GOPs reuse a native decoder within th
 request. Compressed samples retain shared, bounded read regions through decoding.
 Index construction and decoding run on the blocking pool; thumbnail and subtitle
 index construction share the concurrency limit.
+Thumbnail extractions have a separate process-wide limit of two active requests,
+covering sample reads, decoding and output assembly. Queued requests wait before
+reading compressed samples. Cancelling a caller does not release its decoder's
+slot until the blocking work finishes. Existing per-request byte limits still apply.
+Apple validates coded SPS dimensions against the existing NV12 limits before
+opening VideoToolbox; SPS geometry that cannot be parsed is rejected.
 
 ## Native backend validation
 

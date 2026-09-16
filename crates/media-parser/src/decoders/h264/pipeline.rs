@@ -5,7 +5,8 @@ use super::color::{GopColor, resolve_gop_color};
 use super::frame;
 use super::jpeg::yuv_to_jpeg as planar_yuv_to_jpeg;
 use super::{
-   AvcConfig, DecodeError, DecodedImage, FrameToken, JpegQuality, ThumbnailSize, prepare_job_config,
+   AvcConfig, DecodeError, DecodedImage, FrameToken, JpegQuality, ThumbnailSize,
+   prepare_job_config, prepare_job_max_input_size,
 };
 use std::sync::{
    Arc,
@@ -90,6 +91,12 @@ pub(crate) struct DecodeBatch<'a, S> {
 }
 
 #[cfg(any(test, h264_backend))]
+struct PreparedBatch {
+   color: GopColor,
+   max_input_size: usize,
+}
+
+#[cfg(any(test, h264_backend))]
 pub(super) fn decoder_session_compatible(
    first_config: &AvcConfig,
    first_color: GopColor,
@@ -114,36 +121,47 @@ pub(crate) fn decode_frame_batches_to_jpeg_with<D: H264Decoder, S: AsRef<[u8]>>(
       .try_reserve_exact(batches.len())
       .map_err(|_| DecodeError::ResourceLimit("too many H.264 decode batches".to_string()))?;
 
+   let mut metadata = Vec::new();
+   metadata
+      .try_reserve_exact(batches.len())
+      .map_err(|_| DecodeError::ResourceLimit("too many H.264 decode batches".to_string()))?;
+   for batch in batches {
+      metadata.push(PreparedBatch {
+         color: resolve_gop_color(batch.config, batch.samples),
+         max_input_size: prepare_job_max_input_size(batch.config, batch.samples)?,
+      });
+   }
+
    let mut group_start = 0;
    while group_start < batches.len() {
       let config = batches[group_start].config;
-      let first = &batches[group_start];
-      let first_color = resolve_gop_color(first.config, first.samples);
+      let first_color = metadata[group_start].color;
       let group_end = batches[group_start + 1..]
          .iter()
-         .position(|batch| {
-            let color = resolve_gop_color(batch.config, batch.samples);
+         .zip(&metadata[group_start + 1..])
+         .position(|(batch, prepared)| {
             !decoder_session_compatible(
                config,
                first_color,
                batch.config,
-               color,
+               prepared.color,
                SESSION_REQUIRES_MATCHING_PIXEL_RANGE,
             )
          })
          .map_or(batches.len(), |offset| group_start + 1 + offset);
 
-      let mut prepared = prepare_job_config(first.config, first.samples, first_color.full_range)?;
-      for batch in &batches[group_start + 1..group_end] {
-         let color = resolve_gop_color(batch.config, batch.samples);
-         let candidate = prepare_job_config(batch.config, batch.samples, color.full_range)?;
-         prepared.max_input_size = prepared.max_input_size.max(candidate.max_input_size);
-      }
+      let max_input_size = metadata[group_start + 1..group_end]
+         .iter()
+         .fold(metadata[group_start].max_input_size, |largest, batch| {
+            largest.max(batch.max_input_size)
+         });
+      let prepared = prepare_job_config(config, max_input_size, first_color.full_range);
 
       let decoder = open(&prepared)?;
       output.extend(decode_compatible_frame_batches_to_jpeg_with(
          decoder,
          &batches[group_start..group_end],
+         &metadata[group_start..group_end],
          quality,
          size,
          output_budget,
@@ -157,6 +175,7 @@ pub(crate) fn decode_frame_batches_to_jpeg_with<D: H264Decoder, S: AsRef<[u8]>>(
 fn decode_compatible_frame_batches_to_jpeg_with<D: H264Decoder, S: AsRef<[u8]>>(
    mut decoder: D,
    batches: &[H264DecodeBatch<'_, S>],
+   metadata: &[PreparedBatch],
    quality: JpegQuality,
    size: ThumbnailSize,
    output_budget: &OutputBudget,
@@ -165,12 +184,17 @@ fn decode_compatible_frame_batches_to_jpeg_with<D: H264Decoder, S: AsRef<[u8]>>(
    decode_batches
       .try_reserve_exact(batches.len())
       .map_err(|_| DecodeError::ResourceLimit("too many H.264 decode batches".to_string()))?;
-   decode_batches.extend(batches.iter().map(|batch| DecodeBatch {
-      samples: batch.samples,
-      tokens: batch.tokens,
-      wanted: batch.wanted,
-      color: resolve_gop_color(batch.config, batch.samples),
-   }));
+   decode_batches.extend(
+      batches
+         .iter()
+         .zip(metadata)
+         .map(|(batch, prepared)| DecodeBatch {
+            samples: batch.samples,
+            tokens: batch.tokens,
+            wanted: batch.wanted,
+            color: prepared.color,
+         }),
+   );
    decode_batches_with_decoder(&mut decoder, &decode_batches, quality, size, output_budget)
 }
 
@@ -627,10 +651,65 @@ mod tests {
    }
 
    #[test]
-   fn incompatible_batches_open_separate_decoders() {
+   fn invalid_later_batch_is_rejected_before_opening_any_decoder() {
       let first_config = reusable_config(2);
       let second_config = reusable_config(4);
-      let samples = vec![vec![1, 0x65]];
+      let valid_samples = [vec![1, 0x65]];
+      let invalid_samples = [vec![2, 0x65]];
+      let tokens = [FrameToken::new(0)];
+      let wanted = [(FrameToken::new(0), 1)];
+      let batches = [
+         H264DecodeBatch {
+            config: &first_config,
+            samples: &valid_samples,
+            tokens: &tokens,
+            wanted: &wanted,
+         },
+         H264DecodeBatch {
+            config: &second_config,
+            samples: &invalid_samples,
+            tokens: &tokens,
+            wanted: &wanted,
+         },
+      ];
+      let mut opens = 0;
+      let budget = OutputBudget::new(Some(4096));
+
+      let result = decode_frame_batches_to_jpeg_with(
+         &batches,
+         JpegQuality::default(),
+         ThumbnailSize::default(),
+         &budget,
+         |_| {
+            opens += 1;
+            Ok(ReusableFakeDecoder {
+               pending: Vec::new(),
+               drains: Arc::new(AtomicUsize::new(0)),
+            })
+         },
+      );
+
+      assert!(matches!(result, Err(DecodeError::Bitstream(_))));
+      assert_eq!(opens, 0);
+      assert_eq!(budget.used(), 0);
+   }
+
+   #[test]
+   fn incompatible_batches_open_separate_decoders() {
+      let mut first_config = reusable_config(2);
+      let mut second_config = reusable_config(4);
+      // Baseline SPS 0, 32x32 coded pixels, BT.601 VUI: limited then full range.
+      first_config.sps = vec![vec![
+         0x67, 0x42, 0x00, 0x1e, 0xf4, 0x4b, 0x4d, 0x40, 0x40, 0x41, 0xa0,
+      ]];
+      second_config.sps = vec![vec![
+         0x67, 0x42, 0x00, 0x1e, 0xf4, 0x4b, 0x4d, 0xc0, 0x40, 0x41, 0xa0,
+      ]];
+      first_config.pps = vec![vec![0x68, 0xe0]]; // PPS 0 references SPS 0.
+      second_config.pps = first_config.pps.clone();
+      let samples = vec![vec![2, 0x65, 0xbc]]; // IDR I-slice references PPS 0.
+      assert!(!resolve_gop_color(&first_config, &samples).full_range);
+      assert!(resolve_gop_color(&second_config, &samples).full_range);
       let tokens = [FrameToken::new(0)];
       let wanted = [(FrameToken::new(0), 1)];
       let batches = [
@@ -670,6 +749,7 @@ mod tests {
       .expect("incompatible batches should decode independently");
 
       assert_eq!(output.len(), 2);
+      assert_ne!(output[0][0].1.data, output[1][0].1.data);
       assert_eq!(opens.load(Ordering::Relaxed), 2);
       assert_eq!(drains.load(Ordering::Relaxed), 2);
    }

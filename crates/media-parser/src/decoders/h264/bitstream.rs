@@ -39,23 +39,29 @@ fn extend_annex_b_total(total: usize, additional: usize) -> Result<usize, Decode
    Ok(total)
 }
 
-#[cfg(any(test, not(all(target_os = "android", feature = "android-mediacodec"))))]
-pub(crate) fn config_with_max_input_size<S: AsRef<[u8]>>(
+#[cfg(any(
+   test,
+   not(any(
+      apple_videotoolbox_backend,
+      all(target_os = "android", feature = "android-mediacodec")
+   ))
+))]
+pub(crate) fn max_input_size<S: AsRef<[u8]>>(
    config: &AvcConfig,
    samples: &[S],
-) -> Result<AvcConfig, DecodeError> {
-   config_with_max_input_size_and_sps(config, samples, |_| Ok(()))
+) -> Result<usize, DecodeError> {
+   max_input_size_and_sps(config, samples, |_| Ok(()))
 }
 
-pub(crate) fn config_with_max_input_size_and_sps<S: AsRef<[u8]>>(
+pub(crate) fn max_input_size_and_sps<S: AsRef<[u8]>>(
    config: &AvcConfig,
    samples: &[S],
    mut validate_sps: impl FnMut(&[u8]) -> Result<(), DecodeError>,
-) -> Result<AvcConfig, DecodeError> {
+) -> Result<usize, DecodeError> {
    for sps in &config.sps {
       validate_sps(sps)?;
    }
-   let max_input_size = samples
+   samples
       .iter()
       .map(|sample| {
          annex_b_sample_len_with_sps(sample.as_ref(), config.length_size, &mut validate_sps)
@@ -66,10 +72,7 @@ pub(crate) fn config_with_max_input_size_and_sps<S: AsRef<[u8]>>(
             largest.map_or(size, |largest: usize| largest.max(size)),
          ))
       })?
-      .ok_or_else(|| DecodeError::Bitstream("no H.264 samples to decode".to_string()))?;
-   let mut prepared = config.clone();
-   prepared.max_input_size = Some(max_input_size);
-   Ok(prepared)
+      .ok_or_else(|| DecodeError::Bitstream("no H.264 samples to decode".to_string()))
 }
 
 #[cfg(test)]
@@ -392,9 +395,9 @@ mod tests {
       };
       let samples = vec![vec![1, 0x41], vec![2, 0x65, 0x88, 1, 0x41]];
 
-      let prepared = config_with_max_input_size(&config, &samples).expect("valid samples");
+      let prepared = max_input_size(&config, &samples).expect("valid samples");
 
-      assert_eq!(prepared.max_input_size, Some(11));
+      assert_eq!(prepared, 11);
       assert_eq!(config.max_input_size, None);
    }
 
@@ -482,14 +485,14 @@ mod tests {
       let sample = avcc_sample(2, &[&[0x67, 0x22], &[0x65, 0x88]]);
       let mut observed = Vec::new();
 
-      let prepared = config_with_max_input_size_and_sps(&config, &[sample], |sps| {
+      let prepared = max_input_size_and_sps(&config, &[sample], |sps| {
          observed.push(sps.to_vec());
          Ok(())
       })
       .expect("valid fused preflight");
 
       assert_eq!(observed, [vec![0x67, 0x11], vec![0x67, 0x22]]);
-      assert_eq!(prepared.max_input_size, Some(12));
+      assert_eq!(prepared, 12);
    }
 
    #[test]
@@ -497,7 +500,7 @@ mod tests {
       let config = parameter_config(1, vec![vec![0x67, 0x11]], Vec::new());
       let expected = DecodeError::ResourceLimit("sentinel SPS limit".to_string());
 
-      let error = config_with_max_input_size_and_sps(&config, &[vec![1, 0x65]], |_| {
+      let error = max_input_size_and_sps(&config, &[vec![1, 0x65]], |_| {
          Err(DecodeError::ResourceLimit("sentinel SPS limit".to_string()))
       })
       .expect_err("callback failure must escape unchanged");
@@ -511,7 +514,7 @@ mod tests {
       let malformed_after_sps = vec![0, 2, 0x67, 0x42, 0];
       let mut visits = 0;
 
-      let error = config_with_max_input_size_and_sps(&config, &[malformed_after_sps], |_| {
+      let error = max_input_size_and_sps(&config, &[malformed_after_sps], |_| {
          visits += 1;
          Ok(())
       })
@@ -527,14 +530,13 @@ mod tests {
          let sample = avcc_sample(length_size, &[&[0x67, 0x42], &[0x65, 0x88, 0x99]]);
          let config = parameter_config(length_size, Vec::new(), Vec::new());
          let mut sps_visits = 0;
-         let prepared =
-            config_with_max_input_size_and_sps(&config, std::slice::from_ref(&sample), |_| {
-               sps_visits += 1;
-               Ok(())
-            })
-            .expect("valid fused preflight");
+         let prepared = max_input_size_and_sps(&config, std::slice::from_ref(&sample), |_| {
+            sps_visits += 1;
+            Ok(())
+         })
+         .expect("valid fused preflight");
          let expected = annex_b_sample_len(&sample, length_size).expect("valid size");
-         assert_eq!(prepared.max_input_size, Some(expected));
+         assert_eq!(prepared, expected);
          assert_eq!(sps_visits, 1);
 
          let mut output = Vec::new();
@@ -556,18 +558,14 @@ mod tests {
       let config = parameter_config(2, Vec::new(), Vec::new());
       let mut visits = 0;
 
-      let prepared =
-         config_with_max_input_size_and_sps(&config, std::slice::from_ref(&sample), |_| {
-            visits += 1;
-            Ok(())
-         })
-         .expect("repeated SPS remain a streaming preflight");
+      let prepared = max_input_size_and_sps(&config, std::slice::from_ref(&sample), |_| {
+         visits += 1;
+         Ok(())
+      })
+      .expect("repeated SPS remain a streaming preflight");
 
       assert_eq!(visits, 1_024);
-      assert_eq!(
-         prepared.max_input_size,
-         Some(annex_b_sample_len(&sample, 2).unwrap())
-      );
+      assert_eq!(prepared, annex_b_sample_len(&sample, 2).unwrap());
    }
 
    #[test]

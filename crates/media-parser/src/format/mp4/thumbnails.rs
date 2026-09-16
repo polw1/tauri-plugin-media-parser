@@ -20,8 +20,16 @@ use crate::errors::{MediaParserError, Result};
 use crate::stream::StreamReader;
 use crate::types::{Frame, PixelFormat};
 use std::collections::{BTreeMap, HashMap};
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 use std::time::Duration;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+
+// Native surfaces and retained compressed samples are memory-bound, unlike
+// CPU-bound index builds. Keep their admission independent of core count and
+// acquire before sample I/O so queued requests do not retain sample buffers.
+const MAX_CONCURRENT_THUMBNAIL_EXTRACTIONS: usize = 2;
+static EXTRACTION_PERMITS: LazyLock<Arc<Semaphore>> =
+   LazyLock::new(|| Arc::new(Semaphore::new(MAX_CONCURRENT_THUMBNAIL_EXTRACTIONS)));
 
 pub const MAX_THUMBNAIL_OUTPUTS: usize = 4_096;
 const MAX_SAMPLES_PER_THUMBNAIL_BATCH: usize = 16_384;
@@ -217,8 +225,15 @@ impl ThumbnailIndex {
       options: ThumbnailOptions,
       reserve_error: &'static str,
    ) -> Result<Vec<Frame>> {
+      let permit = Arc::new(
+         Arc::clone(&EXTRACTION_PERMITS)
+            .acquire_owned()
+            .await
+            .expect("the thumbnail-extraction semaphore is never closed"),
+      );
       let jobs = load_decode_jobs(reader, plans, &self.tables, reserve_error).await?;
       let images = run_decode_jobs(
+         Arc::clone(&permit),
          jobs,
          options.quality,
          options.size,
@@ -352,12 +367,13 @@ async fn load_decode_jobs(
 /// GOPs. Recreating MediaCodec, Media Foundation, or VideoToolbox for every
 /// requested thumbnail is substantially more expensive than decoding a GOP.
 async fn run_decode_jobs(
+   permit: Arc<OwnedSemaphorePermit>,
    jobs: Vec<DecodeJob>,
    quality: JpegQuality,
    size: ThumbnailSize,
    max_output_bytes: Option<usize>,
 ) -> Result<HashMap<(Gop, FrameToken), DecodedImage>> {
-   let decoded = tokio::task::spawn_blocking(move || {
+   let decoded = spawn_decode_task(permit, move || {
       let output_budget = OutputBudget::new(max_output_bytes);
       let batches = jobs
          .iter()
@@ -379,12 +395,25 @@ async fn run_decode_jobs(
             .collect::<Vec<_>>(),
       )
    })
+   .await?;
+
+   Ok(collect_decoded_images(decoded))
+}
+
+/// The worker owns a permit as well as its caller: dropping the async future
+/// cannot admit more work while an already-started blocking decode is running.
+async fn spawn_decode_task<T: Send + 'static>(
+   permit: Arc<OwnedSemaphorePermit>,
+   decode: impl FnOnce() -> Result<T> + Send + 'static,
+) -> Result<T> {
+   tokio::task::spawn_blocking(move || {
+      let _permit = permit;
+      decode()
+   })
    .await
    .map_err(|error| {
       MediaParserError::BlockingTask(format!("thumbnail decode task failed: {error}"))
-   })??;
-
-   Ok(collect_decoded_images(decoded))
+   })?
 }
 
 fn collect_decoded_images(
@@ -913,7 +942,98 @@ fn parse_avc_descriptions(stsd: &[u8]) -> Result<Option<Vec<Option<Arc<AvcConfig
 mod tests {
    use super::*;
 
+   struct FailingSampleReader(std::sync::atomic::AtomicUsize);
+
+   #[async_trait::async_trait]
+   impl StreamReader for FailingSampleReader {
+      async fn read_at(&self, _: u64, _: &mut [u8]) -> Result<usize> {
+         self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+         Err(MediaParserError::InvalidFormat("sample read failed".into()))
+      }
+      async fn size(&self) -> Result<u64> {
+         Ok(u64::MAX)
+      }
+   }
+
+   #[tokio::test]
+   async fn extraction_admission_precedes_reads_and_returns_permits_on_error_or_cancel() {
+      let fixture =
+         InMemoryReader(include_bytes!("../../../tests/fixtures/bframes_video.mp4").to_vec());
+      let moov = find_and_read_moov_box(&fixture).await.unwrap();
+      let index = ThumbnailIndex::from_moov(&moov, 0).unwrap();
+      let held = Arc::clone(&EXTRACTION_PERMITS)
+         .acquire_many_owned(MAX_CONCURRENT_THUMBNAIL_EXTRACTIONS as u32)
+         .await
+         .unwrap();
+      let reader = FailingSampleReader(std::sync::atomic::AtomicUsize::new(0));
+      let times = [Duration::ZERO];
+      let mut exact = Box::pin(index.frames(&reader, &times, ThumbnailOptions::default()));
+      let mut keyframes = Box::pin(index.keyframes(&reader, &times, ThumbnailOptions::default()));
+      assert!(
+         tokio::time::timeout(Duration::from_millis(25), &mut exact)
+            .await
+            .is_err()
+      );
+      assert!(
+         tokio::time::timeout(Duration::from_millis(25), &mut keyframes)
+            .await
+            .is_err()
+      );
+      assert_eq!(reader.0.load(std::sync::atomic::Ordering::SeqCst), 0);
+      drop(exact); // Cancellation while queued must not consume a permit later.
+      drop(held);
+      assert!(keyframes.await.is_err());
+      assert!(reader.0.load(std::sync::atomic::Ordering::SeqCst) > 0);
+      let returned = tokio::time::timeout(
+         Duration::from_secs(5),
+         Arc::clone(&EXTRACTION_PERMITS)
+            .acquire_many_owned(MAX_CONCURRENT_THUMBNAIL_EXTRACTIONS as u32),
+      )
+      .await
+      .expect("error/cancellation must return every permit")
+      .unwrap();
+      assert_eq!(returned.num_permits(), MAX_CONCURRENT_THUMBNAIL_EXTRACTIONS);
+   }
+
    struct InMemoryReader(Vec<u8>);
+
+   #[tokio::test]
+   async fn cancelled_decode_keeps_its_permit_until_the_worker_finishes() {
+      let semaphore = Arc::new(Semaphore::new(1));
+      let permit = Arc::new(Arc::clone(&semaphore).acquire_owned().await.unwrap());
+      let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+      let (finish_tx, finish_rx) = std::sync::mpsc::channel();
+      let task = tokio::spawn(spawn_decode_task(permit, move || {
+         started_tx.send(()).unwrap();
+         finish_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+         Ok(())
+      }));
+      started_rx.await.unwrap();
+      task.abort();
+      assert!(task.await.unwrap_err().is_cancelled());
+      let still_held = semaphore.available_permits() == 0;
+      finish_tx.send(()).unwrap();
+      assert!(
+         still_held,
+         "cancelling the caller must not release the worker's permit"
+      );
+      let _returned = tokio::time::timeout(Duration::from_secs(5), semaphore.acquire())
+         .await
+         .expect("worker must return its permit on completion")
+         .unwrap();
+   }
+
+   #[tokio::test]
+   async fn failing_decode_returns_its_permit() {
+      let semaphore = Arc::new(Semaphore::new(1));
+      let permit = Arc::new(Arc::clone(&semaphore).acquire_owned().await.unwrap());
+      let result: Result<()> = spawn_decode_task(permit, || {
+         Err(MediaParserError::InvalidFormat("decode failed".into()))
+      })
+      .await;
+      assert!(result.is_err());
+      assert_eq!(semaphore.available_permits(), 1);
+   }
 
    #[async_trait::async_trait]
    impl StreamReader for InMemoryReader {
@@ -1420,6 +1540,12 @@ mod tests {
       };
 
       let images = run_decode_jobs(
+         Arc::new(
+            Arc::clone(&EXTRACTION_PERMITS)
+               .acquire_owned()
+               .await
+               .unwrap(),
+         ),
          vec![job],
          JpegQuality::default(),
          ThumbnailSize::default(),

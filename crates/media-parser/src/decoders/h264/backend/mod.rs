@@ -28,7 +28,7 @@ pub(crate) mod android;
 mod windows;
 
 #[cfg(any(test, apple_videotoolbox_backend))]
-mod apple_videotoolbox;
+pub(crate) mod apple_videotoolbox;
 
 #[cfg(all(target_os = "android", feature = "android-mediacodec"))]
 pub(crate) use android::AndroidDecoder as SelectedDecoder;
