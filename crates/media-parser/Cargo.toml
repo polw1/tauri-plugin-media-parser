@@ -2,6 +2,7 @@
 name = "media-parser"
 version = "0.1.0"
 description = "Async media parser utilities: metadata, tracks, frames, and subtitles over seekable file/HTTP streams."
+license = "MIT"
 edition = "2024"
 rust-version = "1.94.0"
 
