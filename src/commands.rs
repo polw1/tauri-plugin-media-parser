@@ -12,7 +12,8 @@ use crate::Result;
 use crate::envelope::{cover_envelope, encode_thumbnail_envelope, run_envelope_task};
 use crate::session_cache::SessionPool;
 use crate::source::{
-   MediaSourceKey, SESSION_REAPER_INTERVAL, open_reader, session_expiration, source_key,
+   DefaultHeaders, MediaSourceKey, MergedHeaders, SESSION_REAPER_INTERVAL, open_reader,
+   session_expiration, source_key,
 };
 
 const MAX_THUMBNAIL_SESSIONS: usize = 8;
@@ -44,7 +45,7 @@ impl Default for ThumbnailSessions {
 async fn thumbnail_session(
    sessions: &ThumbnailSessions,
    source: &str,
-   headers: Option<&HashMap<String, String>>,
+   headers: &MergedHeaders,
    track_id: u32,
 ) -> Result<Arc<ThumbnailSession>> {
    let media_source = source_key(source, headers).await;
@@ -69,7 +70,7 @@ async fn thumbnail_frames(
    timestamps: &[Duration],
    track_id: u32,
    accurate: bool,
-   headers: Option<&HashMap<String, String>>,
+   headers: &MergedHeaders,
    options: ThumbnailOptions,
 ) -> Result<Vec<Frame>> {
    if timestamps.is_empty() {
@@ -103,8 +104,10 @@ async fn thumbnail_frames(
 pub(crate) async fn get_metadata(
    source: String,
    headers: Option<HashMap<String, String>>,
+   defaults: State<'_, DefaultHeaders>,
 ) -> Result<Metadata> {
-   let reader = open_reader(&source, headers.as_ref()).await?;
+   let headers = defaults.merge(&source, headers)?;
+   let reader = open_reader(&source, &headers).await?;
    MediaParser::new(reader.as_ref())
       .metadata()
       .await
@@ -116,8 +119,10 @@ pub(crate) async fn get_metadata(
 pub(crate) async fn get_tracks(
    source: String,
    headers: Option<HashMap<String, String>>,
+   defaults: State<'_, DefaultHeaders>,
 ) -> Result<Vec<TrackInfo>> {
-   let reader = open_reader(&source, headers.as_ref()).await?;
+   let headers = defaults.merge(&source, headers)?;
+   let reader = open_reader(&source, &headers).await?;
    let tracks = MediaParser::new(reader.as_ref())
       .tracks()
       .await
@@ -131,8 +136,10 @@ pub(crate) async fn get_tracks(
 pub(crate) async fn get_cover(
    source: String,
    headers: Option<HashMap<String, String>>,
+   defaults: State<'_, DefaultHeaders>,
 ) -> Result<tauri::ipc::Response> {
-   let reader = open_reader(&source, headers.as_ref()).await?;
+   let headers = defaults.merge(&source, headers)?;
+   let reader = open_reader(&source, &headers).await?;
    let cover = MediaParser::new(reader.as_ref())
       .cover()
       .await
@@ -154,7 +161,9 @@ pub(crate) async fn get_thumbnails(
    max_height: Option<u32>,
    headers: Option<HashMap<String, String>>,
    sessions: State<'_, ThumbnailSessions>,
+   defaults: State<'_, DefaultHeaders>,
 ) -> Result<tauri::ipc::Response> {
+   let headers = defaults.merge(&source, headers)?;
    let (unique_timestamps, order) = prepare_thumbnail_timestamps(&timestamps)?;
    let options = thumbnail_options(quality, max_width, max_height)?;
    let frames = thumbnail_frames(
@@ -163,7 +172,7 @@ pub(crate) async fn get_thumbnails(
       &unique_timestamps,
       track_id.unwrap_or(0),
       accurate.unwrap_or(false),
-      headers.as_ref(),
+      &headers,
       options,
    )
    .await?;
@@ -341,10 +350,11 @@ mod tests {
       let sessions = ThumbnailSessions::default();
       let source = video_fixture_source();
 
-      thumbnail_session(&sessions, &source, None, 1)
+      thumbnail_session(&sessions, &source, &MergedHeaders::default(), 1)
          .await
          .expect("the video track should build a session");
-      let Err(error) = thumbnail_session(&sessions, &source, None, 2).await else {
+      let Err(error) = thumbnail_session(&sessions, &source, &MergedHeaders::default(), 2).await
+      else {
          panic!("the audio track must not reuse the video session");
       };
 
@@ -456,7 +466,7 @@ mod tests {
          &[Duration::from_millis(100)],
          0,
          true,
-         None,
+         &MergedHeaders::default(),
          ThumbnailOptions::default(),
       )
       .await
@@ -475,7 +485,7 @@ mod tests {
          &[Duration::from_millis(200)],
          0,
          false,
-         None,
+         &MergedHeaders::default(),
          ThumbnailOptions::default(),
       )
       .await
@@ -490,10 +500,10 @@ mod tests {
       let sessions = ThumbnailSessions::default();
       let source = video_fixture_source();
 
-      let first = thumbnail_session(&sessions, &source, None, 0)
+      let first = thumbnail_session(&sessions, &source, &MergedHeaders::default(), 0)
          .await
          .expect("first session should build");
-      let second = thumbnail_session(&sessions, &source, None, 0)
+      let second = thumbnail_session(&sessions, &source, &MergedHeaders::default(), 0)
          .await
          .expect("second session should reuse the cache");
 
@@ -507,19 +517,24 @@ mod tests {
 
       let first_sessions = Arc::clone(&sessions);
       let first_source = source.clone();
-      let first =
-         tokio::spawn(
-            async move { thumbnail_session(&first_sessions, &first_source, None, 0).await },
-         );
+      let first = tokio::spawn(async move {
+         thumbnail_session(&first_sessions, &first_source, &MergedHeaders::default(), 0).await
+      });
       let second_sessions = Arc::clone(&sessions);
       let second_source = source.clone();
-      let second =
-         tokio::spawn(
-            async move { thumbnail_session(&second_sessions, &second_source, None, 0).await },
-         );
+      let second = tokio::spawn(async move {
+         thumbnail_session(
+            &second_sessions,
+            &second_source,
+            &MergedHeaders::default(),
+            0,
+         )
+         .await
+      });
       let third_sessions = Arc::clone(&sessions);
-      let third =
-         tokio::spawn(async move { thumbnail_session(&third_sessions, &source, None, 0).await });
+      let third = tokio::spawn(async move {
+         thumbnail_session(&third_sessions, &source, &MergedHeaders::default(), 0).await
+      });
 
       let (first, second, third) = tokio::time::timeout(Duration::from_secs(10), async {
          tokio::join!(first, second, third)
@@ -549,7 +564,7 @@ mod tests {
          &[],
          0,
          false,
-         None,
+         &MergedHeaders::default(),
          ThumbnailOptions::default(),
       )
       .await

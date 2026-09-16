@@ -9,9 +9,10 @@
 use crate::errors::{MediaParserError, Result};
 use async_trait::async_trait;
 use futures::StreamExt;
-use reqwest::Client;
 use reqwest::header::{CONTENT_LENGTH, CONTENT_RANGE, HeaderMap, HeaderName, HeaderValue, RANGE};
+use reqwest::{Client, redirect::Policy};
 use std::collections::HashMap;
+use std::error::Error as StdError;
 use std::path::Path;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
@@ -41,6 +42,8 @@ impl FileReadAt for std::fs::File {
 }
 
 // Constants
+const MAX_HTTP_HEADERS: usize = 64;
+
 /// HTTP status code for partial content (Range request success)
 const HTTP_PARTIAL_CONTENT: u16 = 206;
 /// HTTP status code for an unsatisfiable Range request.
@@ -285,6 +288,24 @@ impl StreamReader for FileStreamReader {
    }
 }
 
+#[derive(Debug, thiserror::Error)]
+#[error("cross-origin redirect blocked: same-origin policy enforced")]
+struct CrossOriginRedirectBlocked;
+
+fn http_request_error(method: &str, error: reqwest::Error) -> MediaParserError {
+   if error.is_redirect() {
+      // reqwest's Display omits the policy error stored in its source chain.
+      let mut source = error.source();
+      while let Some(cause) = source {
+         if let Some(blocked) = cause.downcast_ref::<CrossOriginRedirectBlocked>() {
+            return MediaParserError::HttpRequest(blocked.to_string());
+         }
+         source = cause.source();
+      }
+   }
+   MediaParserError::HttpRequest(format!("{method} request failed: {error}"))
+}
+
 /// `StreamReader` implementation that issues HTTP range requests.
 ///
 /// Learns the stream size lazily from range responses. Optional custom headers
@@ -338,13 +359,43 @@ struct ReadWindow {
 impl HttpStreamReader {
    /// Creates a new `HttpStreamReader` for the given URL.
    pub async fn new(url: &str) -> Result<Self> {
-      Self::build_with_headers(url, HeaderMap::new()).await
+      Self::build_with_headers(url, HeaderMap::new(), false).await
    }
 
    /// Creates a new `HttpStreamReader` with custom HTTP headers.
    ///
-   /// Custom headers (e.g., for authentication) will be sent with all requests.
+   /// At most 64 entries are accepted. Uses reqwest's default redirect policy,
+   /// allowing up to ten hops across origins regardless of configured headers.
+   /// In the locked versions (reqwest 0.13.4 and tower-http 0.6.11), reqwest removes
+   /// known sensitive headers, such as `Authorization` and `Cookie`, only on the
+   /// hop that changes origin. This protection does not persist across later hops:
+   /// tower-http restores the original headers per hop, and reqwest compares only
+   /// consecutive origins. In A → B/1 → B/2, `Authorization` is removed for B/1 but
+   /// can reappear at B/2, exposing credentials. Other headers, including `User-Agent`
+   /// and `X-Api-Key`, can be forwarded on the first cross-origin hop. To confine headers,
+   /// use [`Self::with_headers_and_redirect_policy`] with `force_same_origin = true`.
    pub async fn with_headers(url: &str, headers: HashMap<String, String>) -> Result<Self> {
+      Self::with_headers_and_redirect_policy(url, headers, false).await
+   }
+
+   /// Creates a reader with custom HTTP headers and an additional redirect restriction.
+   ///
+   /// Like [`Self::with_headers`], accepts at most 64 entries, rejects invalid names
+   /// and values, and rejects duplicate names ignoring case. `force_same_origin`
+   /// restricts redirects to the same origin (scheme, host and port) when `true`.
+   /// Setting it to `false` uses reqwest's default policy, like [`Self::with_headers`].
+   /// Both policies allow up to ten hops and preserve headers within the same origin.
+   /// Blocked redirects return a descriptive [`MediaParserError::HttpRequest`].
+   pub async fn with_headers_and_redirect_policy(
+      url: &str,
+      headers: HashMap<String, String>,
+      force_same_origin: bool,
+   ) -> Result<Self> {
+      if headers.len() > MAX_HTTP_HEADERS {
+         return Err(MediaParserError::HttpRequest(format!(
+            "At most {MAX_HTTP_HEADERS} HTTP headers are supported"
+         )));
+      }
       let mut header_map = HeaderMap::new();
       for (k, v) in headers {
          let header_name = HeaderName::try_from(k.as_str()).map_err(|e| {
@@ -359,11 +410,29 @@ impl HttpStreamReader {
             )));
          }
       }
-      Self::build_with_headers(url, header_map).await
+      Self::build_with_headers(url, header_map, force_same_origin).await
    }
 
-   async fn build_with_headers(url: &str, headers: HeaderMap) -> Result<Self> {
-      let builder = Client::builder()
+   async fn build_with_headers(
+      url: &str,
+      headers: HeaderMap,
+      force_same_origin: bool,
+   ) -> Result<Self> {
+      let mut builder = Client::builder();
+      if force_same_origin {
+         builder = builder.redirect(Policy::custom(|attempt| {
+            if attempt
+               .previous()
+               .last()
+               .is_some_and(|previous| previous.origin() == attempt.url().origin())
+            {
+               Policy::default().redirect(attempt)
+            } else {
+               attempt.error(CrossOriginRedirectBlocked)
+            }
+         }));
+      }
+      let builder = builder
          .default_headers(headers)
          .timeout(Duration::from_secs(30));
       #[cfg(target_os = "android")]
@@ -438,7 +507,7 @@ impl HttpStreamReader {
       let resp = req
          .send()
          .await
-         .map_err(|e| MediaParserError::HttpRequest(format!("GET request failed: {}", e)))?;
+         .map_err(|error| http_request_error("GET", error))?;
 
       let status = resp.status();
       let expected_body_length = match status.as_u16() {
@@ -632,10 +701,12 @@ impl StreamReader for HttpStreamReader {
          return Ok(*size);
       }
 
-      let response =
-         self.client.head(&self.url).send().await.map_err(|error| {
-            MediaParserError::HttpRequest(format!("HEAD request failed: {error}"))
-         })?;
+      let response = self
+         .client
+         .head(&self.url)
+         .send()
+         .await
+         .map_err(|error| http_request_error("HEAD", error))?;
       if !response.status().is_success() {
          return Err(MediaParserError::HttpStatus(response.status().as_u16()));
       }
@@ -698,6 +769,108 @@ mod tests {
    // HttpStreamReader tests
    use wiremock::matchers::{header, method};
    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+   #[tokio::test]
+   async fn test_http_header_count_is_limited_before_building_the_client() {
+      for count in [64, 65, 24_576] {
+         let headers = (0..count)
+            .map(|i| (format!("x-test-{i}"), "v".into()))
+            .collect();
+         let result = HttpStreamReader::with_headers("https://example.com/file", headers).await;
+         if count == 64 {
+            assert!(result.is_ok());
+         } else {
+            assert!(
+               matches!(result, Err(MediaParserError::HttpRequest(message)) if message.contains("64"))
+            );
+         }
+      }
+   }
+
+   #[tokio::test]
+   async fn test_http_cross_origin_redirects_preserve_user_agent_and_strip_credentials() {
+      for headers in [
+         HashMap::new(),
+         HashMap::from([("uSeR-aGeNt".into(), "app/1.0".into())]),
+         HashMap::from([
+            ("Authorization".into(), "Bearer test".into()),
+            ("Cookie".into(), "session=test".into()),
+            ("X-Api-Key".into(), "test-secret".into()),
+         ]),
+      ] {
+         let source = MockServer::start().await;
+         let target = MockServer::start().await;
+         Mock::given(wiremock::matchers::any())
+            .respond_with(ResponseTemplate::new(302).insert_header("Location", target.uri()))
+            .expect(2)
+            .mount(&source)
+            .await;
+         Mock::given(wiremock::matchers::any())
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"data"))
+            .expect(2)
+            .mount(&target)
+            .await;
+         let reader = HttpStreamReader::with_headers(&source.uri(), headers.clone())
+            .await
+            .unwrap();
+         let size = reader.size().await;
+         let bytes = reader.read_vec(0, 4).await;
+         assert_eq!(size.unwrap(), 4);
+         assert_eq!(bytes.unwrap(), b"data");
+         for (server, redirected) in [(&source, false), (&target, true)] {
+            for request in server.received_requests().await.unwrap() {
+               for (name, value) in &headers {
+                  if redirected && matches!(name.as_str(), "Authorization" | "Cookie") {
+                     assert!(!request.headers.contains_key(name.as_str()));
+                  } else {
+                     assert_eq!(request.headers.get(name.as_str()).unwrap(), value.as_str());
+                  }
+               }
+            }
+         }
+      }
+   }
+
+   #[tokio::test]
+   async fn test_http_same_origin_redirects_keep_headers_and_the_ten_hop_limit() {
+      let server = MockServer::start().await;
+      Mock::given(header("X-Api-Key", "test-secret"))
+         .respond_with(|request: &wiremock::Request| {
+            let step: usize = request.url.path().trim_start_matches('/').parse().unwrap();
+            if step == 11 {
+               ResponseTemplate::new(200).set_body_bytes(b"data")
+            } else {
+               ResponseTemplate::new(302).insert_header("Location", format!("/{}", step + 1))
+            }
+         })
+         .mount(&server)
+         .await;
+      for (start, allowed) in [(1, true), (0, false)] {
+         let reader = HttpStreamReader::with_headers_and_redirect_policy(
+            &format!("{}/{start}", server.uri()),
+            HashMap::from([("X-Api-Key".into(), "test-secret".into())]),
+            true,
+         )
+         .await
+         .unwrap();
+         let result = reader.size().await;
+         if allowed {
+            assert_eq!(result.unwrap(), 4);
+            assert_eq!(reader.read_vec(0, 4).await.unwrap(), b"data");
+         } else {
+            for error in [
+               result.unwrap_err(),
+               reader.read_vec(0, 4).await.unwrap_err(),
+            ] {
+               assert!(
+                  matches!(error, MediaParserError::HttpRequest(ref message)
+                     if message.contains("error following redirect") && !message.contains("same-origin policy")),
+                  "unexpected error: {error:?}"
+               );
+            }
+         }
+      }
+   }
 
    #[tokio::test]
    async fn test_http_read_at_beginning() {

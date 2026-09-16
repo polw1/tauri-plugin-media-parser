@@ -91,6 +91,13 @@ Run Rust tests:
 cargo test
 ```
 
+The HTTP default helper tests cover composition and validation, including accumulated
+and empty origins and invalid headers. Setup integration tests using
+`tauri::test::mock_builder` execute `Builder::build()` and Tauri's plugin setup hook:
+valid configuration makes the configured defaults available in `State<DefaultHeaders>`,
+and an invalid default header rejects plugin initialization. Tauri's `test` feature
+is enabled in dev-dependencies.
+
 ### Linting and standards checks
 
 ```bash
@@ -130,6 +137,61 @@ fn main() {
         .expect("error while running tauri application");
 }
 ```
+
+To configure HTTP defaults on all platforms, use `Builder` instead of `init()`:
+
+```rust
+tauri::Builder::default().plugin(
+    tauri_plugin_media_parser::Builder::new()
+        .user_agent("my-app/1.0")
+        .default_headers([("X-App-Version", "1.0")])
+        .default_headers_origins(["https://api.example.com"])
+        .build(),
+);
+```
+
+Per-call headers override these defaults regardless of header name casing.
+`user_agent` overrides `User-Agent` in `default_headers`. Invalid HTTP header
+names or values fail plugin initialization. Local files ignore headers.
+
+When configured defaults apply to the requested URL, a per-call `Host` header in any
+casing causes an error, even if per-call headers override all defaults. This prevents
+the frontend from substituting the HTTP authority alongside Rust-configured defaults.
+`Host` configured in Rust defaults remains allowed. For HTTP(S) requests where no
+defaults apply, per-call `Host` is preserved.
+
+`default_headers_origins` restricts all defaults, including the user agent, by
+scheme, host and port. Paths are ignored and default ports are normalized. Calls
+accumulate origins; an explicitly empty list allows none. Outside the list, requests
+still run with their per-call headers, but without defaults. Invalid origin URLs or
+non-HTTP(S) schemes fail plugin initialization.
+
+Without `default_headers_origins`, defaults are sent to any URL requested by the
+frontend. Configure trusted HTTPS origins when defaults include credentials such as
+`Authorization` or `X-Api-Key`; the credential can stay in Rust.
+
+HTTP requests accept at most 64 headers after merging defaults and per-call headers.
+Unless a restricted default was inserted, redirects follow reqwest's default
+policy across origins, regardless of the configured header names or combinations.
+In the locked versions (reqwest 0.13.4 and tower-http 0.6.11), reqwest removes
+`Authorization`, `Cookie`, `cookie2`, `Proxy-Authorization` and `WWW-Authenticate`
+only on the hop that changes origin. This protection does not persist across later
+hops: tower-http restores the original headers for each hop, and reqwest compares
+only consecutive origins. In A → B/1 → B/2, `Authorization` is removed for B/1 but
+can reappear at B/2, exposing credentials, including Rust-configured global defaults.
+Other headers, including `User-Agent` and `X-Api-Key`, can be forwarded on the first
+cross-origin hop. Configure `default_headers_origins` to confine credential defaults
+as described below. Direct users of `HttpStreamReader` can use
+`with_headers_and_redirect_policy` with `force_same_origin = true`.
+
+If a default subject to `default_headers_origins` was actually inserted during the
+merge, redirects stay within the same origin regardless of the final header names,
+including when the destination is another allowed origin or a CDN. A per-call
+override does not count as inserting that default, even when its value is identical.
+
+Same-origin redirects keep the headers. Both policies allow up to ten hops.
+Blocked redirects return `cross-origin redirect blocked: same-origin policy
+enforced` for both HEAD and GET requests.
 
 ### JavaScript/TypeScript API
 
