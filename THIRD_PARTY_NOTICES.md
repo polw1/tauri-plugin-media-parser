@@ -1,55 +1,48 @@
 # Third-party notices
 
-This plugin is MIT licensed, but it links third-party code whose license
-requires notices beyond the usual MIT and Apache-2.0 boilerplate. This file
-records those notices and the exact text the license asks for.
+This plugin is licensed under the MIT License. It includes third-party software
+whose licenses require notices in addition to the MIT and Apache-2.0 notices of
+its other dependencies. Those notices are reproduced below.
 
-It is not a complete attribution set. Most of the dependency tree is MIT or
-Apache-2.0, and those licenses carry their own notice requirements. An
-application that ships a compiled binary must generate a full attribution set
-over its whole dependency tree — see "Applications distributing binaries"
-below.
+This file is not a complete attribution set for the plugin's dependencies.
 
 ## jpeg-encoder
 
    * Version: 0.7.1
-   * Declared license: `(MIT OR Apache-2.0) AND IJG`
+   * License: `(MIT OR Apache-2.0) AND IJG`
    * Repository: <https://github.com/vstroebel/jpeg-encoder>
 
-Choosing MIT or Apache-2.0 does not remove the IJG terms. The crate contains a
-Rust translation of the forward DCT from the Independent JPEG Group's libjpeg
-(`src/fdct.rs`), and ships the full IJG terms as `LICENSE-IJG`.
+Portions of this software are derived from the Independent JPEG Group's
+software, copyright (C) 1991-2020, Thomas G. Lane, Guido Vollbeding. Those
+portions are licensed under the IJG License in addition to MIT or Apache-2.0.
 
-The IJG license requires this statement when only executable code is
-distributed:
+Where only executable code is distributed, the accompanying documentation must
+state:
 
 ```text
 this software is based in part on the work of the Independent JPEG Group
 ```
 
-When source code is distributed, the IJG license instead requires its own
-README to be included unaltered, and any changes to the original files to be
-indicated in accompanying documentation. The full text is `LICENSE-IJG` in the
-`jpeg-encoder` crate.
+Where source code is distributed, the IJG README must be included with its
+copyright and no-warranty notice unaltered, and any changes to the original
+files must be clearly indicated in accompanying documentation.
 
-Note that the `jpeg-encoder` README's License section mentions only MIT and
-Apache-2.0. The crate's package metadata and its bundled `LICENSE-IJG` are the
-accurate record.
+The IJG software is provided without warranty, and its authors accept no
+liability for damages of any kind. The names of the IJG authors may not be used
+in advertising or publicity relating to this software or products derived from
+it.
+
+The full license text is included in the `jpeg-encoder` crate as `LICENSE-IJG`.
 
 ## openh264
 
    * Version: 0.9.7, via `openh264-sys2` 0.9.7
-   * Declared license: `BSD-2-Clause`
+   * License: `BSD-2-Clause`
    * Repository: <https://github.com/ralfbiedert/openh264-rs>
-   * Vendored upstream: <https://github.com/cisco/openh264> at commit
-     `a8e04adb69c79757da014007d4694684a64c7b74`
+   * Includes: Cisco OpenH264, <https://github.com/cisco/openh264>
 
-`openh264-sys2` vendors Cisco's OpenH264 C++ under `upstream/`, and its
-`source` feature — enabled by default, and this crate depends on `openh264`
-with default features — compiles that C++ and links it statically. Every
-binary shipping this plugin therefore contains Cisco's code, and BSD-2-Clause
-requires binary redistribution to reproduce the notice below "in the
-documentation and/or other materials provided with the distribution":
+Redistributions in binary form must reproduce the following notice in the
+documentation and/or other materials provided with the distribution:
 
 ```text
 Copyright (c) 2013, Cisco Systems
@@ -77,42 +70,21 @@ ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ```
 
-Unlike IJG, BSD-2-Clause is recognised by the usual attribution tooling, so a
-generated attribution set picks this up without extra configuration.
+### Patent notice
 
-### AVC patents
+The BSD-2-Clause license grants copyright permissions only and grants no patent
+rights. H.264/AVC is subject to patents. Cisco's payment of AVC patent pool
+royalties applies only to OpenH264 binaries distributed by Cisco, and does not
+extend to OpenH264 compiled from source, as it is in this plugin. Responsibility
+for any patent licensing rests with the party distributing the application.
 
-This is the part no licence scanner will report. BSD-2-Clause covers copyright
-only — the vendored `upstream/LICENSE` grants no patent rights, and H.264 is
-patent-encumbered. Cisco's arrangement of paying the AVC pool royalties applies
-to the prebuilt OpenH264 binary modules Cisco itself distributes from
-<https://www.openh264.org/>, under a separate binary licence that is not part
-of this dependency tree.
+## Distributing applications
 
-Building from source, as the default `source` feature does, produces a binary
-Cisco did not distribute, so that arrangement does not reach it and the AVC
-patent position stays with whoever ships the resulting application. An
-integrator who wants Cisco's coverage has to consume the prebuilt module
-instead — `openh264-sys2` exposes a `libloading` feature for loading it at
-runtime — or evaluate the patent position independently.
+These notices apply to any application distributed in binary form that includes
+this plugin. The distributor of that application is responsible for:
 
-## Applications distributing binaries
-
-Both licenses above distinguish source distribution from binary distribution,
-and both require the binary case to carry the notice in the documentation or
-other materials provided with the distribution. A file in this repository
-travels with this plugin's source, not with an application's installer.
-
-An application that bundles this plugin therefore carries these obligations
-itself and needs to:
-
-   * Generate an attribution set over its whole dependency tree, for example
-     with `cargo about` or `cargo-bundle-licenses` plus the equivalent for its
-     npm dependencies. `cargo about` needs `IJG` declared explicitly, since it
-     is not on the usual allowlists; `BSD-2-Clause` is already on them, so the
-     Cisco notice comes through on its own.
-   * Include the IJG statement above in that set.
-   * Deliver the result with the application — a licenses screen, a bundled
-     resource in `tauri.conf.json`, or both.
-   * Decide how to handle the AVC patent position described above, which is a
-     separate question from attribution and which no tool will raise.
+   * Providing attribution for all third-party software included in the
+     application, including the notices in this file.
+   * Delivering those notices with the application, in its documentation or
+     other materials provided with the distribution.
+   * Determining whether H.264/AVC patent licensing is required.
