@@ -10,7 +10,9 @@
 //! entries so decoders can reject a header they don't understand instead of
 //! misreading it; bump it whenever an entry's fields change shape.
 
-use media_parser::{CoverArt, Frame, PixelFormat, SubtitleTrack};
+#[cfg(any(test, native_h264_backend))]
+use media_parser::Frame;
+use media_parser::{CoverArt, PixelFormat, SubtitleTrack};
 use serde::Serialize;
 use std::collections::HashMap;
 use std::io::{self, Write};
@@ -62,6 +64,7 @@ struct CoverEnvelopeEntry {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
+#[cfg(any(test, native_h264_backend))]
 struct ThumbnailEnvelopeEntry {
    track_id: u32,
    width: u32,
@@ -122,6 +125,7 @@ pub(crate) fn cover_envelope(cover: Option<CoverArt>) -> Result<Vec<u8>> {
 /// closed literals, and the TypeScript decoder casts the header without
 /// validating it. `Frame::format` is open over the whole `PixelFormat` enum, so
 /// any other format is a bug in the decode path.
+#[cfg(any(test, native_h264_backend))]
 fn thumbnail_envelope_entry(frame: &Frame, offset: usize) -> ThumbnailEnvelopeEntry {
    ThumbnailEnvelopeEntry {
       track_id: frame.track_id,
@@ -138,6 +142,7 @@ fn thumbnail_envelope_entry(frame: &Frame, offset: usize) -> ThumbnailEnvelopeEn
 /// Encodes one metadata entry per requested timestamp into the binary
 /// envelope. `order` maps each output entry to a frame in `frames`, so
 /// duplicate timestamps share the same payload bytes.
+#[cfg(any(test, native_h264_backend))]
 pub(crate) fn encode_thumbnail_envelope(
    frames: &[Frame],
    order: &[usize],

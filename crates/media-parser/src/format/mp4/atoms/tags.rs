@@ -1,5 +1,17 @@
 //! iTunes-style metadata tag definitions.
 
+use super::Mp4Nav;
+
+/// Locates `ilst` in either ISO-BMFF or QuickTime-style `meta` payloads.
+pub(crate) fn find_ilst_in_meta(meta: &[u8]) -> Option<&[u8]> {
+   // ISO-BMFF FullBox version/flags precede the child boxes.
+   meta
+      .get(4..)
+      .and_then(|payload| payload.nav(&[*b"ilst"]))
+      // QuickTime-style metadata can start with child boxes immediately.
+      .or_else(|| meta.nav(&[*b"ilst"]))
+}
+
 /// Tag definition: fourcc identifier and display name.
 #[derive(Debug, Clone, Copy)]
 struct TagDef {

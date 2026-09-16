@@ -102,6 +102,8 @@ export async function getCover(
 
 /**
  * Extract thumbnails for specific millisecond timestamps.
+ * Uses native H.264 decoding on Android, Windows, macOS, and iOS.
+ * Rejects on platforms without a native backend, including Linux.
  *
  * Only MP4/M4V/MOV video tracks encoded as H.264/AVC are supported. MP3 files
  * and video tracks using another codec are rejected by the backend.

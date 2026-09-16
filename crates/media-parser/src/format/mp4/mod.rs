@@ -53,6 +53,7 @@ pub mod atoms;
 pub mod metadata;
 mod sample_io;
 pub mod subtitles;
+#[cfg(h264_backend)]
 pub mod thumbnails;
 pub mod tracks;
 
@@ -127,10 +128,36 @@ pub async fn read_cover(reader: &dyn StreamReader) -> Result<Option<CoverArt>> {
 }
 
 // Re-export for direct access
+#[cfg(h264_backend)]
 pub use crate::decoders::h264::ThumbnailSize;
 pub use metadata::read_metadata;
 pub use subtitles::{SubtitleIndex, read_subtitles, read_subtitles_in_range};
+#[cfg(h264_backend)]
 pub use thumbnails::{
    MAX_THUMBNAIL_OUTPUTS, ThumbnailIndex, ThumbnailOptions, read_frame, read_frames, read_keyframes,
 };
 pub use tracks::read_tracks;
+
+/// Reads tracks and a possible thumbnail index from one bounded moov read.
+#[cfg(h264_backend)]
+pub async fn read_tracks_and_thumbnail_index(
+   reader: &dyn StreamReader,
+   track_id: u32,
+) -> Result<(Vec<TrackType>, Option<ThumbnailIndex>)> {
+   let moov = atoms::find_and_read_moov_box(reader).await?;
+   let permit = Arc::clone(&INDEX_BUILD_PERMITS)
+      .acquire_owned()
+      .await
+      .expect("the index-build semaphore is never closed");
+   tokio::task::spawn_blocking(move || {
+      let _permit = permit;
+      let payload = atoms::parse_moov_payload(&moov)?;
+      let tracks = tracks::parse_tracks_from_moov_payload(payload)?;
+      let index = ThumbnailIndex::from_moov_payload(payload, track_id).ok();
+      Ok((tracks, index))
+   })
+   .await
+   .map_err(|error| {
+      crate::MediaParserError::BlockingTask(format!("thumbnail index task failed: {error}"))
+   })?
+}

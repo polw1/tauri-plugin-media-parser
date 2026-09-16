@@ -8,8 +8,8 @@
 //! Navigation traverses byte slices directly without intermediate deserialization.
 
 use super::atoms::{
-   Mp4Box, Mp4Nav, find_and_read_moov_box, fourcc_to_key, iter_boxes, parse_hdlr, parse_mdhd,
-   parse_moov_payload, stts_frame_rate, tag_name,
+   Mp4Box, Mp4Nav, find_and_read_moov_box, find_ilst_in_meta, fourcc_to_key, iter_boxes,
+   parse_hdlr, parse_mdhd, parse_moov_payload, stts_frame_rate, tag_name,
 };
 use crate::Result;
 use crate::errors::MediaParserError;
@@ -141,26 +141,6 @@ fn extract_metadata_tags(moov_payload: &[u8]) -> Vec<types::Meta> {
 
    parse_ilst_entries(ilst, &mut values);
    values
-}
-
-/// Locates the `ilst` box within a `meta` box payload, probing both layouts.
-///
-/// `meta` can appear with different layouts depending on the container/encoder.
-/// ISO-BMFF-style metadata (MP4/M4A) uses a 4-byte version/flags field before
-/// its child boxes, while some QuickTime-style metadata has children starting
-/// immediately. Probe both layouts so MOV support does not silently drop tags.
-fn find_ilst_in_meta(meta: &[u8]) -> Option<&[u8]> {
-   let ilst_path = [Mp4Box::Ilst.bytes()];
-
-   // ISO-BMFF / MP4-style: FullBox version+flags precede the children.
-   if meta.len() >= 4
-      && let Some(ilst) = meta[4..].nav(&ilst_path)
-   {
-      return Some(ilst);
-   }
-
-   // QuickTime-style / defensive fallback: children begin immediately.
-   meta.nav(&ilst_path)
 }
 
 /// Parses individual entries from the ilst box.
