@@ -28,7 +28,7 @@
 //! ### TypeScript (Frontend)
 //!
 //! ```typescript,ignore
-//! import { getMetadata } from 'tauri-plugin-media-parser';
+//! import { getMetadata } from '@silvermine/tauri-plugin-media-parser';
 //!
 //! // Local file
 //! const metadata = await getMetadata('/path/to/video.mp4');
