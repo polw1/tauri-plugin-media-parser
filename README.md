@@ -223,6 +223,9 @@ const remoteMetadata = await getMetadata('https://example.com/video.mp4', {
 const duration = getDurationInSeconds(metadata);
 console.log(`Duration: ${duration}s`);
 
+// Average FPS of the first video track, when available
+console.log('Frame rate:', metadata.frameRate);
+
 // Get specific metadata values
 const title = getMetadataValue(metadata, 'Title');
 const artist = getMetadataValue(metadata, 'Artist');

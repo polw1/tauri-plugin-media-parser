@@ -2,12 +2,14 @@
 //!
 //! Extracts metadata from MP4 files:
 //! - Duration and timescale from `mvhd` box
+//! - Average FPS from the first video track's sample timing
 //! - Tags (title, artist, album, etc.) from `ilst` box
 //!
 //! Navigation traverses byte slices directly without intermediate deserialization.
 
 use super::atoms::{
-   Mp4Box, Mp4Nav, find_and_read_moov_box, fourcc_to_key, iter_boxes, parse_moov_payload, tag_name,
+   Mp4Box, Mp4Nav, find_and_read_moov_box, fourcc_to_key, iter_boxes, parse_hdlr, parse_mdhd,
+   parse_moov_payload, tag_name,
 };
 use crate::Result;
 use crate::errors::MediaParserError;
@@ -31,6 +33,7 @@ const MVHD_V1_MIN_SIZE: usize = 32;
 ///
 /// Extracts:
 /// - Duration and timescale from the `mvhd` box
+/// - Average FPS of the first video track when its sample timing is available
 /// - Metadata tags (title, artist, etc.) from the `ilst` box
 ///
 /// # Errors
@@ -50,7 +53,48 @@ pub async fn read_metadata(reader: &dyn StreamReader) -> Result<Metadata> {
       values,
       timescale,
       duration,
+      frame_rate: extract_frame_rate(moov_payload),
    })
+}
+
+/// Average sample rate from the first video track, without reading media data.
+/// Missing or invalid timing is optional and must not discard other metadata.
+fn extract_frame_rate(moov_payload: &[u8]) -> Option<f64> {
+   let mdia = iter_boxes(moov_payload).find_map(|(fourcc, trak)| {
+      if &fourcc != b"trak" {
+         return None;
+      }
+      let mdia = trak.nav(&[*b"mdia"])?;
+      let handler = parse_hdlr(mdia.nav(&[*b"hdlr"])?)?;
+      (handler == *b"vide").then_some(mdia)
+   })?;
+
+   // Once a video is detected, do not substitute a later track if timing is missing.
+   let timescale = parse_mdhd(mdia.nav(&[*b"mdhd"])?)?.timescale;
+   if timescale == 0 {
+      return None;
+   }
+   let stts = mdia.nav(&[*b"minf", *b"stbl", *b"stts"])?;
+   if *stts.first()? != 0 {
+      return None;
+   }
+   let entry_count = usize::try_from(read_u32_be(stts, 4)?).ok()?;
+   let entries = stts.get(8..8usize.checked_add(entry_count.checked_mul(8)?)?)?;
+   let mut samples = 0u64;
+   let mut ticks = 0u64;
+   for entry in entries.chunks_exact(8) {
+      let count = u64::from(read_u32_be(entry, 0)?);
+      let delta = u64::from(read_u32_be(entry, 4)?);
+      if count > 0 && delta == 0 {
+         return None;
+      }
+      samples = samples.checked_add(count)?;
+      ticks = ticks.checked_add(count.checked_mul(delta)?)?;
+   }
+   if samples == 0 || ticks == 0 {
+      return None;
+   }
+   Some(samples as f64 * f64::from(timescale) / ticks as f64)
 }
 
 /// Extracts timescale and duration from the mvhd box.
@@ -188,6 +232,122 @@ mod tests {
    }
 
    struct BytesReader(Vec<u8>);
+
+   fn timing_track(handler: &[u8; 4], timescale: u32, entries: &[(u32, u32)]) -> Vec<u8> {
+      let mut mdhd = vec![0; 24];
+      mdhd[12..16].copy_from_slice(&timescale.to_be_bytes());
+      // Deliberately differs from sample timing: FPS must use stts duration.
+      mdhd[16..20].copy_from_slice(&900_000u32.to_be_bytes());
+      timing_track_with_mdhd(handler, &mdhd, entries)
+   }
+
+   fn timing_track_with_mdhd(handler: &[u8; 4], mdhd: &[u8], entries: &[(u32, u32)]) -> Vec<u8> {
+      let mut hdlr = vec![0; 12];
+      hdlr[8..12].copy_from_slice(handler);
+      let mut stts = vec![0; 4];
+      stts.extend_from_slice(&(entries.len() as u32).to_be_bytes());
+      for (count, delta) in entries {
+         stts.extend_from_slice(&count.to_be_bytes());
+         stts.extend_from_slice(&delta.to_be_bytes());
+      }
+      let stbl = mp4_box(b"stbl", &mp4_box(b"stts", &stts));
+      let mut mdia = mp4_box(b"hdlr", &hdlr);
+      mdia.extend(mp4_box(b"mdhd", mdhd));
+      mdia.extend(mp4_box(b"minf", &stbl));
+      mp4_box(b"trak", &mp4_box(b"mdia", &mdia))
+   }
+
+   async fn metadata_with_tracks(tracks: &[Vec<u8>]) -> Metadata {
+      let mut mvhd = vec![0; 20];
+      mvhd[12..16].copy_from_slice(&1000u32.to_be_bytes());
+      mvhd[16..20].copy_from_slice(&5000u32.to_be_bytes());
+      let mut moov = mp4_box(b"mvhd", &mvhd);
+      for track in tracks {
+         moov.extend(track);
+      }
+      read_metadata(&BytesReader(mp4_box(b"moov", &moov)))
+         .await
+         .unwrap()
+   }
+
+   #[tokio::test]
+   async fn metadata_frame_rate_uses_first_video_in_file_order() {
+      let metadata = metadata_with_tracks(&[
+         timing_track(b"soun", 48_000, &[(100, 1024)]),
+         timing_track(b"vide", 30_000, &[(60, 1001)]),
+         timing_track(b"vide", 60_000, &[(60, 1000)]),
+      ])
+      .await;
+      assert!((metadata.frame_rate.unwrap() - 30_000.0 / 1001.0).abs() < 1e-10);
+      assert_eq!((metadata.timescale, metadata.duration), (1000, 5000));
+   }
+
+   #[tokio::test]
+   async fn metadata_frame_rate_averages_variable_sample_durations() {
+      let metadata =
+         metadata_with_tracks(&[timing_track(b"vide", 1000, &[(10, 40), (20, 20)])]).await;
+      assert_eq!(metadata.frame_rate, Some(37.5));
+   }
+
+   #[tokio::test]
+   async fn metadata_frame_rate_is_absent_without_video() {
+      for tracks in [vec![], vec![timing_track(b"soun", 48_000, &[(100, 1024)])]] {
+         assert_eq!(metadata_with_tracks(&tracks).await.frame_rate, None);
+      }
+   }
+
+   #[tokio::test]
+   async fn metadata_frame_rate_does_not_skip_video_with_invalid_timing() {
+      for first in [
+         timing_track(b"vide", 0, &[(1, 40)]),
+         timing_track(b"vide", 1000, &[]),
+         timing_track(b"vide", 1000, &[(0, 40)]),
+         timing_track(b"vide", 1000, &[(1, 0)]),
+         timing_track(b"vide", 1000, &[(1, 40), (1, 0)]),
+         timing_track(b"vide", 1000, &[(u32::MAX, u32::MAX); 2]),
+      ] {
+         let metadata =
+            metadata_with_tracks(&[first, timing_track(b"vide", 1000, &[(25, 40)])]).await;
+         assert_eq!(metadata.frame_rate, None);
+         assert_eq!(metadata.duration, 5000);
+      }
+   }
+
+   #[tokio::test]
+   async fn metadata_frame_rate_is_absent_for_truncated_or_unsupported_stts() {
+      let valid = timing_track(b"vide", 1000, &[(25, 40)]);
+      let offset = valid.windows(4).position(|bytes| bytes == b"stts").unwrap() + 4;
+      let mut truncated = valid.clone();
+      truncated[offset + 4..offset + 8].copy_from_slice(&2u32.to_be_bytes());
+      let mut unsupported = valid;
+      unsupported[offset] = 1;
+      for track in [truncated, unsupported] {
+         assert_eq!(metadata_with_tracks(&[track]).await.frame_rate, None);
+      }
+   }
+
+   #[tokio::test]
+   async fn metadata_frame_rate_supports_version_one_media_header() {
+      let mut mdhd = vec![0; 36];
+      mdhd[0] = 1;
+      mdhd[20..24].copy_from_slice(&24_000u32.to_be_bytes());
+      mdhd[24..32].copy_from_slice(&(u64::from(u32::MAX) + 1).to_be_bytes());
+      let metadata =
+         metadata_with_tracks(&[timing_track_with_mdhd(b"vide", &mdhd, &[(48, 1001)])]).await;
+      assert!((metadata.frame_rate.unwrap() - 24_000.0 / 1001.0).abs() < 1e-10);
+   }
+
+   #[tokio::test]
+   async fn metadata_frame_rate_is_absent_when_first_video_lacks_timing_boxes() {
+      for missing in [b"mdhd", b"stts"] {
+         let mut first = timing_track(b"vide", 1000, &[(25, 40)]);
+         let offset = first.windows(4).position(|bytes| bytes == missing).unwrap();
+         first[offset..offset + 4].copy_from_slice(b"free");
+         let metadata =
+            metadata_with_tracks(&[first, timing_track(b"vide", 1000, &[(30, 20)])]).await;
+         assert_eq!(metadata.frame_rate, None);
+      }
+   }
 
    #[async_trait]
    impl StreamReader for BytesReader {

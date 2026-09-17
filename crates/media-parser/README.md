@@ -42,6 +42,8 @@ async fn main() -> media_parser::Result<()> {
     println!("Title: {:?}", metadata.get("title"));
     println!("Artist: {:?}", metadata.get("artist"));
     println!("Album: {:?}", metadata.get("album"));
+    // Average FPS of the first video track, or None when timing is unavailable.
+    println!("Frame rate: {:?}", metadata.frame_rate);
     // Duration is represented as raw ticks with a timescale.
     let seconds = metadata.duration as f64 / metadata.timescale as f64;
     println!("Duration: {:.3}s (timescale: {}, ticks: {})", seconds, metadata.timescale, metadata.duration);

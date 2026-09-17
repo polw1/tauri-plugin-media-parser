@@ -26,6 +26,12 @@ export interface Metadata {
    timescale: number;
    /** Total raw duration in `timescale` units. */
    duration: number;
+   /**
+    * Average FPS of the first video track in file order.
+    * Omitted when that track has no usable timing or the file has no video.
+    * MP4/MOV uses the sample timing table; fragment-only timing is not read.
+    */
+   frameRate?: number;
 }
 
 /**

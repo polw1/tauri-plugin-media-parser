@@ -99,7 +99,7 @@ async fn thumbnail_frames(
 /// * `headers` - Optional custom HTTP headers (only used for URLs, e.g., for authentication)
 ///
 /// # Returns
-/// Metadata containing duration, timescale, and tags (title, artist, etc.)
+/// Metadata containing duration, timescale, tags, and optional first-video average FPS.
 #[command]
 pub(crate) async fn get_metadata(
    source: String,
@@ -340,6 +340,30 @@ mod tests {
          .join("crates/media-parser/tests/fixtures/multitrack_video.mp4")
          .to_string_lossy()
          .into_owned()
+   }
+
+   #[tokio::test]
+   async fn metadata_serializes_optional_frame_rate_in_camel_case() {
+      for (source, expected) in [
+         (video_fixture_source(), Some(10.0)),
+         (
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+               .join("crates/media-parser/tests/fixtures/id3v2_tags.mp3")
+               .to_string_lossy()
+               .into_owned(),
+            None,
+         ),
+      ] {
+         let reader = media_parser::FileStreamReader::new(source).unwrap();
+         let metadata = MediaParser::new(reader).metadata().await.unwrap();
+         let json = serde_json::to_value(metadata).unwrap();
+         assert_eq!(
+            json.get("frameRate").and_then(|value| value.as_f64()),
+            expected
+         );
+         assert_eq!(json.get("frameRate").is_some(), expected.is_some());
+         assert!(json.get("frame_rate").is_none());
+      }
    }
 
    #[tokio::test]
