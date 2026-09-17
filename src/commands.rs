@@ -277,6 +277,8 @@ pub struct TrackInfo {
    #[serde(skip_serializing_if = "Option::is_none")]
    pub height: Option<u32>,
    #[serde(skip_serializing_if = "Option::is_none")]
+   pub frame_rate: Option<String>,
+   #[serde(skip_serializing_if = "Option::is_none")]
    pub channels: Option<u16>,
    #[serde(skip_serializing_if = "Option::is_none")]
    pub sample_rate: Option<u32>,
@@ -294,6 +296,7 @@ impl TrackInfo {
          properties: base.properties,
          width: None,
          height: None,
+         frame_rate: None,
          channels: None,
          sample_rate: None,
       }
@@ -306,6 +309,7 @@ impl From<TrackType> for TrackInfo {
          TrackType::Video(video) => Self {
             width: Some(video.width),
             height: Some(video.height),
+            frame_rate: video.frame_rate,
             ..Self::from_base("video", video.base)
          },
          TrackType::Audio(audio) => Self {
@@ -604,6 +608,7 @@ mod tests {
             base: base_track(1, "avc1"),
             width: 1_920,
             height: 1_080,
+            frame_rate: Some("30000/1001".to_string()),
          }),
          TrackType::Audio(AudioTrackMeta {
             base: base_track(2, "mp4a"),
@@ -635,6 +640,7 @@ mod tests {
                "properties": {},
                "width": 1_920,
                "height": 1_080,
+               "frameRate": "30000/1001",
             }),
             serde_json::json!({
                "kind": "audio",
@@ -678,6 +684,7 @@ mod tests {
          properties: HashMap::new(),
          width: None,
          height: None,
+         frame_rate: None,
          channels: None,
          sample_rate: None,
       };
@@ -690,5 +697,6 @@ mod tests {
       assert!(!object.contains_key("height"));
       assert!(!object.contains_key("channels"));
       assert!(!object.contains_key("sampleRate"));
+      assert!(!object.contains_key("frameRate"));
    }
 }

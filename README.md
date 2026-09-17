@@ -238,6 +238,8 @@ for (const track of tracks) {
 
    if (track.kind === 'video') {
       console.log(`Resolution: ${track.width}x${track.height}`);
+      // Average FPS as a reduced fraction, e.g. "30000/1001"
+      console.log('Frame rate:', track.frameRate);
    }
 
    if (track.kind === 'audio') {
@@ -245,6 +247,10 @@ for (const track of tracks) {
    }
 }
 ```
+
+`getTracks()` returns each video's average `frameRate` as a reduced fraction
+string. `getMetadata()` returns the first video's average as a number. Both
+omit the field when sample timing is unavailable; fragment-only timing is not read.
 
 ### Cover art
 

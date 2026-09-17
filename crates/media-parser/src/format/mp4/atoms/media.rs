@@ -212,17 +212,6 @@ pub fn audio_params(payload: &[u8]) -> (Option<u16>, Option<u32>) {
    }
 }
 
-pub fn stts_sample_count(stts: &[u8]) -> Option<u32> {
-   let entry_count = read_u32_be(stts, 4)?;
-   let mut total_samples = 0u32;
-   let mut offset = 8usize;
-   for _ in 0..entry_count {
-      total_samples = total_samples.checked_add(read_u32_be(stts, offset)?)?;
-      offset = offset.checked_add(8)?;
-   }
-   Some(total_samples)
-}
-
 pub fn decode_language(code: u16) -> Option<[u8; 3]> {
    if code == 0 {
       return None;

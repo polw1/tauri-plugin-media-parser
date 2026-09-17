@@ -499,7 +499,7 @@ pub fn duration_to_ticks(duration: Duration, timescale: u32) -> u64 {
    u64::try_from(ticks).unwrap_or(u64::MAX)
 }
 
-pub(super) fn stts_sample_count(stts: &[u8]) -> Option<u32> {
+pub(in crate::format::mp4) fn stts_sample_count(stts: &[u8]) -> Option<u32> {
    let entry_count = table_entries(stts, 8)?;
    (0..entry_count).try_fold(0u32, |total, index| {
       total.checked_add(read_u32_be(stts, 8 + index * 8)?)
@@ -514,6 +514,26 @@ pub fn stts_duration_ticks(stts: &[u8]) -> Option<u64> {
       let delta = u64::from(read_u32_be(stts, 8 + index * 8 + 4)?);
       total.checked_add(count.checked_mul(delta)?)
    })
+}
+
+/// Average FPS as a reduced numerator/denominator, sharing table validation
+/// and accumulation with the sample count and duration helpers.
+pub(in crate::format::mp4) fn stts_frame_rate(stts: &[u8], timescale: u32) -> Option<(u64, u64)> {
+   if timescale == 0 || *stts.first()? != 0 {
+      return None;
+   }
+   let samples = stts_sample_count(stts)?;
+   let ticks = stts_duration_ticks(stts)?;
+   if samples == 0 || ticks == 0 {
+      return None;
+   }
+   // Both factors are u32, so the product fits u64 without rounding.
+   let numerator = u64::from(samples) * u64::from(timescale);
+   let (mut a, mut b) = (numerator, ticks);
+   while b != 0 {
+      (a, b) = (b, a % b);
+   }
+   Some((numerator / a, ticks / a))
 }
 
 pub fn ticks_to_duration(ticks: u64, timescale: u32) -> Duration {
@@ -885,6 +905,22 @@ mod tests {
          stts_duration_ticks(&large),
          Some(u64::from(u32::MAX) * u64::from(u32::MAX))
       );
+   }
+
+   #[test]
+   fn frame_rate_preserves_large_exact_fractions() {
+      let bytes = stts_entries(&[(u32::MAX - 1, 1), (1, 2)]);
+      assert_eq!(
+         stts_frame_rate(&bytes, u32::MAX),
+         Some((18_446_744_065_119_617_025, 4_294_967_296))
+      );
+   }
+
+   #[test]
+   fn truncated_stts_has_no_sample_count_or_frame_rate() {
+      let truncated = &stts(1, 40)[..12];
+      assert_eq!(stts_sample_count(truncated), None);
+      assert_eq!(stts_frame_rate(truncated, 1000), None);
    }
 
    #[test]

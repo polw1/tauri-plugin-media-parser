@@ -203,10 +203,16 @@ export interface BaseTrackInfo<K extends TrackKind> {
    properties: Record<string, string>;
 }
 
-/** A video track, with pixel dimensions. */
+/** A video track, with pixel dimensions and optional average frame rate. */
 export interface VideoTrackInfo extends BaseTrackInfo<TrackKind.Video> {
    width: number;
    height: number;
+   /**
+    * Average FPS as a reduced "numerator/denominator" string (e.g. "30000/1001").
+    * Omitted when this track has no usable sample timing.
+    * MP4/MOV uses the sample timing table; fragment-only timing is not read.
+    */
+   frameRate?: string;
 }
 
 /** An audio track, with channel and sample-rate information. */

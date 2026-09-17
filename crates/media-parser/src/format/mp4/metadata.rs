@@ -9,7 +9,7 @@
 
 use super::atoms::{
    Mp4Box, Mp4Nav, find_and_read_moov_box, fourcc_to_key, iter_boxes, parse_hdlr, parse_mdhd,
-   parse_moov_payload, tag_name,
+   parse_moov_payload, stts_frame_rate, tag_name,
 };
 use crate::Result;
 use crate::errors::MediaParserError;
@@ -64,37 +64,20 @@ fn extract_frame_rate(moov_payload: &[u8]) -> Option<f64> {
       if &fourcc != b"trak" {
          return None;
       }
+
       let mdia = trak.nav(&[*b"mdia"])?;
       let handler = parse_hdlr(mdia.nav(&[*b"hdlr"])?)?;
+
       (handler == *b"vide").then_some(mdia)
    })?;
 
    // Once a video is detected, do not substitute a later track if timing is missing.
    let timescale = parse_mdhd(mdia.nav(&[*b"mdhd"])?)?.timescale;
-   if timescale == 0 {
-      return None;
-   }
    let stts = mdia.nav(&[*b"minf", *b"stbl", *b"stts"])?;
-   if *stts.first()? != 0 {
-      return None;
-   }
-   let entry_count = usize::try_from(read_u32_be(stts, 4)?).ok()?;
-   let entries = stts.get(8..8usize.checked_add(entry_count.checked_mul(8)?)?)?;
-   let mut samples = 0u64;
-   let mut ticks = 0u64;
-   for entry in entries.chunks_exact(8) {
-      let count = u64::from(read_u32_be(entry, 0)?);
-      let delta = u64::from(read_u32_be(entry, 4)?);
-      if count > 0 && delta == 0 {
-         return None;
-      }
-      samples = samples.checked_add(count)?;
-      ticks = ticks.checked_add(count.checked_mul(delta)?)?;
-   }
-   if samples == 0 || ticks == 0 {
-      return None;
-   }
-   Some(samples as f64 * f64::from(timescale) / ticks as f64)
+
+   let (numerator, denominator) = stts_frame_rate(stts, timescale)?;
+
+   Some(numerator as f64 / denominator as f64)
 }
 
 /// Extracts timescale and duration from the mvhd box.
@@ -303,7 +286,7 @@ mod tests {
          timing_track(b"vide", 1000, &[]),
          timing_track(b"vide", 1000, &[(0, 40)]),
          timing_track(b"vide", 1000, &[(1, 0)]),
-         timing_track(b"vide", 1000, &[(1, 40), (1, 0)]),
+         timing_track(b"vide", 1000, &[(u32::MAX, 1), (1, 1)]),
          timing_track(b"vide", 1000, &[(u32::MAX, u32::MAX); 2]),
       ] {
          let metadata =
@@ -324,6 +307,12 @@ mod tests {
       for track in [truncated, unsupported] {
          assert_eq!(metadata_with_tracks(&[track]).await.frame_rate, None);
       }
+   }
+
+   #[tokio::test]
+   async fn metadata_frame_rate_uses_shared_duration_semantics_for_zero_delta() {
+      let metadata = metadata_with_tracks(&[timing_track(b"vide", 1000, &[(1, 40), (1, 0)])]).await;
+      assert_eq!(metadata.frame_rate, Some(50.0));
    }
 
    #[tokio::test]

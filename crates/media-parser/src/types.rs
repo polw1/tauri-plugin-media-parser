@@ -66,6 +66,8 @@ pub struct VideoTrackMeta {
    pub base: BaseTrackMeta,
    pub width: u32,
    pub height: u32,
+   /// Average FPS as a reduced fraction (e.g. "30000/1001"), when timing is available.
+   pub frame_rate: Option<String>,
 }
 
 /// Audio track metadata.
