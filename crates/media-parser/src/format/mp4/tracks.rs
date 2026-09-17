@@ -154,8 +154,7 @@ fn parse_trak(trak: &[u8]) -> Result<TrackType> {
             height: height.unwrap_or(tkhd.height),
             frame_rate: stbl
                .and_then(|stbl| stbl.nav(&[*b"stts"]))
-               .and_then(|stts| stts_frame_rate(stts, mdhd.timescale))
-               .map(|(numerator, denominator)| format!("{numerator}/{denominator}")),
+               .and_then(|stts| stts_frame_rate(stts, mdhd.timescale)),
          }))
       }
       TrackKind::Audio => {
@@ -298,11 +297,14 @@ mod tests {
       );
       let tracks = read_tracks(&BytesReader(moov)).await.unwrap();
       assert_eq!(tracks.len(), 3);
-      for (track, expected) in tracks.iter().zip([Some("30000/1001"), Some("75/2"), None]) {
+      for (track, expected) in tracks
+         .iter()
+         .zip([Some((30_000, 1001)), Some((75, 2)), None])
+      {
          let TrackType::Video(video) = track else {
             panic!("expected video");
          };
-         assert_eq!(video.frame_rate.as_deref(), expected);
+         assert_eq!(video.frame_rate, expected);
       }
    }
 

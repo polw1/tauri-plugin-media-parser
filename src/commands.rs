@@ -309,7 +309,9 @@ impl From<TrackType> for TrackInfo {
          TrackType::Video(video) => Self {
             width: Some(video.width),
             height: Some(video.height),
-            frame_rate: video.frame_rate,
+            frame_rate: video
+               .frame_rate
+               .map(|(numerator, denominator)| format!("{numerator}/{denominator}")),
             ..Self::from_base("video", video.base)
          },
          TrackType::Audio(audio) => Self {
@@ -608,7 +610,7 @@ mod tests {
             base: base_track(1, "avc1"),
             width: 1_920,
             height: 1_080,
-            frame_rate: Some("30000/1001".to_string()),
+            frame_rate: Some((30_000, 1001)),
          }),
          TrackType::Audio(AudioTrackMeta {
             base: base_track(2, "mp4a"),

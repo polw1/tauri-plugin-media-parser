@@ -67,7 +67,7 @@ async fn test_multitrack_video_extraction() {
    assert_eq!(video.base.codec, "avc1");
    assert_eq!(video.width, 160);
    assert_eq!(video.height, 90);
-   assert_eq!(video.frame_rate.as_deref(), Some("10/1"));
+   assert_eq!(video.frame_rate, Some((10, 1)));
 
    let audio = tracks
       .iter()

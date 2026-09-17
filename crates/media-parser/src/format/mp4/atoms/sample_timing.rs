@@ -529,11 +529,11 @@ pub(in crate::format::mp4) fn stts_frame_rate(stts: &[u8], timescale: u32) -> Op
    }
    // Both factors are u32, so the product fits u64 without rounding.
    let numerator = u64::from(samples) * u64::from(timescale);
-   let (mut a, mut b) = (numerator, ticks);
-   while b != 0 {
-      (a, b) = (b, a % b);
+   let (mut common_divisor, mut remainder) = (numerator, ticks);
+   while remainder != 0 {
+      (common_divisor, remainder) = (remainder, common_divisor % remainder);
    }
-   Some((numerator / a, ticks / a))
+   Some((numerator / common_divisor, ticks / common_divisor))
 }
 
 pub fn ticks_to_duration(ticks: u64, timescale: u32) -> Duration {
