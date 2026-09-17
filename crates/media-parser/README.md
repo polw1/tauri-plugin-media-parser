@@ -42,6 +42,8 @@ async fn main() -> media_parser::Result<()> {
     println!("Title: {:?}", metadata.get("title"));
     println!("Artist: {:?}", metadata.get("artist"));
     println!("Album: {:?}", metadata.get("album"));
+    // Average FPS of the first video track, or None when timing is unavailable.
+    println!("Frame rate: {:?}", metadata.frame_rate);
     // Duration is represented as raw ticks with a timescale.
     let seconds = metadata.duration as f64 / metadata.timescale as f64;
     println!("Duration: {:.3}s (timescale: {}, ticks: {})", seconds, metadata.timescale, metadata.duration);
@@ -51,6 +53,12 @@ async fn main() -> media_parser::Result<()> {
 ```
 
 ### 2) Tracks
+
+`VideoTrackMeta.frame_rate` contains the average FPS as an optional reduced
+`(numerator, denominator)` tuple, such as `(30000, 1001)`. The Tauri plugin
+formats this as `"30000/1001"` for JavaScript. `Metadata.frame_rate` exposes the first
+video's average as a number. Both use the same sample timing helpers and return
+`None` when timing is unavailable; fragment-only timing is not read.
 
 ```rust
 use media_parser::{MediaParser, FileStreamReader, TrackType};

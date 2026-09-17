@@ -44,13 +44,13 @@ pub use types::Mp4Box;
 // Track parsing helpers are internal to the MP4 module.
 pub(super) use media::{
    SampleDescriptionEntry, audio_params, fourcc_string, parse_hdlr, parse_mdhd, parse_stsd,
-   parse_stsd_entries_bounded, parse_tkhd, stts_sample_count, visual_dimensions,
+   parse_stsd_entries_bounded, parse_tkhd, visual_dimensions,
 };
 pub(super) use sample_timing::SampleTiming;
 pub(super) use sample_timing::SampleTimingTable;
 pub(super) use sample_timing::{
    CompositionOffset, PresentationTimeline, duration_to_ticks, parse_ctts, stts_duration_ticks,
-   ticks_to_duration, track_presentation_offset,
+   stts_frame_rate, stts_sample_count, ticks_to_duration, track_presentation_offset,
 };
 pub(super) use samples::{
    SampleLocator, SampleSizes, StscEntry, nearest_sync_sample, next_sync_sample, parse_avc_config,

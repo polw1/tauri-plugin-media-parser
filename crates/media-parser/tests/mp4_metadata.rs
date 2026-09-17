@@ -16,6 +16,18 @@ fn mp4_box(fourcc: &[u8; 4], payload: &[u8]) -> Vec<u8> {
 }
 
 #[tokio::test]
+async fn metadata_frame_rate_matches_video_fixtures() {
+   for (name, fps) in [
+      ("multitrack_video.mp4", 10.0),
+      ("sample_metadata.mov", 25.0),
+   ] {
+      let reader = FileStreamReader::new(fixtures_dir().join(name)).unwrap();
+      let metadata = MediaParser::new(reader).metadata().await.unwrap();
+      assert_eq!(metadata.frame_rate, Some(fps), "{name}");
+   }
+}
+
+#[tokio::test]
 async fn test_mp4_metadata_extraction() {
    let path = fixtures_dir().join("sample_metadata.mp4");
    let reader = FileStreamReader::new(&path).expect("Failed to open MP4 fixture");

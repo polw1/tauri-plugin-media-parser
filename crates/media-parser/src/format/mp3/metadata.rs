@@ -54,6 +54,7 @@ pub async fn read_metadata(reader: &dyn StreamReader) -> Result<Metadata> {
       values,
       timescale: 1000,
       duration: duration.millis,
+      frame_rate: None,
    })
 }
 

@@ -1,15 +1,27 @@
 import {
    getCover,
+   getMetadata,
    getSubtitles,
    getThumbnails,
    type CoverInfo,
+   type Metadata,
    type SubtitleCueInfo,
    type SubtitleInfo,
    type SubtitleOptions,
    type ThumbnailInfo,
+   type TrackInfo,
 } from './index';
 
 function expectType<T>(_value: T): void {}
+
+expectType<Promise<Metadata>>(getMetadata('/video.mp4'));
+declare const metadata: Metadata;
+expectType<number | undefined>(metadata.frameRate);
+
+declare const track: TrackInfo;
+if (track.kind === 'video') {
+   expectType<string | undefined>(track.frameRate);
+}
 
 expectType<Promise<CoverInfo | null>>(getCover('/video.mp4'));
 expectType<Promise<ThumbnailInfo[]>>(

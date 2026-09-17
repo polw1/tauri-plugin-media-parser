@@ -223,6 +223,9 @@ const remoteMetadata = await getMetadata('https://example.com/video.mp4', {
 const duration = getDurationInSeconds(metadata);
 console.log(`Duration: ${duration}s`);
 
+// Average FPS of the first video track, when available
+console.log('Frame rate:', metadata.frameRate);
+
 // Get specific metadata values
 const title = getMetadataValue(metadata, 'Title');
 const artist = getMetadataValue(metadata, 'Artist');
@@ -235,6 +238,8 @@ for (const track of tracks) {
 
    if (track.kind === 'video') {
       console.log(`Resolution: ${track.width}x${track.height}`);
+      // Average FPS as a reduced fraction, e.g. "30000/1001"
+      console.log('Frame rate:', track.frameRate);
    }
 
    if (track.kind === 'audio') {
@@ -242,6 +247,10 @@ for (const track of tracks) {
    }
 }
 ```
+
+`getTracks()` returns each video's average `frameRate` as a reduced fraction
+string. `getMetadata()` returns the first video's average as a number. Both
+omit the field when sample timing is unavailable; fragment-only timing is not read.
 
 ### Cover art
 

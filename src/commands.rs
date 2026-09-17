@@ -99,7 +99,7 @@ async fn thumbnail_frames(
 /// * `headers` - Optional custom HTTP headers (only used for URLs, e.g., for authentication)
 ///
 /// # Returns
-/// Metadata containing duration, timescale, and tags (title, artist, etc.)
+/// Metadata containing duration, timescale, tags, and optional first-video average FPS.
 #[command]
 pub(crate) async fn get_metadata(
    source: String,
@@ -277,6 +277,8 @@ pub struct TrackInfo {
    #[serde(skip_serializing_if = "Option::is_none")]
    pub height: Option<u32>,
    #[serde(skip_serializing_if = "Option::is_none")]
+   pub frame_rate: Option<String>,
+   #[serde(skip_serializing_if = "Option::is_none")]
    pub channels: Option<u16>,
    #[serde(skip_serializing_if = "Option::is_none")]
    pub sample_rate: Option<u32>,
@@ -294,6 +296,7 @@ impl TrackInfo {
          properties: base.properties,
          width: None,
          height: None,
+         frame_rate: None,
          channels: None,
          sample_rate: None,
       }
@@ -306,6 +309,9 @@ impl From<TrackType> for TrackInfo {
          TrackType::Video(video) => Self {
             width: Some(video.width),
             height: Some(video.height),
+            frame_rate: video
+               .frame_rate
+               .map(|(numerator, denominator)| format!("{numerator}/{denominator}")),
             ..Self::from_base("video", video.base)
          },
          TrackType::Audio(audio) => Self {
@@ -340,6 +346,30 @@ mod tests {
          .join("crates/media-parser/tests/fixtures/multitrack_video.mp4")
          .to_string_lossy()
          .into_owned()
+   }
+
+   #[tokio::test]
+   async fn metadata_serializes_optional_frame_rate_in_camel_case() {
+      for (source, expected) in [
+         (video_fixture_source(), Some(10.0)),
+         (
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+               .join("crates/media-parser/tests/fixtures/id3v2_tags.mp3")
+               .to_string_lossy()
+               .into_owned(),
+            None,
+         ),
+      ] {
+         let reader = media_parser::FileStreamReader::new(source).unwrap();
+         let metadata = MediaParser::new(reader).metadata().await.unwrap();
+         let json = serde_json::to_value(metadata).unwrap();
+         assert_eq!(
+            json.get("frameRate").and_then(|value| value.as_f64()),
+            expected
+         );
+         assert_eq!(json.get("frameRate").is_some(), expected.is_some());
+         assert!(json.get("frame_rate").is_none());
+      }
    }
 
    #[tokio::test]
@@ -580,6 +610,7 @@ mod tests {
             base: base_track(1, "avc1"),
             width: 1_920,
             height: 1_080,
+            frame_rate: Some((30_000, 1001)),
          }),
          TrackType::Audio(AudioTrackMeta {
             base: base_track(2, "mp4a"),
@@ -611,6 +642,7 @@ mod tests {
                "properties": {},
                "width": 1_920,
                "height": 1_080,
+               "frameRate": "30000/1001",
             }),
             serde_json::json!({
                "kind": "audio",
@@ -654,6 +686,7 @@ mod tests {
          properties: HashMap::new(),
          width: None,
          height: None,
+         frame_rate: None,
          channels: None,
          sample_rate: None,
       };
@@ -666,5 +699,6 @@ mod tests {
       assert!(!object.contains_key("height"));
       assert!(!object.contains_key("channels"));
       assert!(!object.contains_key("sampleRate"));
+      assert!(!object.contains_key("frameRate"));
    }
 }

@@ -23,6 +23,7 @@ async fn test_id3v2_metadata_extraction() {
    let metadata = parser.metadata().await.unwrap();
 
    assert_eq!(metadata.format, "MP3");
+   assert_eq!(metadata.frame_rate, None);
    assert_eq!(metadata.get("title"), Some("Test Title"));
    assert_eq!(metadata.get("artist"), Some("Test Artist"));
    assert_eq!(metadata.get("album"), Some("Test Album"));

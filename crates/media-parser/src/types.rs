@@ -23,6 +23,9 @@ pub struct Metadata {
    pub timescale: u32,
    /// Total raw duration in `timescale` units.
    pub duration: u64,
+   /// Average FPS of the first video track in file order, when timing is available.
+   #[serde(rename = "frameRate", skip_serializing_if = "Option::is_none")]
+   pub frame_rate: Option<f64>,
 }
 
 impl Metadata {
@@ -63,6 +66,8 @@ pub struct VideoTrackMeta {
    pub base: BaseTrackMeta,
    pub width: u32,
    pub height: u32,
+   /// Average FPS as a reduced (numerator, denominator), when timing is available.
+   pub frame_rate: Option<(u64, u64)>,
 }
 
 /// Audio track metadata.

@@ -4,7 +4,8 @@
 
 use super::atoms::{
    Mp4Nav, audio_params, find_and_read_moov_box, fourcc_string, iter_boxes, parse_hdlr, parse_mdhd,
-   parse_moov_payload, parse_stsd, parse_tkhd, stts_sample_count, visual_dimensions,
+   parse_moov_payload, parse_stsd, parse_tkhd, stts_frame_rate, stts_sample_count,
+   visual_dimensions,
 };
 use crate::Result;
 use crate::errors::MediaParserError;
@@ -151,6 +152,9 @@ fn parse_trak(trak: &[u8]) -> Result<TrackType> {
             base,
             width: width.unwrap_or(tkhd.width),
             height: height.unwrap_or(tkhd.height),
+            frame_rate: stbl
+               .and_then(|stbl| stbl.nav(&[*b"stts"]))
+               .and_then(|stts| stts_frame_rate(stts, mdhd.timescale)),
          }))
       }
       TrackKind::Audio => {
@@ -257,6 +261,51 @@ mod tests {
    fn trak_payload(id: u32, handler: &[u8; 4]) -> Vec<u8> {
       let mdia = [mp4_box(b"mdhd", &mdhd()), mp4_box(b"hdlr", &hdlr(handler))].concat();
       [mp4_box(b"tkhd", &tkhd(id)), mp4_box(b"mdia", &mdia)].concat()
+   }
+
+   fn timed_video(id: u32, timescale: u32, entries: &[(u32, u32)]) -> Vec<u8> {
+      let mut header = mdhd();
+      header[12..16].copy_from_slice(&timescale.to_be_bytes());
+      let mut stts = vec![0; 4];
+      stts.extend_from_slice(&(entries.len() as u32).to_be_bytes());
+      for (count, delta) in entries {
+         stts.extend_from_slice(&count.to_be_bytes());
+         stts.extend_from_slice(&delta.to_be_bytes());
+      }
+      let mdia = [
+         mp4_box(b"mdhd", &header),
+         mp4_box(b"hdlr", &hdlr(b"vide")),
+         mp4_box(b"minf", &mp4_box(b"stbl", &mp4_box(b"stts", &stts))),
+      ]
+      .concat();
+      mp4_box(
+         b"trak",
+         &[mp4_box(b"tkhd", &tkhd(id)), mp4_box(b"mdia", &mdia)].concat(),
+      )
+   }
+
+   #[tokio::test]
+   async fn tracks_report_reduced_average_frame_rate_for_each_video() {
+      let moov = mp4_box(
+         b"moov",
+         &[
+            timed_video(1, 30_000, &[(60, 1001)]),
+            timed_video(2, 1000, &[(10, 40), (20, 20)]),
+            mp4_box(b"trak", &trak_payload(3, b"vide")),
+         ]
+         .concat(),
+      );
+      let tracks = read_tracks(&BytesReader(moov)).await.unwrap();
+      assert_eq!(tracks.len(), 3);
+      for (track, expected) in tracks
+         .iter()
+         .zip([Some((30_000, 1001)), Some((75, 2)), None])
+      {
+         let TrackType::Video(video) = track else {
+            panic!("expected video");
+         };
+         assert_eq!(video.frame_rate, expected);
+      }
    }
 
    #[test]
