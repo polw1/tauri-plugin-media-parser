@@ -6,7 +6,7 @@ mod common;
 
 use common::{
    fixtures_dir,
-   native_h264::{BFRAME_REFERENCES, assert_matches_reference},
+   native_h264::{BFRAME_REFERENCES, MULTITRACK_REFERENCES, assert_matches_reference},
 };
 use media_parser::{
    FileStreamReader, JpegQuality, PixelFormat, StreamReader,
@@ -226,10 +226,11 @@ async fn test_mp4_h264_thumbnails_follow_presentation_order() {
          .collect::<Vec<_>>(),
       timestamps
    );
-   assert!(
-      frames.windows(2).all(|pair| pair[0].data != pair[1].data),
-      "distinct presentation timestamps should not repeat adjacent frames"
-   );
+   // The fixture holds an I/B/P GOP with real ctts reordering; compare each
+   // position with its reference so a frame swap cannot slip through silently.
+   for (frame, reference) in frames.iter().zip(MULTITRACK_REFERENCES) {
+      assert_matches_reference("native H.264 backend", frame, reference);
+   }
 }
 
 #[tokio::test]

@@ -17,6 +17,12 @@ pub(crate) const BFRAME_REFERENCES: [&[u8]; 9] = [
    include_bytes!("../fixtures/bframes_frame8_reference.jpg"),
 ];
 
+pub(crate) const MULTITRACK_REFERENCES: [&[u8]; 3] = [
+   include_bytes!("../fixtures/multitrack_frame0_reference.jpg"),
+   include_bytes!("../fixtures/multitrack_frame1_reference.jpg"),
+   include_bytes!("../fixtures/multitrack_frame2_reference.jpg"),
+];
+
 pub(crate) struct EmbeddedReader(pub(crate) Vec<u8>);
 
 impl EmbeddedReader {

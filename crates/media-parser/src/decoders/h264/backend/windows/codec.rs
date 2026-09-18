@@ -64,9 +64,6 @@ impl PlatformGuard {
    fn initialize() -> Result<Self, DecodeError> {
       let mut guard = Self::default();
       let com_status = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
-      if com_status == RPC_E_CHANGED_MODE {
-         return Err(raw_hresult_error("CoInitializeEx", com_status));
-      }
       if com_status.is_err() {
          return Err(raw_hresult_error("CoInitializeEx", com_status));
       }
