@@ -76,6 +76,9 @@ jobs:
          - name: Install iOS check target
            if: matrix.os == 'macos-latest'
            run: rustup target add aarch64-apple-ios
+         - name: Build iOS plugin
+           if: matrix.os == 'macos-latest'
+           run: cargo build -p tauri-plugin-media-parser --target aarch64-apple-ios
          - name: Check iOS backend
            if: matrix.os == 'macos-latest'
            run: cargo check -p media-parser --all-targets --target aarch64-apple-ios --features thumbnails,apple-videotoolbox

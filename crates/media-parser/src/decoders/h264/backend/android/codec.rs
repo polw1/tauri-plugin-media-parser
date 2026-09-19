@@ -279,13 +279,20 @@ impl AndroidDecoder {
                format.get_i32(KEY_CROP_BOTTOM),
             ],
          )?;
-         let mut ignored_output_size = 0usize;
-         let output = unsafe {
-            AMediaCodec_getOutputBuffer(self.codec.as_ptr(), index, &mut ignored_output_size)
-         };
+         let mut output_size = 0usize;
+         let output =
+            unsafe { AMediaCodec_getOutputBuffer(self.codec.as_ptr(), index, &mut output_size) };
          let output = documented_output_region(output, reported_size, info.offset);
          if output.base.is_null() {
             return Err(backend_error("output buffer", "returned null"));
+         }
+         // Conservative check only: AOSP reports the buffer capacity here, not
+         // the bytes left after the pointer, so this does not prove the range.
+         if reported_size > output_size {
+            return Err(backend_error(
+               "output buffer",
+               "reported size exceeds the buffer size",
+            ));
          }
          if !valid_ffi_region(output.base, output.len) {
             return Err(backend_error(
