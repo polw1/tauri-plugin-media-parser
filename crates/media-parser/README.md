@@ -205,10 +205,10 @@ and exactly one backend appropriate for the compilation target:
 | Windows | `windows-media-foundation` | Media Foundation |
 | macOS / iOS | `apple-videotoolbox` | VideoToolbox |
 
-`macos-videotoolbox` remains an alias for macOS consumers. Features for a different
-OS, or `thumbnails` without a usable backend, fail compilation. Do not use
-`--all-features`: the backends are target-specific. Default features are empty;
-metadata, covers, tracks, and subtitles remain available without a video decoder.
+Features for a different OS, or `thumbnails` without a usable backend, fail
+compilation. Do not use `--all-features`: the backends are target-specific.
+Default features are empty; metadata, covers, tracks, and subtitles remain
+available without a video decoder.
 Linux has no thumbnail backend.
 
 For example, a standalone Windows application can depend on:

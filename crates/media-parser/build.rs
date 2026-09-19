@@ -29,14 +29,12 @@ fn main() {
    let mediacodec_feature = feature("CARGO_FEATURE_ANDROID_MEDIACODEC");
    let media_foundation_feature = feature("CARGO_FEATURE_WINDOWS_MEDIA_FOUNDATION");
    let apple_videotoolbox_feature = feature("CARGO_FEATURE_APPLE_VIDEOTOOLBOX");
-   let legacy_macos_videotoolbox_feature = feature("CARGO_FEATURE_MACOS_VIDEOTOOLBOX");
    let mediacodec = android && mediacodec_feature;
    let media_foundation = windows && media_foundation_feature;
    let videotoolbox = apple && apple_videotoolbox_feature;
    let invalid_native_backend = (mediacodec_feature && !android)
       || (media_foundation_feature && !windows)
-      || (apple_videotoolbox_feature && !apple)
-      || (legacy_macos_videotoolbox_feature && !macos);
+      || (apple_videotoolbox_feature && !apple);
    let backend_count =
       usize::from(mediacodec) + usize::from(media_foundation) + usize::from(videotoolbox);
 

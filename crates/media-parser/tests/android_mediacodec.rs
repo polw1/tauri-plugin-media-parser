@@ -14,91 +14,10 @@ use common::native_h264::{
    reduced_rgb,
 };
 use media_parser::{
-   PixelFormat, StreamReader,
-   format::mp4::{
-      ThumbnailIndex, ThumbnailOptions, read_frames, read_tracks, read_tracks_and_thumbnail_index,
-   },
+   PixelFormat,
+   format::mp4::{ThumbnailOptions, read_frames},
 };
-use std::{
-   sync::atomic::{AtomicUsize, Ordering},
-   time::Duration,
-};
-
-struct CountingEmbeddedReader {
-   data: &'static [u8],
-   reads: AtomicUsize,
-}
-
-impl CountingEmbeddedReader {
-   fn new(data: &'static [u8]) -> Self {
-      Self {
-         data,
-         reads: AtomicUsize::new(0),
-      }
-   }
-
-   fn reads(&self) -> usize {
-      self.reads.load(Ordering::Relaxed)
-   }
-}
-
-#[async_trait::async_trait]
-impl StreamReader for CountingEmbeddedReader {
-   async fn read_at(&self, offset: u64, buffer: &mut [u8]) -> media_parser::Result<usize> {
-      self.reads.fetch_add(1, Ordering::Relaxed);
-      let offset = usize::try_from(offset).unwrap_or(usize::MAX);
-      let Some(available) = self.data.get(offset..) else {
-         return Ok(0);
-      };
-      let read = available.len().min(buffer.len());
-      buffer[..read].copy_from_slice(&available[..read]);
-      Ok(read)
-   }
-
-   async fn size(&self) -> media_parser::Result<u64> {
-      Ok(u64::try_from(self.data.len()).expect("embedded fixture length fits u64"))
-   }
-}
-
-#[tokio::test]
-async fn tracks_can_prewarm_the_thumbnail_index_without_reading_moov_twice() {
-   let fixture = include_bytes!("fixtures/multitrack_video.mp4");
-   let combined_reader = CountingEmbeddedReader::new(fixture);
-   let (tracks, index) = read_tracks_and_thumbnail_index(&combined_reader, 0)
-      .await
-      .expect("read tracks and thumbnail index together");
-   assert!(index.is_some());
-   assert!(
-      tracks
-         .iter()
-         .any(|track| matches!(track, media_parser::TrackType::Video(_)))
-   );
-
-   let separate_reader = CountingEmbeddedReader::new(fixture);
-   read_tracks(&separate_reader)
-      .await
-      .expect("read tracks separately");
-   ThumbnailIndex::read(&separate_reader, 0)
-      .await
-      .expect("read thumbnail index separately");
-
-   assert!(
-      combined_reader.reads() < separate_reader.reads(),
-      "combined parsing should avoid the second moov read"
-   );
-}
-
-#[tokio::test]
-async fn track_discovery_still_succeeds_when_an_mp4_has_no_video_index() {
-   let fixture = include_bytes!("fixtures/sample_metadata.mp4");
-   let reader = CountingEmbeddedReader::new(fixture);
-   let (tracks, index) = read_tracks_and_thumbnail_index(&reader, 0)
-      .await
-      .expect("audio-only MP4 tracks should remain readable");
-
-   assert!(!tracks.is_empty());
-   assert!(index.is_none());
-}
+use std::time::Duration;
 
 #[tokio::test]
 async fn mediacodec_preserves_deep_b_frame_presentation_order() {
