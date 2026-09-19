@@ -285,6 +285,8 @@ Decoding uses the operating system: MediaCodec on Android, Media Foundation on
 Windows, and VideoToolbox on macOS/iOS. The plugin selects the backend automatically.
 Linux and other targets keep metadata, tracks, covers, and subtitles, but
 `getThumbnails` rejects with `thumbnail extraction is not supported on this platform`.
+This is a breaking change from the bundled OpenH264 backend: Linux calls now
+reject even with `timestamps: []`, which previously returned an empty result.
 No software H.264 decoder is bundled. If the preferred Android decoder rejects
 the configuration, the plugin retries the software codecs provided by Android.
 

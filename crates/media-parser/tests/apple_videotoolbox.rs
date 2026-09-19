@@ -15,10 +15,83 @@ use common::native_h264::{
    decode_jpeg, reduced_rgb,
 };
 use media_parser::{
-   PixelFormat,
+   MediaParserError, PixelFormat,
    format::mp4::{ThumbnailOptions, read_frames},
 };
 use std::time::Duration;
+
+#[tokio::test]
+async fn videotoolbox_reports_a_native_decode_error_for_a_corrupt_sample() {
+   let original = include_bytes!("fixtures/bframes_video.mp4");
+   let reader = EmbeddedReader::new(original);
+   let frames = read_frames(&reader, 0, &[Duration::ZERO], ThumbnailOptions::default())
+      .await
+      .expect("the unmodified H.264 fixture decodes successfully");
+   assert_eq!(frames.len(), 1);
+
+   // Locate the first sample using this fixture's single-chunk sample table.
+   let box_payload = |fourcc: &[u8; 4]| {
+      original
+         .windows(4)
+         .position(|window| window == fourcc)
+         .expect("fixture contains the required box")
+         + 4
+   };
+   let read_u32 = |offset| u32::from_be_bytes(original[offset..offset + 4].try_into().unwrap());
+   let stco = box_payload(b"stco");
+   assert_eq!(read_u32(stco + 4), 1, "fixture has one video chunk");
+   let start = usize::try_from(read_u32(stco + 8)).unwrap();
+   let stsz = box_payload(b"stsz");
+   assert_eq!(read_u32(stsz + 4), 0, "fixture uses per-sample sizes");
+   let end = start + usize::try_from(read_u32(stsz + 12)).unwrap();
+   assert_eq!(start, box_payload(b"mdat"));
+   assert_eq!(original[box_payload(b"avcC") + 4] & 3, 3);
+
+   let mut corrupt = original.to_vec();
+   let mut cursor = start;
+   let mut corrupted_slices = 0;
+   while cursor < end {
+      assert!(cursor + 4 < end);
+      let length = usize::try_from(read_u32(cursor)).unwrap();
+      cursor += 4;
+      assert!(length > 0 && cursor + length <= end);
+      if original[cursor] & 0x1f == 5 {
+         assert!(length > 1);
+         // Keep the NAL header and length, but destroy the IDR slice header
+         // and data. An all-zero bitstream cannot encode first_mb_in_slice.
+         corrupt[cursor + 1..cursor + length].fill(0);
+         corrupted_slices += 1;
+      }
+      cursor += length;
+   }
+   assert_eq!(cursor, end);
+   assert!(corrupted_slices > 0, "first sample contains an IDR slice");
+   assert_ne!(&corrupt[start..end], &original[start..end]);
+   assert_eq!(&corrupt[..start], &original[..start]);
+   assert_eq!(&corrupt[end..], &original[end..]);
+
+   let error = read_frames(
+      &EmbeddedReader(corrupt),
+      0,
+      &[Duration::ZERO],
+      ThumbnailOptions::default(),
+   )
+   .await
+   .expect_err("the corrupt sample must fail inside the native decoder");
+   let MediaParserError::Decode(message) = error else {
+      panic!("expected a native decode error, got {error:?}");
+   };
+   assert!(
+      [
+         "Apple VideoToolbox VTDecompressionSessionDecodeFrame failed:",
+         "Apple VideoToolbox decompression callback failed:",
+         "Apple VideoToolbox VTDecompressionSessionWaitForAsynchronousFrames failed:",
+      ]
+      .iter()
+      .any(|prefix| message.starts_with(prefix)),
+      "expected an error from native decoding, got {message:?}"
+   );
+}
 
 #[tokio::test]
 async fn videotoolbox_preserves_deep_b_frame_presentation_order() {
