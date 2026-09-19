@@ -161,16 +161,6 @@ struct YuvCoefficients {
 }
 
 fn coefficients(color: GopColor) -> YuvCoefficients {
-   if color.matrix == MatrixCoefficients::Bt601 && !color.full_range {
-      return YuvCoefficients {
-         y_offset: 16.0,
-         y_mul: 255.0 / 219.0,
-         rv_mul: 255.0 / 224.0 * 1.402,
-         gv_mul: -255.0 / 224.0 * 1.402 * 0.299 / 0.687,
-         gu_mul: -255.0 / 224.0 * 1.772 * 0.114 / 0.587,
-         bu_mul: 255.0 / 224.0 * 1.772,
-      };
-   }
    let (kr, kb) = match color.matrix {
       MatrixCoefficients::Bt601 => (0.299, 0.114),
       MatrixCoefficients::Bt709 => (0.2126, 0.0722),
@@ -369,6 +359,41 @@ mod tests {
             crop,
          },
       ]
+   }
+
+   #[test]
+   fn bt601_limited_matches_independent_rgb_vectors() {
+      // Independently evaluated limited-range BT.601 inverse matrix:
+      // R = 1.164383*(Y-16) + 1.596027*(V-128)
+      // G = 1.164383*(Y-16) - 0.391762*(U-128) - 0.812968*(V-128)
+      // B = 1.164383*(Y-16) + 2.017232*(U-128)
+      // Clamp to [0, 255] and truncate, as required by the RGB output contract.
+      // Both signs of each chroma axis keep green away from clipping.
+      for (u, v, expected) in [
+         (128, 240, [255, 39, 130]),
+         (128, 16, [0, 221, 130]),
+         (240, 128, [130, 86, 255]),
+         (16, 128, [130, 174, 0]),
+      ] {
+         let y = [128; 8];
+         let u = [u; 2];
+         let v = [v; 2];
+         let uv = [u[0], v[0], u[1], v[1]];
+         let source = layouts(&y, &u, &v, &uv)[0];
+         for color in [
+            GopColor::DEFAULT,
+            GopColor {
+               matrix: MatrixCoefficients::Bt601,
+               full_range: false,
+            },
+         ] {
+            for (width, height) in [(4, 2), (2, 1)] {
+               let mut rgb = vec![0; width * height * 3];
+               write_rgb_with_color(&source, &mut rgb, width, height, color).unwrap();
+               assert_eq!(rgb, expected.repeat(width * height), "U={u:?}, V={v:?}");
+            }
+         }
+      }
    }
 
    #[test]

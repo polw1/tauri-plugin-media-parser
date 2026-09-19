@@ -38,8 +38,7 @@ pub(crate) struct GopColor {
 
 impl GopColor {
    /// The policy applied whenever the stream carries no usable colour
-   /// metadata. BT.601 limited preserves the historical software baseline, so
-   /// unannotated streams keep their existing output byte for byte.
+   /// metadata: BT.601 limited, using the standard matrix coefficients.
    pub(super) const DEFAULT: Self = Self {
       matrix: MatrixCoefficients::Bt601,
       full_range: false,
