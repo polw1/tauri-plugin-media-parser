@@ -11,7 +11,7 @@ env:
 jobs:
    ci:
       name: Continuous Integration
-      runs-on: ubuntu-latest
+      runs-on: ubuntu-24.04
 
       steps:
          - name: Checkout repository
@@ -41,9 +41,7 @@ jobs:
          - name: Run standards checks
            run: npm run standards
 
-         - name: Run cargo check
-           run: cargo check --workspace --all-targets
-
+         # `npm run standards` lints every target with clippy, so no `cargo check`.
          - name: Run cargo tests
            run: cargo test --workspace
 
@@ -53,8 +51,8 @@ jobs:
          fail-fast: false
          matrix:
             include:
-               - os: windows-latest
-               - os: macos-latest
+               - os: windows-2025
+               - os: macos-15
       runs-on: ${{ matrix.os }}
       steps:
          - name: Checkout repository
@@ -65,27 +63,24 @@ jobs:
               toolchain: '1.94.0'
               components: clippy
               cache: true
-         - name: Check metadata-only crate
-           run: cargo check -p media-parser --all-targets
-         - name: Check native plugin integration
-           run: cargo check --workspace --all-targets
+         # `cargo clippy` and `cargo test` already build every target, so no `cargo check`.
          - name: Lint native backend
            run: cargo clippy --workspace --all-targets -- -D warnings
          - name: Test native backend
            run: cargo test --workspace
          - name: Install iOS check target
-           if: matrix.os == 'macos-latest'
+           if: matrix.os == 'macos-15'
            run: rustup target add aarch64-apple-ios
          - name: Build iOS plugin
-           if: matrix.os == 'macos-latest'
+           if: matrix.os == 'macos-15'
            run: cargo build -p tauri-plugin-media-parser --target aarch64-apple-ios
          - name: Check iOS backend
-           if: matrix.os == 'macos-latest'
+           if: matrix.os == 'macos-15'
            run: cargo check -p media-parser --all-targets --target aarch64-apple-ios --features thumbnails,apple-videotoolbox
 
    android:
       name: Android
-      runs-on: ubuntu-latest
+      runs-on: ubuntu-24.04
 
       steps:
          - name: Checkout repository
