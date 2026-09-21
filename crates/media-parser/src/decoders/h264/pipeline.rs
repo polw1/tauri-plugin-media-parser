@@ -1100,6 +1100,45 @@ mod tests {
    }
 
    #[test]
+   fn orchestration_aborts_remaining_samples_and_batches_without_draining_after_decode_error() {
+      let probe = Arc::new(backend::fake::FakeDecoderProbe::default());
+      let mut decoder = backend::fake::FakeDecoder::failing_on_decode(1, Arc::clone(&probe));
+      let first_samples = [vec![0], vec![1], vec![2]];
+      let first_tokens = [FrameToken::new(0), FrameToken::new(1), FrameToken::new(2)];
+      let second_samples = [vec![3]];
+      let second_tokens = [FrameToken::new(0)];
+      let batches = [
+         DecodeBatch {
+            samples: &first_samples,
+            tokens: &first_tokens,
+            wanted: &[],
+            color: GopColor::DEFAULT,
+         },
+         DecodeBatch {
+            samples: &second_samples,
+            tokens: &second_tokens,
+            wanted: &[],
+            color: GopColor::DEFAULT,
+         },
+      ];
+
+      let error = decode_batches_with_decoder(
+         &mut decoder,
+         &batches,
+         JpegQuality::default(),
+         ThumbnailSize::default(),
+         &OutputBudget::new(None),
+      )
+      .expect_err("the injected decode failure must abort orchestration");
+
+      assert!(
+         matches!(error, DecodeError::Backend(message) if message == "injected decode failure")
+      );
+      assert_eq!(probe.decode_calls(), 2);
+      assert_eq!(probe.drain_calls(), 0);
+   }
+
+   #[test]
    fn orchestration_requires_tokens_to_be_an_exact_permutation() {
       for tokens in [
          vec![FrameToken::new(0)],
