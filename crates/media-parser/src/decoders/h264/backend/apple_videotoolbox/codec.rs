@@ -135,7 +135,7 @@ fn sample_timing(token: FrameToken) -> Result<CMSampleTimingInfo, DecodeError> {
 struct ReadySession {
    // Session precedes the format description so it is released first.
    session: CFRetained<VTDecompressionSession>,
-   _format: CFRetained<CMFormatDescription>,
+   format: CFRetained<CMFormatDescription>,
 }
 
 enum Initialization {
@@ -175,13 +175,12 @@ fn create_format_description(
       DecodeError::ResourceLimit("H.264 parameter-set size allocation failed".to_string())
    })?;
    for parameter_set in parameter_sets.sps.iter().chain(&parameter_sets.pps) {
-      let pointer = NonNull::new(parameter_set.as_ptr().cast_mut())
-         .ok_or_else(|| DecodeError::Bitstream("empty H.264 parameter set".to_string()))?;
       if parameter_set.is_empty() {
          return Err(DecodeError::Bitstream(
             "empty H.264 parameter set".to_string(),
          ));
       }
+      let pointer = NonNull::from(parameter_set.as_slice()).cast();
       pointers.push(pointer);
       sizes.push(parameter_set.len());
    }
@@ -259,10 +258,7 @@ fn create_session(
       unsafe { session.invalidate() };
       return Err(error);
    }
-   Ok(ReadySession {
-      session,
-      _format: format,
-   })
+   Ok(ReadySession { session, format })
 }
 
 fn create_compressed_sample(
@@ -630,7 +626,7 @@ impl H264Decoder for AppleVideoToolboxDecoder {
       }
       let compressed = match self
          .ready_session()
-         .and_then(|ready| create_compressed_sample(&ready._format, sample, token))
+         .and_then(|ready| create_compressed_sample(&ready.format, sample, token))
       {
          Ok(compressed) => compressed,
          Err(error) => return self.fail(error),
@@ -698,8 +694,6 @@ impl H264Decoder for AppleVideoToolboxDecoder {
          // SAFETY: Wait completed, so invalidating is deterministic and no
          // callback can race the subsequent release.
          unsafe { ready.session.invalidate() };
-      } else {
-         self.initialization = None;
       }
       Ok(())
    }
