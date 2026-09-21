@@ -39,5 +39,32 @@ pub(crate) use windows::WindowsDecoder as SelectedDecoder;
 #[cfg(apple_videotoolbox_backend)]
 pub(crate) use apple_videotoolbox::AppleVideoToolboxDecoder as SelectedDecoder;
 
+#[cfg(all(target_os = "android", feature = "android-mediacodec"))]
+pub(crate) fn open_decoder(
+   config: &AvcConfig,
+   attempt: usize,
+) -> Result<Option<SelectedDecoder>, DecodeError> {
+   if attempt == 0 {
+      SelectedDecoder::open(config).map(Some)
+   } else {
+      SelectedDecoder::open_attempt(config, attempt)
+   }
+}
+
+#[cfg(any(
+   all(target_os = "windows", feature = "windows-media-foundation"),
+   apple_videotoolbox_backend
+))]
+pub(crate) fn open_decoder(
+   config: &AvcConfig,
+   attempt: usize,
+) -> Result<Option<SelectedDecoder>, DecodeError> {
+   if attempt == 0 {
+      SelectedDecoder::open(config).map(Some)
+   } else {
+      Ok(None)
+   }
+}
+
 #[cfg(test)]
 pub(crate) mod fake;

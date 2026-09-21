@@ -448,27 +448,26 @@ impl AndroidDecoder {
       decoder.started = true;
       Ok(decoder)
    }
+
+   pub(crate) fn open_attempt(
+      config: &AvcConfig,
+      attempt: usize,
+   ) -> Result<Option<Self>, DecodeError> {
+      let name = match attempt {
+         0 => None,
+         1 => Some(c"c2.android.avc.decoder"),
+         2 => Some(c"OMX.google.h264.decoder"),
+         _ => return Ok(None),
+      };
+      Self::open_candidate(config, name).map(Some)
+   }
 }
 
 impl H264Decoder for AndroidDecoder {
    fn open(config: &AvcConfig) -> Result<Self, DecodeError> {
-      let first_error = match Self::open_candidate(config, None) {
-         Ok(decoder) => return Ok(decoder),
-         Err(error @ (DecodeError::Backend(_) | DecodeError::UnsupportedFormat(_))) => error,
-         Err(error) => return Err(error),
-      };
-      // A vendor decoder can reject valid small frames or profiles. Retry the
-      // software codecs shipped by Android through the same MediaCodec API.
-      // Each failed candidate is dropped before opening the next, and each
-      // attempt builds a fresh format (configure can modify its contents).
-      for name in [c"c2.android.avc.decoder", c"OMX.google.h264.decoder"] {
-         match Self::open_candidate(config, Some(name)) {
-            Ok(decoder) => return Ok(decoder),
-            Err(DecodeError::Backend(_) | DecodeError::UnsupportedFormat(_)) => {}
-            Err(error) => return Err(error),
-         }
-      }
-      Err(first_error)
+      Self::open_attempt(config, 0)?.ok_or_else(|| {
+         DecodeError::UnsupportedFormat("Android MediaCodec has no H.264 decoder".to_string())
+      })
    }
 
    fn decode(
