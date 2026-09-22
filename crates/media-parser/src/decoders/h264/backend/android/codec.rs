@@ -3,7 +3,7 @@
 
 use super::image::{
    MEDIA_IMAGE2_BYTES, crop_from_edges, image_error, parse_media_image2, planar_from_description,
-   timestamp_to_token, token_to_timestamp,
+   reported_crop_edges, timestamp_to_token, token_to_timestamp,
 };
 use super::policy::{
    PumpEvent, PumpProgress, documented_output_region, validate_max_input_size,
@@ -20,14 +20,15 @@ use ndk_sys::{
    AMediaCodec_delete, AMediaCodec_dequeueInputBuffer, AMediaCodec_dequeueOutputBuffer,
    AMediaCodec_getInputBuffer, AMediaCodec_getOutputBuffer, AMediaCodec_getOutputFormat,
    AMediaCodec_queueInputBuffer, AMediaCodec_releaseOutputBuffer, AMediaCodec_start,
-   AMediaCodec_stop, AMediaCodecBufferInfo, AMediaFormat, AMediaFormat_delete,
-   AMediaFormat_getBuffer, AMediaFormat_getInt32, AMediaFormat_new, AMediaFormat_setBuffer,
-   AMediaFormat_setInt32, AMediaFormat_setString, media_status_t,
+   AMediaCodecBufferInfo, AMediaFormat, AMediaFormat_delete, AMediaFormat_getBuffer,
+   AMediaFormat_getInt32, AMediaFormat_new, AMediaFormat_setBuffer, AMediaFormat_setInt32,
+   AMediaFormat_setString, media_status_t,
 };
-use std::ffi::CStr;
+use std::ffi::{CStr, c_char};
 use std::num::TryFromIntError;
 use std::ptr::{self, NonNull};
 use std::slice;
+use std::sync::OnceLock;
 
 const MIME_AVC: &[u8] = b"video/avc\0";
 const KEY_MIME: &[u8] = b"mime\0";
@@ -38,10 +39,9 @@ const KEY_COLOR_FORMAT: &[u8] = b"color-format\0";
 const KEY_CSD_0: &[u8] = b"csd-0\0";
 const KEY_CSD_1: &[u8] = b"csd-1\0";
 const KEY_IMAGE_DATA: &[u8] = b"image-data\0";
-const KEY_CROP_LEFT: &[u8] = b"crop-left\0";
-const KEY_CROP_TOP: &[u8] = b"crop-top\0";
-const KEY_CROP_RIGHT: &[u8] = b"crop-right\0";
-const KEY_CROP_BOTTOM: &[u8] = b"crop-bottom\0";
+// The literal behind `AMEDIAFORMAT_KEY_DISPLAY_CROP`, which is itself an API 28
+// symbol and so cannot be referenced while `minSdk` is 24.
+const KEY_CROP: &[u8] = b"crop\0";
 const COLOR_FORMAT_YUV420_FLEXIBLE: i32 = 0x7f42_0888;
 const DEQUEUE_TIMEOUT_US: i64 = 10_000;
 
@@ -56,6 +56,33 @@ fn checked_i32(value: impl TryInto<i32>, name: &str) -> Result<i32, DecodeError>
       .ok()
       .filter(|value| *value > 0)
       .ok_or_else(|| DecodeError::UnsupportedFormat(format!("invalid Android {name}")))
+}
+
+type GetRectFn = unsafe extern "C" fn(
+   *mut AMediaFormat,
+   *const c_char,
+   *mut i32,
+   *mut i32,
+   *mut i32,
+   *mut i32,
+) -> bool;
+
+/// Resolves `AMediaFormat_getRect` (API 28+) at run time, once per process, so
+/// the library still loads on API 24–27 devices where the symbol is missing.
+fn get_rect_fn() -> Option<GetRectFn> {
+   static GET_RECT: OnceLock<Option<GetRectFn>> = OnceLock::new();
+   *GET_RECT.get_or_init(|| {
+      // `libmediandk.so` is already a load-time dependency, so this only takes
+      // a reference to the mapped library; it is deliberately never closed.
+      let library = unsafe { libc::dlopen(c"libmediandk.so".as_ptr(), libc::RTLD_NOW) };
+      if library.is_null() {
+         return None;
+      }
+      let symbol = unsafe { libc::dlsym(library, c"AMediaFormat_getRect".as_ptr()) };
+      // The NDK declares `AMediaFormat_getRect` with exactly this signature.
+      (!symbol.is_null())
+         .then(|| unsafe { std::mem::transmute::<*mut libc::c_void, GetRectFn>(symbol) })
+   })
 }
 
 fn check_status(status: media_status_t, operation: &str) -> Result<(), DecodeError> {
@@ -109,6 +136,22 @@ impl OwnedFormat {
       let mut value = 0;
       unsafe { AMediaFormat_getInt32(self.as_ptr(), key.as_ptr().cast(), &mut value) }
          .then_some(value)
+   }
+
+   fn get_rect(&self, key: &[u8]) -> Option<[i32; 4]> {
+      let get_rect = get_rect_fn()?;
+      let (mut left, mut top, mut right, mut bottom) = (0, 0, 0, 0);
+      unsafe {
+         get_rect(
+            self.as_ptr(),
+            key.as_ptr().cast(),
+            &mut left,
+            &mut top,
+            &mut right,
+            &mut bottom,
+         )
+      }
+      .then_some([left, top, right, bottom])
    }
 
    /// Returns the region MediaCodec reported for `key`, exactly as reported.
@@ -166,7 +209,6 @@ pub(crate) struct AndroidDecoder {
    output_format: Option<OwnedFormat>,
    annex_b: Vec<u8>,
    length_size: usize,
-   started: bool,
 }
 
 impl AndroidDecoder {
@@ -272,12 +314,11 @@ impl AndroidDecoder {
          let image = parse_media_image2(image_data)?;
          let crop = crop_from_edges(
             image,
-            [
-               format.get_i32(KEY_CROP_LEFT),
-               format.get_i32(KEY_CROP_TOP),
-               format.get_i32(KEY_CROP_RIGHT),
-               format.get_i32(KEY_CROP_BOTTOM),
-            ],
+            reported_crop_edges(
+               image,
+               format.get_rect(KEY_CROP),
+               [format.get_i32(KEY_WIDTH), format.get_i32(KEY_HEIGHT)],
+            ),
          )?;
          let mut output_size = 0usize;
          let output =
@@ -422,12 +463,11 @@ impl AndroidDecoder {
       let codec = NonNull::new(codec).ok_or_else(|| {
          DecodeError::UnsupportedFormat("Android MediaCodec has no H.264 decoder".to_string())
       })?;
-      let mut decoder = Self {
+      let decoder = Self {
          codec,
          output_format: None,
          annex_b,
          length_size: config.length_size,
-         started: false,
       };
       check_status(
          unsafe {
@@ -445,7 +485,6 @@ impl AndroidDecoder {
          unsafe { AMediaCodec_start(decoder.codec.as_ptr()) },
          "start",
       )?;
-      decoder.started = true;
       Ok(decoder)
    }
 
@@ -500,9 +539,9 @@ impl H264Decoder for AndroidDecoder {
 impl Drop for AndroidDecoder {
    fn drop(&mut self) {
       drop(self.output_format.take());
-      if self.started {
-         let _ = unsafe { AMediaCodec_stop(self.codec.as_ptr()) };
-      }
+      // No `AMediaCodec_stop`: on a codec that never produced input buffers
+      // (the API 24 software H.264 decoder) it blocks forever, while
+      // `AMediaCodec_delete` releases the codec from any state.
       let _ = unsafe { AMediaCodec_delete(self.codec.as_ptr()) };
    }
 }

@@ -9,7 +9,7 @@ rust-version = "1.94.0"
 [features]
 default = []
 thumbnails = ["dep:jpeg-encoder"]
-android-mediacodec = ["dep:ndk-sys"]
+android-mediacodec = ["dep:libc", "dep:ndk-sys"]
 windows-media-foundation = ["dep:windows"]
 apple-videotoolbox = [
    "dep:objc2-core-foundation",
@@ -31,6 +31,7 @@ serde = { version = "1.0.228", features = ["derive"] }
 jpeg-encoder = { version = "0.7.1", features = ["simd"], optional = true }
 
 [target.'cfg(target_os = "android")'.dependencies]
+libc = { version = "0.2.189", optional = true }
 ndk-sys = { version = "0.6.0", features = ["media"], optional = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]
@@ -38,6 +39,7 @@ windows = { version = "0.61.3", optional = true, features = [
    "Win32_Foundation",
    "Win32_Media_MediaFoundation",
    "Win32_System_Com",
+   "Win32_System_LibraryLoader",
 ] }
 
 [target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies]

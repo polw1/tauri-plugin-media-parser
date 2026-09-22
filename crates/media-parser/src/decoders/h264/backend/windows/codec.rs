@@ -7,6 +7,7 @@ use super::image::{
    select_contiguous_stride, timestamp_to_token, token_to_timestamp, validate_caller_buffer,
    validate_contiguous_length, validate_process_output_status,
 };
+use super::mfplat::{MfPlat, mfplat};
 use crate::decoders::h264::backend::{FrameSink, H264Decoder};
 use crate::decoders::h264::bitstream::{
    parameter_sets_annex_b, prepend_annex_b, sample_to_annex_b,
@@ -54,21 +55,25 @@ fn unsupported(reason: impl std::fmt::Display) -> DecodeError {
    DecodeError::UnsupportedFormat(format!("Windows Media Foundation {reason}"))
 }
 
-#[derive(Default)]
 struct PlatformGuard {
+   mf: &'static MfPlat,
    com_initialized: bool,
    mf_started: bool,
 }
 
 impl PlatformGuard {
    fn initialize() -> Result<Self, DecodeError> {
-      let mut guard = Self::default();
+      let mut guard = Self {
+         mf: mfplat()?,
+         com_initialized: false,
+         mf_started: false,
+      };
       let com_status = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
       if com_status.is_err() {
          return Err(raw_hresult_error("CoInitializeEx", com_status));
       }
       guard.com_initialized = true;
-      unsafe { MFStartup(MF_VERSION, MFSTARTUP_FULL) }
+      unsafe { guard.mf.startup(MF_VERSION, MFSTARTUP_FULL) }
          .map_err(|error| native_error("MFStartup", error))?;
       guard.mf_started = true;
       Ok(guard)
@@ -78,7 +83,7 @@ impl PlatformGuard {
 impl Drop for PlatformGuard {
    fn drop(&mut self) {
       if self.mf_started {
-         let _ = unsafe { MFShutdown() };
+         let _ = unsafe { self.mf.shutdown() };
       }
       if self.com_initialized {
          unsafe { CoUninitialize() };
@@ -112,10 +117,14 @@ pub(crate) struct WindowsDecoder {
    output_stream_id: u32,
    first_input: bool,
    output_copy: Vec<u8>,
-   _platform: PlatformGuard,
+   platform: PlatformGuard,
 }
 
 impl WindowsDecoder {
+   fn mf(&self) -> &'static MfPlat {
+      self.platform.mf
+   }
+
    fn transform(&self) -> &IMFTransform {
       self
          .transform
@@ -161,7 +170,7 @@ impl WindowsDecoder {
    }
 
    fn configure_input(&self) -> Result<(), DecodeError> {
-      let media_type = unsafe { MFCreateMediaType() }
+      let media_type = unsafe { self.mf().create_media_type() }
          .map_err(|error| native_error("MFCreateMediaType(input)", error))?;
       unsafe { media_type.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video) }
          .map_err(|error| native_error("set input major type", error))?;
@@ -248,8 +257,12 @@ impl WindowsDecoder {
       };
       let width = u32::try_from(coded_width)
          .map_err(|_| unsupported("coded width does not fit Media Foundation"))?;
-      let calculated = unsafe { MFGetStrideForBitmapInfoHeader(MFVideoFormat_NV12.data1, width) }
-         .map_err(|error| native_error("MFGetStrideForBitmapInfoHeader", error))?;
+      let calculated = unsafe {
+         self
+            .mf()
+            .get_stride_for_bitmap_info_header(MFVideoFormat_NV12.data1, width)
+      }
+      .map_err(|error| native_error("MFGetStrideForBitmapInfoHeader", error))?;
       let stride = select_contiguous_stride(default_stride, calculated, coded_width)?;
       nv12_layout(coded_width, coded_height, stride, MAX_DECODED_NV12_BYTES)?;
       Ok(Some(OutputGeometry {
@@ -305,7 +318,7 @@ impl WindowsDecoder {
       let length = u32::try_from(bytes.len()).map_err(|_| {
          DecodeError::Bitstream("H.264 input exceeds Media Foundation limits".into())
       })?;
-      let buffer = unsafe { MFCreateMemoryBuffer(length) }
+      let buffer = unsafe { self.mf().create_memory_buffer(length) }
          .map_err(|error| native_error("MFCreateMemoryBuffer(input)", error))?;
       let mut destination = ptr::null_mut();
       unsafe { buffer.Lock(&mut destination, None, None) }
@@ -324,7 +337,7 @@ impl WindowsDecoder {
       unlock_result?;
       unsafe { buffer.SetCurrentLength(length) }
          .map_err(|error| native_error("SetCurrentLength(input)", error))?;
-      let sample = unsafe { MFCreateSample() }
+      let sample = unsafe { self.mf().create_sample() }
          .map_err(|error| native_error("MFCreateSample(input)", error))?;
       unsafe { sample.AddBuffer(&buffer) }
          .map_err(|error| native_error("AddBuffer(input)", error))?;
@@ -350,8 +363,12 @@ impl WindowsDecoder {
          .map_err(|_| unsupported("coded width does not fit Media Foundation"))?;
       let height = u32::try_from(geometry.coded_height)
          .map_err(|_| unsupported("coded height does not fit Media Foundation"))?;
-      let buffer = unsafe { MFCreate2DMediaBuffer(width, height, MFVideoFormat_NV12.data1, false) }
-         .map_err(|error| native_error("MFCreate2DMediaBuffer(output)", error))?;
+      let buffer = unsafe {
+         self
+            .mf()
+            .create_2d_media_buffer(width, height, MFVideoFormat_NV12.data1, false)
+      }
+      .map_err(|error| native_error("MFCreate2DMediaBuffer(output)", error))?;
       let buffer_2d: IMF2DBuffer = buffer
          .cast()
          .map_err(|_| unsupported("output does not expose IMF2DBuffer"))?;
@@ -376,7 +393,7 @@ impl WindowsDecoder {
          usize::try_from(output.stream_info.cbAlignment)
             .map_err(|_| unsupported("output cbAlignment does not fit usize"))?,
       )?;
-      let sample = unsafe { MFCreateSample() }
+      let sample = unsafe { self.mf().create_sample() }
          .map_err(|error| native_error("MFCreateSample(output)", error))?;
       unsafe { sample.AddBuffer(&buffer) }
          .map_err(|error| native_error("AddBuffer(output)", error))?;
@@ -559,7 +576,7 @@ impl H264Decoder for WindowsDecoder {
          output_stream_id,
          first_input: true,
          output_copy: Vec::new(),
-         _platform: platform,
+         platform,
       };
       decoder.configure_input()?;
       decoder.select_nv12_output(false)?;

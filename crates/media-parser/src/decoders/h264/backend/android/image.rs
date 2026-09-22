@@ -128,6 +128,34 @@ pub(super) fn planar_from_description(
    })
 }
 
+/// Prefer the output rectangle (API 28+), then smaller output dimensions at
+/// origin (0, 0). If neither supplies a crop, retain the full MediaImage2.
+/// Output dimensions may themselves include padding on older OMX decoders.
+pub(super) fn reported_crop_edges(
+   image: MediaImage2,
+   rect: Option<[i32; 4]>,
+   dimensions: [Option<i32>; 2],
+) -> [Option<i32>; 4] {
+   if let Some(rect) = rect {
+      return rect.map(Some);
+   }
+   let [Some(width), Some(height)] = dimensions else {
+      return [None; 4];
+   };
+   let (Ok(w), Ok(h)) = (usize::try_from(width), usize::try_from(height)) else {
+      return [None; 4];
+   };
+   if w == 0
+      || h == 0
+      || w > image.coded_width
+      || h > image.coded_height
+      || (w == image.coded_width && h == image.coded_height)
+   {
+      return [None; 4];
+   }
+   [Some(0), Some(0), Some(width - 1), Some(height - 1)]
+}
+
 pub(super) fn crop_from_edges(
    image: MediaImage2,
    edges: [Option<i32>; 4],
@@ -380,6 +408,66 @@ mod tests {
       assert!(crop_from_edges(image, [Some(0), None, Some(3), Some(1)]).is_err());
       assert!(crop_from_edges(image, [Some(2), Some(0), Some(1), Some(1)]).is_err());
       assert!(crop_from_edges(image, [Some(-1), Some(0), Some(3), Some(1)]).is_err());
+   }
+
+   #[test]
+   fn uses_the_crop_rectangle_or_falls_back_to_the_full_image() {
+      let image = parse_media_image2(&image_blob(0)).expect("valid image");
+      let edges = reported_crop_edges(image, Some([1, 0, 2, 0]), [Some(1), Some(1)]);
+      assert_eq!(edges, [Some(1), Some(0), Some(2), Some(0)]);
+      assert_eq!(
+         crop_from_edges(image, edges).expect("inclusive rectangle"),
+         Crop {
+            x: 1,
+            y: 0,
+            width: 2,
+            height: 1,
+         }
+      );
+      assert_eq!(reported_crop_edges(image, None, [None; 2]), [None; 4]);
+      assert_eq!(
+         crop_from_edges(image, reported_crop_edges(image, None, [None; 2])).expect("full image"),
+         Crop {
+            x: 0,
+            y: 0,
+            width: 4,
+            height: 2,
+         }
+      );
+   }
+
+   #[test]
+   fn uses_smaller_output_dimensions_when_the_rectangle_is_unavailable() {
+      let image = parse_media_image2(&image_blob(0)).expect("valid image");
+      for (dimensions, expected) in [
+         ([Some(4), Some(1)], [0, 0, 3, 0]),
+         ([Some(2), Some(2)], [0, 0, 1, 1]),
+         ([Some(2), Some(1)], [0, 0, 1, 0]),
+      ] {
+         assert_eq!(
+            reported_crop_edges(image, None, dimensions),
+            expected.map(Some)
+         );
+      }
+   }
+
+   #[test]
+   fn ignores_missing_invalid_or_non_reducing_output_dimensions() {
+      let image = parse_media_image2(&image_blob(0)).expect("valid image");
+      for dimensions in [
+         [None, Some(1)],
+         [Some(2), None],
+         [Some(0), Some(1)],
+         [Some(2), Some(0)],
+         [Some(-1), Some(1)],
+         [Some(2), Some(-1)],
+         [Some(5), Some(1)],
+         [Some(2), Some(3)],
+         [Some(4), Some(2)],
+         [Some(i32::MAX), Some(i32::MAX)],
+      ] {
+         assert_eq!(reported_crop_edges(image, None, dimensions), [None; 4]);
+      }
    }
 
    #[test]

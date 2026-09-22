@@ -1964,6 +1964,7 @@ dependencies = [
  "futures",
  "jpeg-decoder",
  "jpeg-encoder",
+ "libc",
  "ndk-sys",
  "objc2-core-foundation",
  "objc2-core-media",
