@@ -304,6 +304,7 @@ fn parse_avc_config_inner(
       display_height: display_height?,
       max_input_size: None,
       resolved_full_range: None,
+      resolved_codec_dimensions: None,
    })
 }
 

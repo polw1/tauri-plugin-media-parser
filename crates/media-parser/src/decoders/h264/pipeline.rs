@@ -5,8 +5,8 @@ use super::color::{GopColor, resolve_gop_color};
 use super::frame;
 use super::jpeg::yuv_to_jpeg as planar_yuv_to_jpeg;
 use super::{
-   AvcConfig, DecodeError, DecodedImage, FrameToken, JpegQuality, ThumbnailSize,
-   prepare_job_config, prepare_job_max_input_size,
+   AvcConfig, DecodeError, DecodedImage, FrameToken, JpegQuality, PreparedJobInput, ThumbnailSize,
+   prepare_job_config, prepare_job_input,
 };
 use std::sync::{
    Arc,
@@ -93,7 +93,7 @@ pub(crate) struct DecodeBatch<'a, S> {
 #[cfg(any(test, h264_backend))]
 struct PreparedBatch {
    color: GopColor,
-   max_input_size: usize,
+   input: PreparedJobInput,
 }
 
 #[cfg(any(test, h264_backend))]
@@ -128,7 +128,7 @@ pub(crate) fn decode_frame_batches_to_jpeg_with<D: H264Decoder, S: AsRef<[u8]>>(
    for batch in batches {
       metadata.push(PreparedBatch {
          color: resolve_gop_color(batch.config, batch.samples),
-         max_input_size: prepare_job_max_input_size(batch.config, batch.samples)?,
+         input: prepare_job_input(batch.config, batch.samples)?,
       });
    }
 
@@ -150,12 +150,17 @@ pub(crate) fn decode_frame_batches_to_jpeg_with<D: H264Decoder, S: AsRef<[u8]>>(
          })
          .map_or(batches.len(), |offset| group_start + 1 + offset);
 
-      let max_input_size = metadata[group_start + 1..group_end]
-         .iter()
-         .fold(metadata[group_start].max_input_size, |largest, batch| {
-            largest.max(batch.max_input_size)
-         });
-      let prepared = prepare_job_config(config, max_input_size, first_color.full_range);
+      let max_input_size = metadata[group_start + 1..group_end].iter().fold(
+         metadata[group_start].input.max_input_size,
+         |largest, batch| largest.max(batch.input.max_input_size),
+      );
+      // Grouped batches share one sample entry, so the first batch's codec
+      // dimensions open the session that the later batches continue.
+      let input = PreparedJobInput {
+         max_input_size,
+         ..metadata[group_start].input
+      };
+      let prepared = prepare_job_config(config, input, first_color.full_range);
 
       let mut attempt = 0usize;
       let mut first_error = None;
@@ -671,6 +676,7 @@ mod tests {
          display_height: 2,
          max_input_size: None,
          resolved_full_range: None,
+         resolved_codec_dimensions: None,
       }
    }
 

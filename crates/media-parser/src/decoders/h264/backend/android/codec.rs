@@ -6,8 +6,8 @@ use super::image::{
    reported_crop_edges, timestamp_to_token, token_to_timestamp,
 };
 use super::policy::{
-   PumpEvent, PumpProgress, documented_output_region, validate_max_input_size,
-   validated_output_region_len,
+   PumpEvent, PumpProgress, documented_output_region, validate_codec_dimensions,
+   validate_max_input_size, validated_output_region_len,
 };
 use crate::decoders::h264::backend::{FrameSink, H264Decoder};
 use crate::decoders::h264::bitstream::{nals_annex_b, sample_to_annex_b_into_reserved};
@@ -435,8 +435,9 @@ impl AndroidDecoder {
             "Android MediaCodec input buffer reservation failed".to_string(),
          )
       })?;
-      let width = checked_i32(config.display_width, "display width")?;
-      let height = checked_i32(config.display_height, "display height")?;
+      let (width, height) = validate_codec_dimensions(config.resolved_codec_dimensions)?;
+      let width = checked_i32(width, "codec width")?;
+      let height = checked_i32(height, "codec height")?;
       let max_input_size = checked_i32(max_input_size, "max input size")?;
       let csd_0 = nals_annex_b(&config.sps)?;
       let csd_1 = nals_annex_b(&config.pps)?;

@@ -18,6 +18,7 @@ pub struct AvcConfig {
    pub display_height: u32,
    pub(crate) max_input_size: Option<usize>,
    pub(crate) resolved_full_range: Option<bool>,
+   pub(crate) resolved_codec_dimensions: Option<(u32, u32)>,
 }
 
 pub(crate) const MAX_AVC_PARAMETER_SET_BYTES: usize = 1024 * 1024;
@@ -159,33 +160,49 @@ pub struct DecodedImage {
    pub data: Vec<u8>,
 }
 
+/// Per-batch values a backend needs before it opens, derived from the samples.
+#[cfg(feature = "thumbnails")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PreparedJobInput {
+   max_input_size: usize,
+   /// Android only: `KEY_WIDTH`/`KEY_HEIGHT` for MediaCodec.
+   codec_dimensions: Option<(u32, u32)>,
+}
+
 #[cfg(feature = "thumbnails")]
 fn prepare_job_config(
    config: &AvcConfig,
-   max_input_size: usize,
+   input: PreparedJobInput,
    resolved_full_range: bool,
 ) -> AvcConfig {
    let mut prepared = config.clone();
-   prepared.max_input_size = Some(max_input_size);
+   prepared.max_input_size = Some(input.max_input_size);
    prepared.resolved_full_range = Some(resolved_full_range);
+   prepared.resolved_codec_dimensions = input.codec_dimensions;
    prepared
 }
 
 #[cfg(feature = "thumbnails")]
-fn prepare_job_max_input_size<S: AsRef<[u8]>>(
+fn prepare_job_input<S: AsRef<[u8]>>(
    config: &AvcConfig,
    samples: &[S],
-) -> Result<usize, DecodeError> {
+) -> Result<PreparedJobInput, DecodeError> {
    #[cfg(all(target_os = "android", feature = "android-mediacodec"))]
-   let max_input_size = prepare_android_max_input_size(config, samples)?;
+   let input = prepare_android_job_input(config, samples)?;
    #[cfg(apple_videotoolbox_backend)]
-   let max_input_size = prepare_apple_max_input_size(config, samples)?;
+   let input = PreparedJobInput {
+      max_input_size: prepare_apple_max_input_size(config, samples)?,
+      codec_dimensions: None,
+   };
    #[cfg(not(any(
       all(target_os = "android", feature = "android-mediacodec"),
       apple_videotoolbox_backend
    )))]
-   let max_input_size = max_input_size(config, samples)?;
-   Ok(max_input_size)
+   let input = PreparedJobInput {
+      max_input_size: max_input_size(config, samples)?,
+      codec_dimensions: None,
+   };
+   Ok(input)
 }
 
 #[cfg(any(test, apple_videotoolbox_backend))]
@@ -206,17 +223,46 @@ fn validate_android_job_dimensions(width: u32, height: u32) -> Result<(), Decode
    backend::android::validate_job_dimensions(width, height)
 }
 
+/// Some muxers write 0 into the `stsd` visual fields and leave the frame size to
+/// the SPS. When either axis is 0, MediaCodec is configured with the whole coded
+/// pair of the first interpretable SPS; the axes are never mixed.
 #[cfg(any(test, all(target_os = "android", feature = "android-mediacodec")))]
-fn prepare_android_max_input_size<S: AsRef<[u8]>>(
+fn prepare_android_job_input<S: AsRef<[u8]>>(
    config: &AvcConfig,
    samples: &[S],
-) -> Result<usize, DecodeError> {
-   validate_android_job_dimensions(config.display_width, config.display_height)?;
-   max_input_size_and_sps(config, samples, |sps| {
+) -> Result<PreparedJobInput, DecodeError> {
+   let stsd_dimensions = (config.display_width != 0 && config.display_height != 0)
+      .then_some((config.display_width, config.display_height));
+   if let Some((width, height)) = stsd_dimensions {
+      validate_android_job_dimensions(width, height)?;
+   }
+   let mut first_sps_dimensions = None;
+   let max_input_size = max_input_size_and_sps(config, samples, |sps| {
       let Some((width, height)) = sps_coded_dimensions(sps) else {
          return Ok(());
       };
-      backend::android::validate_sps_dimensions(width, height)
+      backend::android::validate_sps_dimensions(width, height)?;
+      first_sps_dimensions.get_or_insert((width, height));
+      Ok(())
+   })?;
+   let codec_dimensions = match stsd_dimensions {
+      Some(dimensions) => dimensions,
+      None => {
+         let (width, height) = first_sps_dimensions.ok_or_else(|| {
+            DecodeError::UnsupportedFormat(format!(
+               "Android MediaCodec needs an interpretable SPS for the {}x{} sample entry",
+               config.display_width, config.display_height
+            ))
+         })?;
+         (
+            u32::try_from(width).expect("validated SPS width fits u32"),
+            u32::try_from(height).expect("validated SPS height fits u32"),
+         )
+      }
+   };
+   Ok(PreparedJobInput {
+      max_input_size,
+      codec_dimensions: Some(codec_dimensions),
    })
 }
 
@@ -302,6 +348,7 @@ mod tests {
          display_height: 16,
          max_input_size: None,
          resolved_full_range: None,
+         resolved_codec_dimensions: None,
       }
    }
    #[test]
@@ -329,16 +376,26 @@ mod tests {
          display_height: 2,
          max_input_size: None,
          resolved_full_range: None,
+         resolved_codec_dimensions: None,
       };
       let samples = vec![vec![1, 0x41]];
 
-      let max_input_size = prepare_job_max_input_size(&config, &samples).expect("valid job input");
-      let prepared = prepare_job_config(&config, max_input_size, true);
+      let input = prepare_job_input(&config, &samples).expect("valid job input");
+      let prepared = prepare_job_config(
+         &config,
+         PreparedJobInput {
+            codec_dimensions: Some((2, 2)),
+            ..input
+         },
+         true,
+      );
 
       assert_eq!(prepared.max_input_size, Some(5));
       assert_eq!(prepared.resolved_full_range, Some(true));
+      assert_eq!(prepared.resolved_codec_dimensions, Some((2, 2)));
       assert_eq!(config.max_input_size, None);
       assert_eq!(config.resolved_full_range, None);
+      assert_eq!(config.resolved_codec_dimensions, None);
    }
 
    #[test]
@@ -367,10 +424,72 @@ mod tests {
    fn android_preflight_validates_each_real_sps_pair() {
       let config = android_preflight_config(vec![geometry_sps(1_023, 0), geometry_sps(0, 1_023)]);
 
-      let prepared = prepare_android_max_input_size(&config, &[vec![1, 0x65]])
+      let prepared = prepare_android_job_input(&config, &[vec![1, 0x65]])
          .expect("each wide/short and narrow/tall SPS fits independently");
 
-      assert_eq!(prepared, 5);
+      assert_eq!(prepared.max_input_size, 5);
+   }
+
+   #[test]
+   fn android_preparation_uses_first_interpretable_sps_for_zero_sample_entry() {
+      let mut config = android_preflight_config(vec![
+         vec![0x67, 144, 0, 30, 0x80],
+         geometry_sps(19, 14),
+         geometry_sps(39, 29),
+      ]);
+      config.display_width = 0;
+      config.display_height = 0;
+
+      let prepared =
+         prepare_android_job_input(&config, &[vec![1, 0x65]]).expect("SPS supplies geometry");
+      assert_eq!(prepared.codec_dimensions, Some((320, 240)));
+      assert_eq!((config.display_width, config.display_height), (0, 0));
+
+      let in_band = geometry_sps(19, 14);
+      config.sps.clear();
+      let mut sample = vec![u8::try_from(in_band.len()).unwrap()];
+      sample.extend_from_slice(&in_band);
+      sample.extend_from_slice(&[1, 0x65]);
+      let prepared =
+         prepare_android_job_input(&config, &[sample]).expect("in-band SPS supplies geometry");
+      assert_eq!(prepared.codec_dimensions, Some((320, 240)));
+   }
+
+   #[test]
+   fn android_preparation_rejects_zero_sample_entry_without_interpretable_sps() {
+      for sps in [Vec::new(), vec![vec![0x67, 144, 0, 30, 0x80]]] {
+         let mut config = android_preflight_config(sps);
+         config.display_width = 0;
+         config.display_height = 0;
+         assert!(matches!(
+            prepare_android_job_input(&config, &[vec![1, 0x65]]),
+            Err(DecodeError::UnsupportedFormat(message)) if message.contains("SPS")
+         ));
+      }
+   }
+
+   #[test]
+   fn android_preparation_takes_whole_sps_pair_when_one_axis_is_zero() {
+      for (width, height) in [(1_920, 0), (0, 1_080)] {
+         let mut config = android_preflight_config(vec![geometry_sps(19, 14)]);
+         config.display_width = width;
+         config.display_height = height;
+
+         let prepared =
+            prepare_android_job_input(&config, &[vec![1, 0x65]]).expect("SPS supplies geometry");
+         assert_eq!(prepared.codec_dimensions, Some((320, 240)));
+      }
+   }
+
+   #[test]
+   fn android_preparation_preserves_nonzero_sample_entry() {
+      let mut config = android_preflight_config(vec![geometry_sps(119, 67)]);
+      config.display_width = 1_920;
+      config.display_height = 1_080;
+
+      let prepared =
+         prepare_android_job_input(&config, &[vec![1, 0x65]]).expect("stsd dimensions are valid");
+      assert_eq!(prepared.codec_dimensions, Some((1_920, 1_080)));
    }
 
    #[test]
@@ -378,7 +497,7 @@ mod tests {
       let oversized = geometry_sps(1_024, 0);
       let config = android_preflight_config(vec![oversized.clone()]);
       assert!(matches!(
-         prepare_android_max_input_size(&config, &[vec![1, 0x65]]),
+         prepare_android_job_input(&config, &[vec![1, 0x65]]),
          Err(DecodeError::ResourceLimit(_))
       ));
 
@@ -386,13 +505,13 @@ mod tests {
       let mut sample = vec![u8::try_from(oversized.len()).expect("test SPS fits one-byte length")];
       sample.extend_from_slice(&oversized);
       assert!(matches!(
-         prepare_android_max_input_size(&config, &[sample]),
+         prepare_android_job_input(&config, &[sample]),
          Err(DecodeError::ResourceLimit(_))
       ));
 
       let huge_u64_geometry = android_preflight_config(vec![geometry_sps(u32::MAX - 1, 0)]);
       assert!(matches!(
-         prepare_android_max_input_size(&huge_u64_geometry, &[vec![1, 0x65]]),
+         prepare_android_job_input(&huge_u64_geometry, &[vec![1, 0x65]]),
          Err(DecodeError::ResourceLimit(_))
       ));
    }
@@ -401,7 +520,7 @@ mod tests {
    fn android_preflight_keeps_unparseable_sps_permissive() {
       let config = android_preflight_config(vec![vec![0x67, 144, 0, 30, 0x80]]);
 
-      assert!(prepare_android_max_input_size(&config, &[vec![1, 0x65]]).is_ok());
+      assert!(prepare_android_job_input(&config, &[vec![1, 0x65]]).is_ok());
    }
 
    #[test]

@@ -1450,6 +1450,7 @@ mod tests {
                   display_height: 2,
                   max_input_size: None,
                   resolved_full_range: None,
+                  resolved_codec_dimensions: None,
                }
                .into(),
             ),
@@ -1497,6 +1498,7 @@ mod tests {
                display_height: 2,
                max_input_size: None,
                resolved_full_range: None,
+               resolved_codec_dimensions: None,
             }
             .into(),
          )],

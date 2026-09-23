@@ -823,6 +823,7 @@ mod tests {
          display_height: 2,
          max_input_size: None,
          resolved_full_range: None,
+         resolved_codec_dimensions: None,
       };
       let sample = avc_sample(&[baseline_sps(1, 1, true), pps(3, 1), idr_slice(3)]);
 
@@ -846,6 +847,7 @@ mod tests {
          display_height: 2,
          max_input_size: None,
          resolved_full_range: None,
+         resolved_codec_dimensions: None,
       };
       let sample = avc_sample(&[sps(66, 2, None, true, 0, 0), pps(2, 2), idr_slice(2)]);
 
@@ -866,6 +868,7 @@ mod tests {
          display_height: 2,
          max_input_size: None,
          resolved_full_range: None,
+         resolved_codec_dimensions: None,
       };
       let first = avc_sample(&[baseline_sps(0, 6, false), pps(0, 0), idr_slice(0)]);
       let second = avc_sample(&[baseline_sps(1, 1, false), pps(1, 1), idr_slice(1)]);
@@ -886,6 +889,7 @@ mod tests {
          display_height: 2,
          max_input_size: None,
          resolved_full_range: None,
+         resolved_codec_dimensions: None,
       };
       let sample = avc_sample(&[idr_slice(1)]);
 
@@ -905,6 +909,7 @@ mod tests {
          display_height: 2,
          max_input_size: None,
          resolved_full_range: None,
+         resolved_codec_dimensions: None,
       };
       let sample = avc_sample(&[idr_slice(9)]);
 
@@ -929,6 +934,7 @@ mod tests {
          display_height: 2,
          max_input_size: None,
          resolved_full_range: None,
+         resolved_codec_dimensions: None,
       };
       let sample = avc_sample(&[idr_slice(0)]);
 
@@ -948,6 +954,7 @@ mod tests {
          display_height: 2,
          max_input_size: None,
          resolved_full_range: None,
+         resolved_codec_dimensions: None,
       };
       // An unsupported profile, a slice naming an unknown PPS, and a sample
       // with no slice at all must all decode with the default policy.
@@ -977,6 +984,7 @@ mod tests {
          display_height: 2,
          max_input_size: None,
          resolved_full_range: None,
+         resolved_codec_dimensions: None,
       };
       let sample = avc_sample(&[idr_slice(0)]);
       let expected = resolve_gop_color(&config, std::slice::from_ref(&sample));

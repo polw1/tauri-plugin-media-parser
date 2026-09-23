@@ -73,6 +73,16 @@ pub(super) fn validate_max_input_size(max_input_size: Option<usize>) -> Result<u
    Ok(max_input_size)
 }
 
+pub(super) fn validate_codec_dimensions(
+   dimensions: Option<(u32, u32)>,
+) -> Result<(u32, u32), DecodeError> {
+   dimensions.ok_or_else(|| {
+      DecodeError::BackendContract(
+         "Android MediaCodec open requires resolved_codec_dimensions".to_string(),
+      )
+   })
+}
+
 pub(super) fn validated_output_region_len(
    reported_size: i32,
 ) -> Result<Option<usize>, DecodeError> {
@@ -253,6 +263,15 @@ mod tests {
          validate_max_input_size(Some(MAX_DECODED_NV12_BYTES + 1)),
          Err(DecodeError::ResourceLimit(_))
       ));
+   }
+
+   #[test]
+   fn open_requires_resolved_codec_dimensions() {
+      assert!(matches!(
+         validate_codec_dimensions(None),
+         Err(DecodeError::BackendContract(message)) if message.contains("resolved_codec_dimensions")
+      ));
+      assert_eq!(validate_codec_dimensions(Some((320, 240))), Ok((320, 240)));
    }
 
    #[test]

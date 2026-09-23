@@ -721,6 +721,7 @@ mod tests {
          display_height: 16,
          max_input_size: Some(1024),
          resolved_full_range: Some(false),
+         resolved_codec_dimensions: None,
       }
    }
 

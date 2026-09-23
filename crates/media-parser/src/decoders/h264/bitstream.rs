@@ -392,6 +392,7 @@ mod tests {
          display_height: 2,
          max_input_size: None,
          resolved_full_range: None,
+         resolved_codec_dimensions: None,
       };
       let samples = vec![vec![1, 0x41], vec![2, 0x65, 0x88, 1, 0x41]];
 
@@ -428,6 +429,7 @@ mod tests {
          display_height: 2,
          max_input_size: None,
          resolved_full_range: None,
+         resolved_codec_dimensions: None,
       };
       assert_eq!(
          parameter_sets_annex_b(&config).expect("valid parameter sets"),
@@ -443,6 +445,7 @@ mod tests {
          display_height: 2,
          max_input_size: None,
          resolved_full_range: None,
+         resolved_codec_dimensions: None,
       };
       assert_eq!(parameter_sets_annex_b(&avc3), Ok(Vec::new()));
    }
@@ -476,6 +479,7 @@ mod tests {
          display_height: 2,
          max_input_size: None,
          resolved_full_range: None,
+         resolved_codec_dimensions: None,
       }
    }
 
