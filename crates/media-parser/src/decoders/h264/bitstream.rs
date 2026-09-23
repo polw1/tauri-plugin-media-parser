@@ -290,6 +290,37 @@ pub(crate) fn sample_to_annex_b_into_reserved(
    .map_err(DecodeError::Bitstream)
 }
 
+/// Rewrites a 3-byte-length AVCC sample into `output` with 4-byte lengths,
+/// the widest NAL header CoreMedia accepts. A 4-byte length grows each NAL
+/// exactly as much as a start code, so `max_input_size` bounds this output
+/// too. `output` is cleared first, so callers can reuse one buffer across a
+/// whole GOP.
+#[cfg(any(test, apple_videotoolbox_backend))]
+pub(crate) fn avcc3_sample_to_avcc4(
+   sample: &[u8],
+   output: &mut Vec<u8>,
+) -> Result<(), DecodeError> {
+   output.clear();
+   visit_avc_nals(sample, 3, |nal| {
+      append_avcc4_nal(output, nal).map_err(|error| error.to_string())
+   })
+   .map_err(DecodeError::Bitstream)
+}
+
+#[cfg(any(test, apple_videotoolbox_backend))]
+fn append_avcc4_nal(output: &mut Vec<u8>, nal: &[u8]) -> Result<(), DecodeError> {
+   let additional = annex_b_nal_len(nal)?;
+   extend_annex_b_total(output.len(), additional)?;
+   let length = u32::try_from(nal.len())
+      .map_err(|_| DecodeError::Bitstream("H.264 NAL size overflow".to_string()))?;
+   output
+      .try_reserve(additional)
+      .map_err(|_| DecodeError::ResourceLimit("H.264 sample allocation failed".to_string()))?;
+   output.extend_from_slice(&length.to_be_bytes());
+   output.extend_from_slice(nal);
+   Ok(())
+}
+
 /// Prefixes an already validated Annex B access unit without exceeding the
 /// same checked limit used while rewriting it.
 #[cfg(any(test, all(target_os = "windows", feature = "windows-media-foundation")))]
@@ -614,6 +645,37 @@ mod tests {
 
       assert_eq!(sets.sps, [vec![0x67, 0x42]]);
       assert_eq!(sets.pps, [vec![0x68, 0xce]]);
+   }
+
+   #[test]
+   fn widens_three_byte_avcc_lengths_and_reuses_the_output() {
+      let first = avcc_sample(3, &[&[0x67, 0x42], &[0x65, 0x88, 0x99]]);
+      let second = avcc_sample(3, &[&[0x41]]);
+      let mut output = Vec::new();
+
+      avcc3_sample_to_avcc4(&first, &mut output).expect("valid 3-byte AVCC sample");
+      let capacity = output.capacity();
+      assert_eq!(
+         output,
+         avcc_sample(4, &[&[0x67, 0x42], &[0x65, 0x88, 0x99]])
+      );
+      assert_eq!(annex_b_sample_len(&first, 3), Ok(output.len()));
+
+      avcc3_sample_to_avcc4(&second, &mut output).expect("second 3-byte AVCC sample");
+      assert_eq!(output, [0, 0, 0, 1, 0x41]);
+      assert_eq!(output.capacity(), capacity);
+   }
+
+   #[test]
+   fn rejects_truncated_three_byte_avcc_samples() {
+      let mut output = vec![0xff; 8];
+
+      for truncated in [&[0, 0, 3, 0x65, 0x88][..], &[0, 0, 1, 0x41, 0, 0][..]] {
+         assert!(matches!(
+            avcc3_sample_to_avcc4(truncated, &mut output),
+            Err(DecodeError::Bitstream(message)) if message.contains("truncated")
+         ));
+      }
    }
 
    #[test]

@@ -816,6 +816,93 @@ mod tests {
    }
 
    #[test]
+   fn retryable_open_failure_opens_the_next_decoder_once() {
+      let config = reusable_config(2);
+      let samples = [vec![1, 0x65]];
+      let tokens = [FrameToken::new(0)];
+      let wanted = [(FrameToken::new(0), 1)];
+      let mut attempts = Vec::new();
+
+      let output = decode_frame_batches_to_jpeg_with(
+         &[retry_batch(&config, &samples, &tokens, &wanted)],
+         JpegQuality::default(),
+         ThumbnailSize::default(),
+         &OutputBudget::new(None),
+         |_, attempt| {
+            attempts.push(attempt);
+            if attempt == 0 {
+               return Err(DecodeError::Backend("configure rejected".to_string()));
+            }
+            Ok(Some(RetryFakeDecoder {
+               behavior: RetryBehavior::Succeed,
+               pending: Vec::new(),
+            }))
+         },
+      )
+      .expect("the next decoder should open and decode");
+
+      assert_eq!(output.len(), 1);
+      assert_eq!(output[0].len(), 1);
+      assert_eq!(attempts, vec![0, 1]);
+   }
+
+   #[test]
+   fn non_retryable_open_failure_does_not_open_another_decoder() {
+      let config = reusable_config(2);
+      let samples = [vec![1, 0x65]];
+      let tokens = [FrameToken::new(0)];
+      let wanted = [(FrameToken::new(0), 1)];
+      let mut attempts = Vec::new();
+
+      let error = decode_frame_batches_to_jpeg_with(
+         &[retry_batch(&config, &samples, &tokens, &wanted)],
+         JpegQuality::default(),
+         ThumbnailSize::default(),
+         &OutputBudget::new(None),
+         |_, attempt| {
+            attempts.push(attempt);
+            Err::<Option<RetryFakeDecoder>, _>(DecodeError::Bitstream(
+               "invalid configuration".to_string(),
+            ))
+         },
+      )
+      .expect_err("bitstream failures are not decoder-specific");
+
+      assert!(
+         matches!(error, DecodeError::Bitstream(message) if message == "invalid configuration")
+      );
+      assert_eq!(attempts, vec![0]);
+   }
+
+   #[test]
+   fn missing_first_decoder_candidate_reports_no_candidate() {
+      let config = reusable_config(2);
+      let samples = [vec![1, 0x65]];
+      let tokens = [FrameToken::new(0)];
+      let wanted = [(FrameToken::new(0), 1)];
+      let mut attempts = Vec::new();
+
+      let error = decode_frame_batches_to_jpeg_with(
+         &[retry_batch(&config, &samples, &tokens, &wanted)],
+         JpegQuality::default(),
+         ThumbnailSize::default(),
+         &OutputBudget::new(None),
+         |_, attempt| {
+            attempts.push(attempt);
+            Ok::<Option<RetryFakeDecoder>, _>(None)
+         },
+      )
+      .expect_err("no decoder candidate can open");
+
+      assert!(matches!(
+         error,
+         DecodeError::UnsupportedFormat(message)
+            if message == "no H.264 decoder candidate is available"
+      ));
+      assert_eq!(attempts, vec![0]);
+   }
+
+   #[test]
    fn output_budget_accepts_the_exact_weighted_limit() {
       let budget = OutputBudget::new(Some(12));
 

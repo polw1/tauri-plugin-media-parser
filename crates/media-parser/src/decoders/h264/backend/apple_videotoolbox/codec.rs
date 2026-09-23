@@ -5,7 +5,9 @@ use super::error::{contract_null, native_error};
 use super::image::{CleanRect, Nv12Plane, OwnedNv12, copy_nv12, validate_nv12_geometry};
 use super::platform::{decoder_specification, record_hardware_acceleration};
 use super::state::{CallbackState, CallbackTicket, DecoderLifecycle, validate_completion};
-use crate::decoders::h264::bitstream::{AvcParameterSets, collect_avc_parameter_sets};
+use crate::decoders::h264::bitstream::{
+   AvcParameterSets, avcc3_sample_to_avcc4, collect_avc_parameter_sets,
+};
 use crate::decoders::h264::{AvcConfig, DecodeError, FrameToken};
 use crate::helpers::ffi::valid_ffi_region;
 use objc2_core_foundation::{CFDictionary, CFNumber, CFRetained, CFType, Type};
@@ -74,17 +76,26 @@ unsafe fn adopt_create_result<T: Type>(
 
 #[derive(Debug, Clone, Copy)]
 struct ValidatedOpenConfig {
+   /// NAL header length CoreMedia sees; 3-byte AVCC lengths are widened to 4.
+   length_size: usize,
    max_input_size: usize,
    pixel_format: u32,
 }
 
 fn validate_open_config(config: &AvcConfig) -> Result<ValidatedOpenConfig, DecodeError> {
-   if !matches!(config.length_size, 1 | 2 | 4) {
-      return Err(DecodeError::UnsupportedFormat(format!(
-         "Apple VideoToolbox does not support AVCC NAL length size {}",
-         config.length_size
-      )));
-   }
+   // CoreMedia accepts only 1-, 2-, or 4-byte NAL lengths.
+   // Widen non-standard 3-byte lengths to preserve compatibility
+   // with files accepted by the other backends.
+   let length_size = match config.length_size {
+      1 | 2 | 4 => config.length_size,
+      3 => 4,
+      _ => {
+         return Err(DecodeError::UnsupportedFormat(format!(
+            "Apple VideoToolbox does not support AVCC NAL length size {}",
+            config.length_size
+         )));
+      }
+   };
    let max_input_size = config.max_input_size.ok_or_else(|| {
       DecodeError::BackendContract(
          "Apple VideoToolbox open requires prepared max_input_size".to_string(),
@@ -106,9 +117,34 @@ fn validate_open_config(config: &AvcConfig) -> Result<ValidatedOpenConfig, Decod
       kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
    };
    Ok(ValidatedOpenConfig {
+      length_size,
       max_input_size,
       pixel_format,
    })
+}
+
+/// Returns the bytes submitted to CoreMedia, widening 3-byte AVCC lengths
+/// into `avcc4`, and checks `max_input_size` against those bytes.
+fn decoder_input<'a>(
+   sample: &'a [u8],
+   length_size: usize,
+   max_input_size: usize,
+   avcc4: &'a mut Vec<u8>,
+) -> Result<&'a [u8], DecodeError> {
+   let input = if length_size == 3 {
+      avcc3_sample_to_avcc4(sample, avcc4)?;
+      avcc4.as_slice()
+   } else {
+      sample
+   };
+   if input.len() > max_input_size {
+      return Err(DecodeError::BackendContract(format!(
+         "Apple VideoToolbox input has {} bytes but max_input_size is {}",
+         input.len(),
+         max_input_size
+      )));
+   }
+   Ok(input)
 }
 
 fn sample_timing(token: FrameToken) -> Result<CMSampleTimingInfo, DecodeError> {
@@ -155,6 +191,8 @@ pub(crate) struct AppleVideoToolboxDecoder {
    config: AvcConfig,
    validated: ValidatedOpenConfig,
    lifecycle: DecoderLifecycle,
+   /// Reused across samples when 3-byte AVCC lengths are widened to 4.
+   avcc4_sample: Vec<u8>,
 }
 
 fn create_format_description(
@@ -551,7 +589,7 @@ impl AppleVideoToolboxDecoder {
          Some(Initialization::WaitingForParameterSets)
       ) {
          let parameter_sets = collect_avc_parameter_sets(&self.config, sample)?;
-         let format = create_format_description(&parameter_sets, self.config.length_size)?;
+         let format = create_format_description(&parameter_sets, self.validated.length_size)?;
          let ready = create_session(format, &self.callback_state, self.validated.pixel_format)?;
          self.initialization = Some(Initialization::Ready(ready));
       }
@@ -587,7 +625,7 @@ impl H264Decoder for AppleVideoToolboxDecoder {
             sps: config.sps.clone(),
             pps: config.pps.clone(),
          };
-         let format = create_format_description(&parameter_sets, config.length_size)?;
+         let format = create_format_description(&parameter_sets, validated.length_size)?;
          Initialization::Ready(create_session(
             format,
             &callback_state,
@@ -602,6 +640,7 @@ impl H264Decoder for AppleVideoToolboxDecoder {
          config: config.clone(),
          validated,
          lifecycle: DecoderLifecycle::Active,
+         avcc4_sample: Vec::new(),
       })
    }
 
@@ -612,20 +651,24 @@ impl H264Decoder for AppleVideoToolboxDecoder {
       sink: &mut FrameSink<'_>,
    ) -> Result<(), DecodeError> {
       self.lifecycle.ensure_decode()?;
-      if sample.len() > self.validated.max_input_size {
-         return self.fail(DecodeError::BackendContract(format!(
-            "Apple VideoToolbox input has {} bytes but max_input_size is {}",
-            sample.len(),
-            self.validated.max_input_size
-         )));
-      }
+      // Parameter sets are collected from the original AVCC sample.
       if let Err(error) = self.initialize_from_first_sample(sample) {
          return self.fail(error);
       }
-      let compressed = match self
-         .ready_session()
-         .and_then(|ready| create_compressed_sample(&ready.format, sample, token))
-      {
+      let mut avcc4_sample = std::mem::take(&mut self.avcc4_sample);
+      let compressed = decoder_input(
+         sample,
+         self.config.length_size,
+         self.validated.max_input_size,
+         &mut avcc4_sample,
+      )
+      .and_then(|input| {
+         self
+            .ready_session()
+            .and_then(|ready| create_compressed_sample(&ready.format, input, token))
+      });
+      self.avcc4_sample = avcc4_sample;
+      let compressed = match compressed {
          Ok(compressed) => compressed,
          Err(error) => return self.fail(error),
       };
@@ -741,10 +784,48 @@ mod tests {
    }
 
    #[test]
-   fn open_config_rejects_three_byte_nal_lengths_before_core_media() {
+   fn open_config_widens_three_byte_nal_lengths_for_core_media() {
+      for (length_size, effective) in [(1, 1), (2, 2), (3, 4), (4, 4)] {
+         let validated = validate_open_config(&config(length_size)).expect("valid AVCC length");
+         assert_eq!(validated.length_size, effective);
+      }
+   }
+
+   #[test]
+   fn open_config_rejects_invalid_nal_lengths_before_core_media() {
+      for length_size in [0, 5] {
+         let expected = format!("length size {length_size}");
+         assert!(matches!(
+            validate_open_config(&config(length_size)),
+            Err(DecodeError::UnsupportedFormat(message)) if message.contains(&expected)
+         ));
+      }
+   }
+
+   #[test]
+   fn decoder_input_limits_the_widened_sample_actually_submitted() {
+      let avcc3 = [0, 0, 4, 0x65, 0x88, 0x99, 0xaa];
+      let mut avcc4 = Vec::new();
+
       assert!(matches!(
-         validate_open_config(&config(3)),
-         Err(DecodeError::UnsupportedFormat(message)) if message.contains("length size 3")
+         decoder_input(&avcc3, 3, 7, &mut avcc4),
+         Err(DecodeError::BackendContract(message)) if message.contains("has 8 bytes")
+      ));
+      assert_eq!(
+         decoder_input(&avcc3, 3, 8, &mut avcc4),
+         Ok(&[0, 0, 0, 4, 0x65, 0x88, 0x99, 0xaa][..])
+      );
+      assert!(matches!(
+         decoder_input(&[0, 0, 4, 0x65], 3, 8, &mut avcc4),
+         Err(DecodeError::Bitstream(message)) if message.contains("truncated")
+      ));
+
+      let original = [0, 0, 0, 1, 0x41];
+      let submitted = decoder_input(&original, 4, 5, &mut avcc4).expect("fits exactly");
+      assert_eq!(submitted.as_ptr(), original.as_ptr());
+      assert!(matches!(
+         decoder_input(&original, 4, 4, &mut avcc4),
+         Err(DecodeError::BackendContract(message)) if message.contains("has 5 bytes")
       ));
    }
 
