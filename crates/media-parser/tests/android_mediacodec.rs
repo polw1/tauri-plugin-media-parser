@@ -10,8 +10,8 @@ mod common;
 
 use common::native_h264::{
    BFRAME_REFERENCES, EmbeddedReader, MAX_COMPONENT_ERROR, MAX_MEAN_COMPONENT_ERROR,
-   assert_matches_reference, bt709_rgb_interpreted_as_bt601, comparison_errors,
-   corrupt_first_idr_sample, decode_jpeg, reduced_rgb,
+   assert_matches_reference, avc3_with_in_band_parameter_sets, bt709_rgb_interpreted_as_bt601,
+   comparison_errors, corrupt_first_idr_sample, decode_jpeg, reduced_rgb,
 };
 use media_parser::{
    MediaParserError, PixelFormat,
@@ -109,5 +109,21 @@ async fn mediacodec_honors_media_image_crop_geometry() {
    assert!(
       maximum > MAX_COMPONENT_ERROR || mean > MAX_MEAN_COMPONENT_ERROR,
       "the RGB tolerance must reject the deliberately wrong BT.601 matrix"
+   );
+}
+
+#[tokio::test]
+async fn mediacodec_accepts_empty_avc3_configuration_with_in_band_headers() {
+   let reader = EmbeddedReader(avc3_with_in_band_parameter_sets());
+
+   let frames = read_frames(&reader, 0, &[Duration::ZERO], ThumbnailOptions::default())
+      .await
+      .expect("MediaCodec learns SPS/PPS from the avc3 access unit");
+
+   assert_eq!(frames.len(), 1);
+   assert_matches_reference(
+      "MediaCodec",
+      &frames[0],
+      include_bytes!("fixtures/bframes_frame0_reference.jpg"),
    );
 }

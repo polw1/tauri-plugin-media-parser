@@ -546,3 +546,111 @@ impl Drop for AndroidDecoder {
       let _ = unsafe { AMediaCodec_delete(self.codec.as_ptr()) };
    }
 }
+
+#[cfg(test)]
+mod tests {
+   use super::*;
+   use crate::decoders::h264::frame::PlanarYuv;
+   use crate::decoders::h264::{AvcColorMetadata, prepare_job_config, prepare_job_input};
+   use crate::format::mp4::atoms::{Mp4Nav, find_box_ref, read_box};
+   use crate::helpers::bytes::{read_u16_be, read_u32_be};
+
+   const FIXTURE: &[u8] = include_bytes!("../../../../../tests/fixtures/bframes_video.mp4");
+
+   fn parameter_sets(avcc: &[u8], offset: &mut usize, count: u8) -> Vec<Vec<u8>> {
+      (0..count)
+         .map(|_| {
+            let length = usize::from(read_u16_be(avcc, *offset).unwrap());
+            let set = avcc[*offset + 2..*offset + 2 + length].to_vec();
+            *offset += 2 + length;
+            set
+         })
+         .collect()
+   }
+
+   /// Returns the fixture's prepared job configuration and its first (IDR) sample.
+   fn first_sample_job() -> (AvcConfig, Vec<u8>) {
+      let (_, _, moov) = find_box_ref(FIXTURE, *b"moov").unwrap();
+      let stbl = moov.nav(&[*b"trak", *b"mdia", *b"minf", *b"stbl"]).unwrap();
+      let entry = read_box(stbl.nav(&[*b"stsd"]).unwrap(), 8).unwrap();
+      assert_eq!(entry.fourcc, *b"avc1");
+      let avcc = entry.payload[78..].nav(&[*b"avcC"]).unwrap();
+      let mut offset = 6;
+      let sps = parameter_sets(avcc, &mut offset, avcc[5] & 0x1f);
+      let pps_count = avcc[offset];
+      offset += 1;
+      let pps = parameter_sets(avcc, &mut offset, pps_count);
+      let config = AvcConfig {
+         length_size: usize::from(avcc[4] & 3) + 1,
+         sps,
+         pps,
+         color: AvcColorMetadata::default(),
+         display_width: u32::from(read_u16_be(entry.payload, 24).unwrap()),
+         display_height: u32::from(read_u16_be(entry.payload, 26).unwrap()),
+         max_input_size: None,
+         resolved_full_range: None,
+         resolved_codec_dimensions: None,
+      };
+
+      let stsz = stbl.nav(&[*b"stsz"]).unwrap();
+      assert_eq!(
+         read_u32_be(stsz, 4),
+         Some(0),
+         "fixture has per-sample sizes"
+      );
+      let size = usize::try_from(read_u32_be(stsz, 12).unwrap()).unwrap();
+      let chunk = usize::try_from(read_u32_be(stbl.nav(&[*b"stco"]).unwrap(), 8).unwrap()).unwrap();
+      let sample = FIXTURE[chunk..chunk + size].to_vec();
+
+      let input = prepare_job_input(&config, &[&sample]).expect("fixture job input is valid");
+      (prepare_job_config(&config, input, false), sample)
+   }
+
+   #[test]
+   fn first_named_candidate_opens_and_decodes_an_access_unit() {
+      let (config, sample) = first_sample_job();
+      let mut decoder = AndroidDecoder::open_attempt(&config, 1)
+         .expect("c2.android.avc.decoder opens")
+         .expect("attempt 1 names a decoder");
+
+      let mut frames = Vec::new();
+      let mut sink = |token: FrameToken, frame: &PlanarYuv<'_>| {
+         frames.push((token, frame.crop.width, frame.crop.height));
+         Ok(())
+      };
+      decoder
+         .decode(&sample, FrameToken::new(0), &mut sink)
+         .expect("the IDR access unit decodes");
+      decoder.drain(&mut sink).expect("the decoder drains");
+
+      let expected_size = config.resolved_codec_dimensions.unwrap();
+      assert_eq!(
+         frames,
+         [(
+            FrameToken::new(0),
+            usize::try_from(expected_size.0).unwrap(),
+            usize::try_from(expected_size.1).unwrap(),
+         )]
+      );
+   }
+
+   /// On AOSP Android 15 `OMX.google.h264.decoder` is an `<Alias>` of
+   /// `c2.android.avc.decoder`, so decoding again would not reach another
+   /// implementation; opening and configuring the name is what can differ.
+   #[test]
+   fn second_named_candidate_opens_and_configures() {
+      let (config, _) = first_sample_job();
+
+      assert!(matches!(
+         AndroidDecoder::open_attempt(&config, 2),
+         Ok(Some(_))
+      ));
+   }
+
+   #[test]
+   fn attempts_after_the_named_candidates_end_the_retry() {
+      let (config, _) = first_sample_job();
+
+      assert!(matches!(AndroidDecoder::open_attempt(&config, 3), Ok(None)));
+   }
+}
