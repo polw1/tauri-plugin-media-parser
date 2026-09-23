@@ -281,6 +281,15 @@ outlive the rest of the response.
 MP4/M4V/MOV containers. Other video codecs and audio-only formats such as MP3
 do not have a thumbnail path.
 
+Decoding uses the operating system: MediaCodec on Android, Media Foundation on
+Windows, and VideoToolbox on macOS/iOS. The plugin selects the backend automatically.
+Linux and other targets keep metadata, tracks, covers, and subtitles, but
+`getThumbnails` rejects with `thumbnail extraction is not supported on this platform`.
+This is a breaking change from the bundled OpenH264 backend: Linux calls now
+reject even with `timestamps: []`, which previously returned an empty result.
+No software H.264 decoder is bundled. If the preferred Android decoder rejects
+the configuration, the plugin retries the software codecs provided by Android.
+
 ```typescript
 import { getThumbnails } from '@silvermine/tauri-plugin-media-parser';
 
@@ -322,6 +331,8 @@ batch.
 The plugin caches up to eight parsed thumbnail sessions. Remote sessions expire
 five minutes after they are built, and local sessions after one minute without
 reuse; concurrent requests for the same cold source share one index build.
+Up to two thumbnail extractions run at once across sessions. Additional requests
+wait before reading video samples; this limit is independent of the index cache.
 
 H.264 decoding and JPEG encoding are prohibitively slow when their dependencies
 use Cargo's unoptimized development profile. Add this to the Tauri

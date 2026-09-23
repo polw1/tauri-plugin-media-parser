@@ -12,7 +12,9 @@
 //! and is released after the last sample view is dropped.
 
 use super::atoms::{SampleLocator, SampleSizes, StscEntry, sample_size};
-use crate::errors::{MediaParserError, Result};
+use crate::errors::MediaParserError;
+#[cfg(any(test, h264_backend))]
+use crate::errors::Result;
 use crate::stream::StreamReader;
 use futures::stream::{self, StreamExt};
 use std::collections::HashMap;
@@ -140,6 +142,7 @@ fn allocate_located_samples(capacity: usize) -> SampleReadResult<Vec<LocatedSamp
    Ok(samples)
 }
 
+#[cfg(any(test, h264_backend))]
 pub(super) async fn read_samples_coalesced(
    reader: &dyn StreamReader,
    sample_indices: &[u32],
@@ -162,6 +165,7 @@ pub(super) async fn read_samples_coalesced(
    .map_err(SampleReadError::into_media_error)
 }
 
+#[cfg(any(test, h264_backend))]
 pub(super) async fn read_samples_coalesced_classified(
    reader: &dyn StreamReader,
    sample_indices: &[u32],

@@ -53,6 +53,7 @@ pub mod atoms;
 pub mod metadata;
 mod sample_io;
 pub mod subtitles;
+#[cfg(h264_backend)]
 pub mod thumbnails;
 pub mod tracks;
 
@@ -127,9 +128,11 @@ pub async fn read_cover(reader: &dyn StreamReader) -> Result<Option<CoverArt>> {
 }
 
 // Re-export for direct access
+#[cfg(h264_backend)]
 pub use crate::decoders::h264::ThumbnailSize;
 pub use metadata::read_metadata;
 pub use subtitles::{SubtitleIndex, read_subtitles, read_subtitles_in_range};
+#[cfg(h264_backend)]
 pub use thumbnails::{
    MAX_THUMBNAIL_OUTPUTS, ThumbnailIndex, ThumbnailOptions, read_frame, read_frames, read_keyframes,
 };

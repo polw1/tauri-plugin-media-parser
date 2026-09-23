@@ -1,39 +1,53 @@
 use std::collections::HashMap;
+#[cfg(native_h264_backend)]
 use std::sync::Arc;
+#[cfg(native_h264_backend)]
 use std::time::Duration;
 use tauri::{State, command};
 
+use media_parser::{BaseTrackMeta, MediaParser, Metadata, TrackType};
+#[cfg(native_h264_backend)]
 use media_parser::{
-   BaseTrackMeta, Frame, JpegQuality, MediaParser, Metadata, StreamReader, TrackType,
+   Frame, JpegQuality, StreamReader,
    format::mp4::{MAX_THUMBNAIL_OUTPUTS, ThumbnailIndex, ThumbnailOptions, ThumbnailSize},
 };
 
 use crate::Result;
-use crate::envelope::{cover_envelope, encode_thumbnail_envelope, run_envelope_task};
+use crate::envelope::cover_envelope;
+#[cfg(native_h264_backend)]
+use crate::envelope::{encode_thumbnail_envelope, run_envelope_task};
+#[cfg(native_h264_backend)]
 use crate::session_cache::SessionPool;
+use crate::source::{DefaultHeaders, open_reader};
+#[cfg(native_h264_backend)]
 use crate::source::{
-   DefaultHeaders, MediaSourceKey, MergedHeaders, SESSION_REAPER_INTERVAL, open_reader,
-   session_expiration, source_key,
+   MediaSourceKey, MergedHeaders, SESSION_REAPER_INTERVAL, session_expiration, source_key,
 };
 
+#[cfg(native_h264_backend)]
 const MAX_THUMBNAIL_SESSIONS: usize = 8;
+#[cfg(native_h264_backend)]
 const MAX_THUMBNAIL_OUTPUT_BYTES: usize = 256 * 1024 * 1024;
 
+#[cfg(native_h264_backend)]
 #[derive(Clone, PartialEq, Eq, Hash)]
 struct ThumbnailSessionKey {
    source: MediaSourceKey,
    track_id: u32,
 }
 
+#[cfg(native_h264_backend)]
 struct ThumbnailSession {
    reader: Arc<dyn StreamReader>,
    index: Arc<ThumbnailIndex>,
 }
 
+#[cfg(native_h264_backend)]
 pub(crate) struct ThumbnailSessions {
    pool: SessionPool<ThumbnailSessionKey, ThumbnailSession>,
 }
 
+#[cfg(native_h264_backend)]
 impl Default for ThumbnailSessions {
    fn default() -> Self {
       Self {
@@ -42,6 +56,7 @@ impl Default for ThumbnailSessions {
    }
 }
 
+#[cfg(native_h264_backend)]
 async fn thumbnail_session(
    sessions: &ThumbnailSessions,
    source: &str,
@@ -64,6 +79,7 @@ async fn thumbnail_session(
       .await
 }
 
+#[cfg(native_h264_backend)]
 async fn thumbnail_frames(
    sessions: &ThumbnailSessions,
    source: &str,
@@ -149,6 +165,7 @@ pub(crate) async fn get_cover(
 }
 
 /// Extract thumbnails from a video track at millisecond timestamps.
+#[cfg(native_h264_backend)]
 #[command]
 #[allow(clippy::too_many_arguments)] // Tauri exposes each command field as a top-level IPC argument.
 pub(crate) async fn get_thumbnails(
@@ -185,6 +202,7 @@ pub(crate) async fn get_thumbnails(
 
 /// Validates the caller-supplied JPEG quality, if any, against the encoder's
 /// 1-100 range. `None` keeps the thumbnail-grade default.
+#[cfg(native_h264_backend)]
 fn thumbnail_options(
    quality: Option<u8>,
    max_width: Option<u32>,
@@ -219,6 +237,7 @@ fn thumbnail_options(
    })
 }
 
+#[cfg(native_h264_backend)]
 fn thumbnail_durations(timestamps_ms: &[u64]) -> Vec<Duration> {
    timestamps_ms
       .iter()
@@ -229,6 +248,7 @@ fn thumbnail_durations(timestamps_ms: &[u64]) -> Vec<Duration> {
 
 /// Validates the requested output count before allocating converted or
 /// deduplicated collections, then preserves first-seen timestamp order.
+#[cfg(native_h264_backend)]
 fn prepare_thumbnail_timestamps(timestamps_ms: &[u64]) -> Result<(Vec<Duration>, Vec<usize>)> {
    if timestamps_ms.len() > MAX_THUMBNAIL_OUTPUTS {
       return Err(crate::Error::Custom(format!(
@@ -330,6 +350,39 @@ mod tests {
    use super::*;
    use media_parser::{AudioTrackMeta, SubtitleTrackMeta, UnknownTrackMeta, VideoTrackMeta};
 
+   #[cfg(not(native_h264_backend))]
+   #[tokio::test]
+   async fn unsupported_thumbnail_command_rejects_without_opening_the_source() {
+      use tauri::{
+         Manager,
+         test::{mock_builder, mock_context, noop_assets},
+      };
+      let app = mock_builder()
+         .plugin(crate::init())
+         .build(mock_context(noop_assets()))
+         .expect("plugin initializes on unsupported platforms");
+      let result = get_thumbnails(
+         "/missing/video.mp4".into(),
+         vec![0],
+         None,
+         None,
+         None,
+         None,
+         None,
+         None,
+         app.state(),
+         app.state(),
+      )
+      .await;
+      let Err(error) = result else {
+         panic!("unsupported platform must reject thumbnails")
+      };
+      assert_eq!(
+         error.to_string(),
+         "thumbnail extraction is not supported on this platform"
+      );
+   }
+
    fn base_track(id: u32, codec: &str) -> BaseTrackMeta {
       BaseTrackMeta {
          id,
@@ -373,6 +426,7 @@ mod tests {
    }
 
    #[tokio::test]
+   #[cfg(native_h264_backend)]
    async fn thumbnail_session_key_distinguishes_track_ids() {
       // The fixture's track 1 is video and track 2 is audio, so the second
       // request must build its own index and fail. Dropping `track_id` from the
@@ -398,6 +452,7 @@ mod tests {
    }
 
    #[test]
+   #[cfg(native_h264_backend)]
    fn omitted_thumbnail_quality_keeps_the_default() {
       let options = thumbnail_options(None, None, None).expect("omitted options are valid");
 
@@ -407,6 +462,7 @@ mod tests {
    }
 
    #[test]
+   #[cfg(native_h264_backend)]
    fn thumbnail_dimensions_are_validated_and_default_independently() {
       assert_eq!(
          thumbnail_options(None, Some(640), Some(360))
@@ -425,6 +481,7 @@ mod tests {
    }
 
    #[test]
+   #[cfg(native_h264_backend)]
    fn thumbnail_quality_is_rejected_outside_the_encoder_range() {
       assert_eq!(
          thumbnail_options(Some(80), None, None)
@@ -447,6 +504,7 @@ mod tests {
    }
 
    #[test]
+   #[cfg(native_h264_backend)]
    fn thumbnail_durations_use_milliseconds() {
       assert_eq!(
          thumbnail_durations(&[0, 250, 1_000]),
@@ -459,6 +517,7 @@ mod tests {
    }
 
    #[test]
+   #[cfg(native_h264_backend)]
    fn prepares_unique_thumbnail_timestamps_and_request_order() {
       let (timestamps, order) = prepare_thumbnail_timestamps(&[0, 250, 0])
          .expect("three thumbnail outputs are within the limit");
@@ -468,6 +527,7 @@ mod tests {
    }
 
    #[test]
+   #[cfg(native_h264_backend)]
    fn thumbnail_request_count_is_checked_before_deduplication() {
       let timestamps = vec![0; MAX_THUMBNAIL_OUTPUTS + 1];
 
@@ -479,6 +539,7 @@ mod tests {
    }
 
    #[test]
+   #[cfg(native_h264_backend)]
    fn thumbnail_request_accepts_the_output_count_boundary() {
       let timestamps = vec![0; MAX_THUMBNAIL_OUTPUTS];
       let (_, order) = prepare_thumbnail_timestamps(&timestamps)
@@ -488,6 +549,7 @@ mod tests {
    }
 
    #[tokio::test]
+   #[cfg(native_h264_backend)]
    async fn accurate_thumbnail_mode_returns_the_requested_frame_timestamp() {
       let sessions = ThumbnailSessions::default();
       let frames = thumbnail_frames(
@@ -507,6 +569,7 @@ mod tests {
    }
 
    #[tokio::test]
+   #[cfg(native_h264_backend)]
    async fn fast_thumbnail_mode_returns_the_actual_keyframe_timestamp() {
       let sessions = ThumbnailSessions::default();
       let frames = thumbnail_frames(
@@ -526,6 +589,7 @@ mod tests {
    }
 
    #[tokio::test]
+   #[cfg(native_h264_backend)]
    async fn repeated_thumbnail_requests_reuse_the_same_session() {
       let sessions = ThumbnailSessions::default();
       let source = video_fixture_source();
@@ -541,6 +605,7 @@ mod tests {
    }
 
    #[tokio::test]
+   #[cfg(native_h264_backend)]
    async fn concurrent_requests_for_a_cold_source_build_a_single_session() {
       let sessions = Arc::new(ThumbnailSessions::default());
       let source = video_fixture_source();
@@ -586,6 +651,7 @@ mod tests {
    }
 
    #[tokio::test]
+   #[cfg(native_h264_backend)]
    async fn empty_thumbnail_request_does_not_open_the_source() {
       let sessions = ThumbnailSessions::default();
       let frames = thumbnail_frames(
@@ -701,4 +767,37 @@ mod tests {
       assert!(!object.contains_key("sampleRate"));
       assert!(!object.contains_key("frameRate"));
    }
+}
+
+#[cfg(not(native_h264_backend))]
+#[derive(Default)]
+pub(crate) struct ThumbnailSessions;
+
+#[cfg(not(native_h264_backend))]
+fn unsupported_thumbnail_error() -> crate::Error {
+   crate::Error::Custom("thumbnail extraction is not supported on this platform".to_string())
+}
+
+/// Reports the stable thumbnail command as unavailable until this platform
+/// has a native H.264 backend.
+#[cfg(not(native_h264_backend))]
+#[command]
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn get_thumbnails(
+   source: String,
+   timestamps: Vec<u64>,
+   track_id: Option<u32>,
+   accurate: Option<bool>,
+   quality: Option<u8>,
+   max_width: Option<u32>,
+   max_height: Option<u32>,
+   headers: Option<HashMap<String, String>>,
+   sessions: State<'_, ThumbnailSessions>,
+   defaults: State<'_, DefaultHeaders>,
+) -> Result<tauri::ipc::Response> {
+   let _ = (
+      source, timestamps, track_id, accurate, quality, max_width, max_height, headers, sessions,
+      defaults,
+   );
+   Err(unsupported_thumbnail_error())
 }

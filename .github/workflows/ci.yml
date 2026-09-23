@@ -11,7 +11,7 @@ env:
 jobs:
    ci:
       name: Continuous Integration
-      runs-on: ubuntu-latest
+      runs-on: ubuntu-24.04
 
       steps:
          - name: Checkout repository
@@ -41,8 +41,88 @@ jobs:
          - name: Run standards checks
            run: npm run standards
 
-         - name: Run cargo check
-           run: cargo check --workspace --all-targets
-
+         # `npm run standards` lints every target with clippy, so no `cargo check`.
          - name: Run cargo tests
            run: cargo test --workspace
+
+   native-thumbnails:
+      name: Native thumbnails (${{ matrix.os }})
+      strategy:
+         fail-fast: false
+         matrix:
+            include:
+               - os: windows-2025
+               - os: macos-15
+      runs-on: ${{ matrix.os }}
+      steps:
+         - name: Checkout repository
+           uses: actions/checkout@v4
+         - name: Setup Rust toolchain
+           uses: actions-rust-lang/setup-rust-toolchain@v1
+           with:
+              toolchain: '1.94.0'
+              components: clippy
+              cache: true
+         # `cargo clippy` and `cargo test` already build every target, so no `cargo check`.
+         - name: Lint native backend
+           run: cargo clippy --workspace --all-targets -- -D warnings
+         - name: Test native backend
+           run: cargo test --workspace
+         - name: Install iOS check target
+           if: matrix.os == 'macos-15'
+           run: rustup target add aarch64-apple-ios
+         - name: Build iOS plugin
+           if: matrix.os == 'macos-15'
+           run: cargo build -p tauri-plugin-media-parser --target aarch64-apple-ios
+         - name: Check iOS backend
+           if: matrix.os == 'macos-15'
+           run: cargo check -p media-parser --all-targets --target aarch64-apple-ios --features thumbnails,apple-videotoolbox
+
+   android:
+      name: Android
+      runs-on: ubuntu-24.04
+
+      steps:
+         - name: Checkout repository
+           uses: actions/checkout@v4
+
+         - name: Setup Rust toolchain
+           uses: actions-rust-lang/setup-rust-toolchain@v1
+           with:
+              toolchain: '1.94.0'
+              target: aarch64-linux-android,x86_64-linux-android
+              components: clippy
+              cache: true
+
+         # A transitive dependency compiles C through cc-rs. The NDK ships
+         # `aarch64-linux-android24-clang` (24 is `minSdk`) and `llvm-ar`, not the
+         # unversioned names cc-rs probes for, so both are named in full. Linking the test
+         # executables also needs the linker variable, which `cargo check` would not.
+         - name: Export NDK toolchain
+           run: |
+              NDK_BIN="$ANDROID_NDK_LATEST_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
+              echo "CC_aarch64_linux_android=$NDK_BIN/aarch64-linux-android24-clang" >> "$GITHUB_ENV"
+              echo "AR_aarch64_linux_android=$NDK_BIN/llvm-ar" >> "$GITHUB_ENV"
+              echo "CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=$NDK_BIN/aarch64-linux-android24-clang" >> "$GITHUB_ENV"
+
+         - name: Lint Android backend
+           run: cargo clippy -p media-parser --all-targets --target aarch64-linux-android --no-default-features --features thumbnails,android-mediacodec -- -D warnings
+
+         # The ARM64 suites cannot run on the x86_64 emulator, so this step only compiles
+         # and links them. The following x86_64 step executes the runtime tests.
+         - name: Build Android test executables
+           run: cargo test -p media-parser --target aarch64-linux-android --no-default-features --features thumbnails,android-mediacodec --no-run
+
+         - name: Enable KVM
+           run: |
+              echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+              sudo udevadm control --reload-rules
+              sudo udevadm trigger --name-match=kvm
+
+         - name: Run Android tests on emulator
+           uses: reactivecircus/android-emulator-runner@v2
+           with:
+              api-level: 35
+              target: google_apis
+              arch: x86_64
+              script: crates/media-parser/tests/run_android_mediacodec.sh

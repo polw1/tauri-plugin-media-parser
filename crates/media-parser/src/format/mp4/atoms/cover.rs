@@ -1,15 +1,12 @@
 //! Embedded MP4 cover-art parsing.
 
-use super::Mp4Nav;
+use super::{Mp4Nav, find_ilst_in_meta};
 use crate::helpers::{detect_image_format, read_u32_be};
 use crate::types::{CoverArt, PixelFormat};
 
 pub fn parse_cover_art(moov_payload: &[u8]) -> Option<CoverArt> {
    let meta = moov_payload.nav(&[*b"udta", *b"meta"])?;
-   let covr = meta
-      .get(4..)
-      .and_then(|payload| payload.nav(&[*b"ilst", *b"covr"]))
-      .or_else(|| meta.nav(&[*b"ilst", *b"covr"]))?;
+   let covr = find_ilst_in_meta(meta)?.nav(&[*b"covr"])?;
    let data = covr.nav(&[*b"data"])?;
    let image = data.get(8..)?;
    if image.is_empty() {

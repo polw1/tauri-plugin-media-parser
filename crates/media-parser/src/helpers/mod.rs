@@ -5,11 +5,13 @@
 //!
 //! # Modules
 //!
-//! - [`bytes`] - Big-endian and little-endian byte reading functions
+//! - [`bytes`] - Big-endian, little-endian and native-endian byte reading functions
+//! - [`ffi`] - Safety preconditions for borrowing platform-owned memory
 //! - [`image`] - Image format detection from magic bytes
 //! - [`text`] - Text encoding/decoding (UTF-8, UTF-16, Latin-1)
 
-mod bytes;
+pub(crate) mod bytes;
+pub(crate) mod ffi;
 mod image;
 mod text;
 

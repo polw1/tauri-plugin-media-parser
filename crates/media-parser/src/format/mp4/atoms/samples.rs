@@ -1,12 +1,25 @@
 //! MP4 sample-table parsing and sample reads.
 
+use super::Mp4Nav;
 use super::budget::{RetainedBudget, TableParseError, TableResult, budgeted_vec};
+#[cfg(h264_backend)]
+use super::iter_boxes;
 use super::sample_timing::{CompositionOffset, stts_sample_count};
-use super::{Mp4Nav, iter_boxes};
-use crate::decoders::h264::{AvcColorMetadata, AvcConfig};
-use crate::helpers::{read_u16_be, read_u32_be, read_u64_be};
+#[cfg(h264_backend)]
+use super::visual_dimensions;
+#[cfg(h264_backend)]
+use crate::decoders::h264::{AvcColorMetadata, AvcConfig, MAX_AVC_PARAMETER_SET_BYTES};
+#[cfg(h264_backend)]
+use crate::helpers::read_u16_be;
+use crate::helpers::{read_u32_be, read_u64_be};
 
 const SAMPLE_SIZE_PREFIX_INTERVAL: usize = 256;
+
+#[cfg(h264_backend)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AvcConfigParseError {
+   ResourceLimit,
+}
 
 #[derive(Debug, Clone, Copy)]
 pub struct StscEntry {
@@ -45,6 +58,7 @@ impl SampleSizes {
       self.size_prefixes.capacity()
    }
 
+   #[cfg(any(test, h264_backend))]
    fn from_parts(fixed_size: u32, sizes: Vec<u32>, sample_count: u32) -> Option<Self> {
       if fixed_size != 0 {
          return sizes.is_empty().then_some(Self {
@@ -157,6 +171,7 @@ pub fn table_entries(buf: &[u8], entry_size: usize) -> Option<usize> {
 /// a matrix, so the caller keeps looking at later `colr` boxes. Colour is a
 /// presentation hint: an unreadable one must never invalidate the `avcC` it
 /// sits next to.
+#[cfg(h264_backend)]
 fn parse_colr(payload: &[u8], color: &mut AvcColorMetadata) -> bool {
    let Some(parameter_type) = payload.get(..4) else {
       return false;
@@ -176,7 +191,32 @@ fn parse_colr(payload: &[u8], color: &mut AvcColorMetadata) -> bool {
    true
 }
 
-pub fn parse_avc_config(sample_entry_payload: &[u8]) -> Option<AvcConfig> {
+#[cfg(all(test, h264_backend))]
+fn parse_avc_config(sample_entry_payload: &[u8]) -> Option<AvcConfig> {
+   parse_avc_config_checked(sample_entry_payload)
+      .ok()
+      .flatten()
+}
+
+#[cfg(h264_backend)]
+pub(crate) fn parse_avc_config_checked(
+   sample_entry_payload: &[u8],
+) -> Result<Option<AvcConfig>, AvcConfigParseError> {
+   let mut resource_limited = false;
+   let config = parse_avc_config_inner(sample_entry_payload, &mut resource_limited);
+   if resource_limited {
+      Err(AvcConfigParseError::ResourceLimit)
+   } else {
+      Ok(config)
+   }
+}
+
+#[cfg(h264_backend)]
+fn parse_avc_config_inner(
+   sample_entry_payload: &[u8],
+   resource_limited: &mut bool,
+) -> Option<AvcConfig> {
+   let (display_width, display_height) = visual_dimensions(sample_entry_payload);
    let children = sample_entry_payload.get(78..)?;
    let mut avcc = None;
    let mut color = AvcColorMetadata::default();
@@ -196,25 +236,62 @@ pub fn parse_avc_config(sample_entry_payload: &[u8]) -> Option<AvcConfig> {
    let length_size = (avcc[4] & 0x03) as usize + 1;
    let sps_count = avcc[5] & 0x1f;
    let mut offset = 6usize;
+   let mut parameter_set_bytes = 0usize;
    let mut sps = Vec::new();
-   sps.try_reserve(sps_count as usize).ok()?;
+   if sps.try_reserve(sps_count as usize).is_err() {
+      *resource_limited = true;
+      return None;
+   }
    for _ in 0..sps_count {
       let length = read_u16_be(avcc, offset)? as usize;
       offset = offset.checked_add(2)?;
       let end = offset.checked_add(length)?;
-      sps.push(avcc.get(offset..end)?.to_vec());
+      let Some(total) = parameter_set_bytes
+         .checked_add(length)
+         .filter(|total| *total <= MAX_AVC_PARAMETER_SET_BYTES)
+      else {
+         *resource_limited = true;
+         return None;
+      };
+      parameter_set_bytes = total;
+      let source = avcc.get(offset..end)?;
+      let mut owned = Vec::new();
+      if owned.try_reserve_exact(length).is_err() {
+         *resource_limited = true;
+         return None;
+      }
+      owned.extend_from_slice(source);
+      sps.push(owned);
       offset = end;
    }
 
    let pps_count = *avcc.get(offset)?;
    offset = offset.checked_add(1)?;
    let mut pps = Vec::new();
-   pps.try_reserve(pps_count as usize).ok()?;
+   if pps.try_reserve(pps_count as usize).is_err() {
+      *resource_limited = true;
+      return None;
+   }
    for _ in 0..pps_count {
       let length = read_u16_be(avcc, offset)? as usize;
       offset = offset.checked_add(2)?;
       let end = offset.checked_add(length)?;
-      pps.push(avcc.get(offset..end)?.to_vec());
+      let Some(total) = parameter_set_bytes
+         .checked_add(length)
+         .filter(|total| *total <= MAX_AVC_PARAMETER_SET_BYTES)
+      else {
+         *resource_limited = true;
+         return None;
+      };
+      parameter_set_bytes = total;
+      let source = avcc.get(offset..end)?;
+      let mut owned = Vec::new();
+      if owned.try_reserve_exact(length).is_err() {
+         *resource_limited = true;
+         return None;
+      }
+      owned.extend_from_slice(source);
+      pps.push(owned);
       offset = end;
    }
 
@@ -223,9 +300,15 @@ pub fn parse_avc_config(sample_entry_payload: &[u8]) -> Option<AvcConfig> {
       sps,
       pps,
       color,
+      display_width: display_width?,
+      display_height: display_height?,
+      max_input_size: None,
+      resolved_full_range: None,
+      resolved_codec_dimensions: None,
    })
 }
 
+#[cfg(h264_backend)]
 pub fn parse_sample_sizes(stsz: &[u8]) -> Option<SampleSizes> {
    let (fixed_size, sample_count) = sample_size_header(stsz)?;
    let mut sizes = Vec::new();
@@ -284,6 +367,7 @@ fn sample_size_header(stsz: &[u8]) -> Option<(u32, u32)> {
    Some((read_u32_be(stsz, 4)?, read_u32_be(stsz, 8)?))
 }
 
+#[cfg(any(test, h264_backend))]
 pub fn parse_stsc(stsc: &[u8]) -> Option<Vec<StscEntry>> {
    let entry_count = table_entries(stsc, 12)?;
 
@@ -333,6 +417,7 @@ fn valid_stsc_entry(previous: Option<&StscEntry>, entry: StscEntry) -> bool {
       && previous.is_none_or(|previous| previous.first_chunk < entry.first_chunk)
 }
 
+#[cfg(h264_backend)]
 pub fn parse_chunk_offsets(stbl: &[u8]) -> Option<Vec<u64>> {
    let (table, entry_size, is_64) = chunk_offset_table(stbl)?;
    let entry_count = table_entries(table, entry_size)?;
@@ -404,6 +489,7 @@ fn validate_exact_table_len(
    Ok(())
 }
 
+#[cfg(h264_backend)]
 pub fn parse_stss(stss: &[u8]) -> Option<Vec<u32>> {
    let entry_count = table_entries(stss, 4)?;
    let mut samples = Vec::new();
@@ -417,6 +503,7 @@ pub fn parse_stss(stss: &[u8]) -> Option<Vec<u32>> {
       .then_some(samples)
 }
 
+#[cfg(h264_backend)]
 pub fn nearest_sync_sample(sample_index: u32, sync_samples: Option<&[u32]>) -> u32 {
    let Some(sync_samples) = sync_samples else {
       return sample_index;
@@ -429,6 +516,7 @@ pub fn nearest_sync_sample(sample_index: u32, sync_samples: Option<&[u32]>) -> u
       .unwrap_or(1)
 }
 
+#[cfg(h264_backend)]
 pub fn next_sync_sample(
    sample_index: u32,
    sync_samples: Option<&[u32]>,
@@ -448,6 +536,7 @@ pub fn next_sync_sample(
    }
 }
 
+#[cfg(any(test, h264_backend))]
 pub fn sample_description_index(
    sample_index: u32,
    sizes: &SampleSizes,
@@ -561,6 +650,7 @@ impl Iterator for StscRuns<'_> {
 /// Checks whether every sample in `start_sample..=end_sample` (1-based) uses
 /// `description_index`, walking the stsc runs once — O(stsc entries) instead
 /// of one `sample_location` walk per sample.
+#[cfg(any(test, h264_backend))]
 pub fn range_uses_description_index(
    start_sample: u32,
    end_sample: u32,
@@ -837,9 +927,12 @@ mod tests {
       assert_eq!(budget.used_bytes(), 0);
    }
 
+   #[cfg(h264_backend)]
    #[test]
    fn parses_nclx_matrix_and_range_with_avc_config() {
       let mut sample_entry = vec![0; 78];
+      sample_entry[24..26].copy_from_slice(&1920u16.to_be_bytes());
+      sample_entry[26..28].copy_from_slice(&1080u16.to_be_bytes());
       append_box(&mut sample_entry, b"avcC", &[1, 66, 0, 30, 0xff, 0xe0, 0]);
       let mut colr = Vec::from(&b"nclx"[..]);
       colr.extend_from_slice(&1u16.to_be_bytes());
@@ -852,8 +945,12 @@ mod tests {
 
       assert_eq!(config.color.matrix_coefficients, Some(1));
       assert_eq!(config.color.full_range, Some(true));
+      assert_eq!(config.display_width, 1920);
+      assert_eq!(config.display_height, 1080);
+      assert_eq!(config.max_input_size, None);
    }
 
+   #[cfg(h264_backend)]
    #[test]
    fn parses_nclc_matrix_without_inventing_a_range() {
       let mut sample_entry = vec![0; 78];
@@ -870,6 +967,7 @@ mod tests {
       assert_eq!(config.color.full_range, None);
    }
 
+   #[cfg(h264_backend)]
    #[test]
    fn keeps_the_avc_config_when_the_colr_box_is_truncated() {
       let mut sample_entry = vec![0; 78];
@@ -890,6 +988,7 @@ mod tests {
       assert_eq!(config.color.full_range, None);
    }
 
+   #[cfg(h264_backend)]
    #[test]
    fn finds_nclx_after_an_unsupported_colr_box() {
       let mut sample_entry = vec![0; 78];
@@ -906,6 +1005,33 @@ mod tests {
 
       assert_eq!(config.color.matrix_coefficients, Some(1));
       assert_eq!(config.color.full_range, Some(false));
+   }
+
+   #[cfg(h264_backend)]
+   #[test]
+   fn rejects_avc_config_above_the_parameter_set_byte_limit() {
+      const LIMIT: usize = MAX_AVC_PARAMETER_SET_BYTES;
+      const LARGE_SET_LEN: usize = u16::MAX as usize;
+
+      let mut avcc = vec![1, 66, 0, 30, 0xff, 0xe0 | 16];
+      let large_sps = vec![0x67; LARGE_SET_LEN];
+      for _ in 0..16 {
+         avcc.extend_from_slice(&u16::MAX.to_be_bytes());
+         avcc.extend_from_slice(&large_sps);
+      }
+      avcc.push(1);
+      let pps_len = LIMIT - LARGE_SET_LEN * 16 + 1;
+      avcc.extend_from_slice(
+         &u16::try_from(pps_len)
+            .expect("test PPS length fits")
+            .to_be_bytes(),
+      );
+      avcc.extend(std::iter::repeat_n(0x68, pps_len));
+
+      let mut sample_entry = vec![0; 78];
+      append_box(&mut sample_entry, b"avcC", &avcc);
+
+      assert!(parse_avc_config(&sample_entry).is_none());
    }
 
    fn two_run_tables() -> (SampleSizes, Vec<StscEntry>, Vec<u64>) {

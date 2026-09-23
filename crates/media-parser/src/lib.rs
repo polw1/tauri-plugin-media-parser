@@ -32,9 +32,14 @@
 //! [`Frame`] reports the actual presentation time of the decoded frame.
 //!
 //! ```no_run
+//! # #[cfg(not(h264_backend))]
+//! # fn main() {}
+//! # #[cfg(h264_backend)]
 //! use std::time::Duration;
+//! # #[cfg(h264_backend)]
 //! use media_parser::{FileStreamReader, format::mp4::{ThumbnailIndex, ThumbnailOptions}};
 //!
+//! # #[cfg(h264_backend)]
 //! #[tokio::main]
 //! async fn main() -> media_parser::Result<()> {
 //!     let reader = FileStreamReader::new("video.mp4")?;
@@ -165,6 +170,17 @@
 //! }
 //! ```
 
+#[cfg(all(
+   feature = "thumbnails",
+   not(h264_backend),
+   not(h264_backend_wrong_target)
+))]
+compile_error!("feature `thumbnails` requires exactly one H.264 decoder backend");
+
+#[cfg(h264_backend_wrong_target)]
+compile_error!("a native H.264 backend feature is enabled for a target that cannot use it");
+
+#[cfg(h264_backend)]
 mod decoders;
 pub mod errors;
 pub mod format;
@@ -173,6 +189,7 @@ pub mod stream;
 pub mod types;
 
 // Public API
+#[cfg(h264_backend)]
 pub use decoders::h264::JpegQuality;
 pub use errors::{MediaParserError, Result};
 pub use format::mp4::atoms::Mp4Nav;

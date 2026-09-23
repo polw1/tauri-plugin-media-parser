@@ -38,6 +38,7 @@ pub use moov::find_and_read_moov_box;
 pub(super) use moov::parse_moov_payload;
 pub use nav::{Mp4Nav, find_box_ref};
 pub use read::{BoxRead, read_box};
+pub(super) use tags::find_ilst_in_meta;
 pub use tags::{fourcc_to_key, tag_name};
 pub use types::Mp4Box;
 
@@ -48,14 +49,20 @@ pub(super) use media::{
 };
 pub(super) use sample_timing::SampleTiming;
 pub(super) use sample_timing::SampleTimingTable;
+#[cfg(h264_backend)]
 pub(super) use sample_timing::{
    CompositionOffset, PresentationTimeline, duration_to_ticks, parse_ctts, stts_duration_ticks,
+};
+pub(super) use sample_timing::{
    stts_frame_rate, stts_sample_count, ticks_to_duration, track_presentation_offset,
 };
 pub(super) use samples::{
-   SampleLocator, SampleSizes, StscEntry, nearest_sync_sample, next_sync_sample, parse_avc_config,
-   parse_chunk_offsets, parse_chunk_offsets_bounded, parse_sample_sizes,
-   parse_sample_sizes_bounded, parse_stsc, parse_stsc_bounded, parse_stss,
-   range_uses_description_index, sample_description_index, sample_size, table_entries,
-   validate_sample_tables,
+   SampleLocator, SampleSizes, StscEntry, parse_chunk_offsets_bounded, parse_sample_sizes_bounded,
+   parse_stsc_bounded, sample_size, validate_sample_tables,
+};
+#[cfg(h264_backend)]
+pub(super) use samples::{
+   nearest_sync_sample, next_sync_sample, parse_avc_config_checked, parse_chunk_offsets,
+   parse_sample_sizes, parse_stsc, parse_stss, range_uses_description_index,
+   sample_description_index, table_entries,
 };

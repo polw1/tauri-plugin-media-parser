@@ -194,76 +194,79 @@ overflow or allocation failures return errors instead of permitting unbounded
 growth. A budget failure never returns the tracks that happened to finish before
 the limit was reached.
 
-### 4) Frames
+### 4) JPEG thumbnails
 
-#### Single Frame
+Thumbnail extraction is opt-in for standalone Rust consumers. Enable `thumbnails`
+and exactly one backend appropriate for the compilation target:
+
+| Target | Backend feature | Decoder |
+| --- | --- | --- |
+| Android | `android-mediacodec` | MediaCodec |
+| Windows | `windows-media-foundation` | Media Foundation |
+| macOS / iOS | `apple-videotoolbox` | VideoToolbox |
+
+Features for a different OS, or `thumbnails` without a usable backend, fail
+compilation. Do not use `--all-features`: the backends are target-specific.
+Default features are empty; metadata, covers, tracks, and subtitles remain
+available without a video decoder.
+Linux has no thumbnail backend.
+
+For example, a standalone Windows application can depend on:
+
+```toml
+media-parser = { path = "../media-parser", features = ["thumbnails", "windows-media-foundation"] }
+```
+
+The Tauri plugin selects these features automatically. Use `ThumbnailIndex` for
+repeated requests over the same immutable file:
 
 ```rust
-use media_parser::{MediaParser, FileStreamReader, PixelFormat};
 use std::time::Duration;
+use media_parser::{FileStreamReader, format::mp4::{ThumbnailIndex, ThumbnailOptions}};
 
 #[tokio::main]
 async fn main() -> media_parser::Result<()> {
-   let reader = FileStreamReader::new("video.mp4");
-   let parser = MediaParser::new(reader);
-
-   let frame = parser.frame(0, Duration::from_secs(30)).await?;
-
-   println!("Captured frame: {}x{} in {:?} format", frame.width, frame.height, frame.format);
-   println!("Frame data: {} bytes", frame.data.len());
-
-   match frame.format {
-      PixelFormat::Yuv420p => println!("YUV 4:2:0 format detected"),
-      PixelFormat::Rgb24 => println!("RGB format detected"),
-      _ => println!("Other format: {:?}", frame.format),
+   let reader = FileStreamReader::new("video.mp4")?;
+   let index = ThumbnailIndex::read(&reader, 0).await?;
+   let frames = index.frames(
+      &reader,
+      &[Duration::ZERO, Duration::from_secs(5)],
+      ThumbnailOptions::default(),
+   ).await?;
+   for frame in frames {
+      println!("{}x{} JPEG at {:?}", frame.width, frame.height, frame.timestamp);
    }
-
    Ok(())
 }
 ```
 
-#### Multiple Frames
+`frames` selects the requested presentation frame, while `keyframes` selects the
+preceding sync frame. Outputs are JPEGs bounded to 320×320 by default, preserving
+aspect ratio without upscaling. Compatible GOPs reuse a native decoder within the
+request. Compressed samples retain shared, bounded read regions through decoding.
+Index construction and decoding run on the blocking pool; thumbnail and subtitle
+index construction share the concurrency limit.
+Thumbnail extractions have a separate process-wide limit of two active requests,
+covering sample reads, decoding and output assembly. Queued requests wait before
+reading compressed samples. Cancelling a caller does not release its decoder's
+slot until the blocking work finishes. Existing per-request byte limits still apply.
+Apple validates coded SPS dimensions against the existing NV12 limits before
+opening VideoToolbox; SPS geometry that cannot be parsed is rejected.
 
-```rust
-use media_parser::{MediaParser, FileStreamReader, PixelFormat};
-use std::time::Duration;
+## Native backend validation
 
-#[tokio::main]
-async fn main() -> media_parser::Result<()> {
-   let reader = FileStreamReader::new("video.mp4");
-   let parser = MediaParser::new(reader);
+Run the native suite on its matching operating system:
 
-   let timestamps = vec![
-      Duration::from_secs(10),
-      Duration::from_secs(30),
-      Duration::from_secs(60),
-      Duration::from_secs(120),
-   ];
-
-   let frames = parser.frames(0, &timestamps).await?;
-
-   for (i, frame) in frames.iter().enumerate() {
-      println!("Frame {}: {}x{} ({:?})", i, frame.width, frame.height, frame.format);
-      println!("Data: {} bytes", frame.data.len());
-
-      match frame.format {
-         PixelFormat::Yuv420p => {
-            let y_size = (frame.width * frame.height) as usize;
-            let uv_size = y_size / 4;
-            println!("Y: {} bytes, U: {} bytes, V: {} bytes", y_size, uv_size, uv_size);
-         },
-         PixelFormat::Rgb24 => {
-            println!("RGB pixels: {}", frame.data.len() / 3);
-         },
-         _ => {},
-      }
-   }
-
-   println!("Generated {} frames total", frames.len());
-
-   Ok(())
-}
+```sh
+cargo test -p media-parser --features thumbnails,windows-media-foundation
+cargo test -p media-parser --features thumbnails,apple-videotoolbox
 ```
+
+For Android, build with an NDK linker and run the produced test executables on a
+compatible Android device. Copy `tests/fixtures` to the device and set
+`MEDIA_PARSER_TEST_FIXTURES` to that directory when running the integration tests.
+The native suites compare B-frames, color conversion, crop, scaling, and output
+limits against checked-in fixtures. Compilation alone does not verify decoding.
 
 ## Development
 

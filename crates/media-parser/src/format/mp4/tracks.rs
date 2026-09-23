@@ -41,8 +41,15 @@ const MAX_TRACKS: usize = 1000;
 /// Reads all MP4 tracks from the `moov/trak` boxes.
 pub async fn read_tracks(reader: &dyn StreamReader) -> Result<Vec<TrackType>> {
    let moov_data = find_and_read_moov_box(reader).await?;
-   let moov_payload = parse_moov_payload(&moov_data)?;
+   parse_tracks_from_moov(&moov_data)
+}
 
+pub(super) fn parse_tracks_from_moov(moov_data: &[u8]) -> Result<Vec<TrackType>> {
+   let moov_payload = parse_moov_payload(moov_data)?;
+   parse_tracks_from_moov_payload(moov_payload)
+}
+
+pub(super) fn parse_tracks_from_moov_payload(moov_payload: &[u8]) -> Result<Vec<TrackType>> {
    let mut tracks = Vec::new();
    let mut trak_count = 0usize;
    let mut malformed_count = 0usize;

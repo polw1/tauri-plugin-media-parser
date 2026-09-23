@@ -150,13 +150,16 @@ pub struct CompositionOffset {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg(any(test, h264_backend))]
 pub struct SampleSelection {
    pub sample_index: u32,
    pub presentation_tick: u64,
 }
 
+#[cfg(any(test, h264_backend))]
 const MAX_PRESENTATION_TIMELINE_BYTES: usize = 128 * 1024 * 1024;
 
+#[cfg(any(test, h264_backend))]
 fn presentation_timeline_sample_count_fits(sample_count: usize) -> bool {
    let Some(bytes_per_sample) = std::mem::size_of::<i128>().checked_add(std::mem::size_of::<u32>())
    else {
@@ -170,6 +173,7 @@ fn presentation_timeline_sample_count_fits(sample_count: usize) -> bool {
 
 /// Reusable presentation timestamps for a validated MP4 video sample table.
 #[derive(Debug)]
+#[cfg(any(test, h264_backend))]
 pub struct PresentationTimeline {
    /// Signed presentation ticks in one-based MP4 sample order.
    ticks_by_sample: Vec<i128>,
@@ -177,6 +181,7 @@ pub struct PresentationTimeline {
    samples_by_time: Vec<u32>,
 }
 
+#[cfg(any(test, h264_backend))]
 impl PresentationTimeline {
    pub fn new(
       stts: &[u8],
@@ -277,6 +282,7 @@ impl PresentationTimeline {
    }
 }
 
+#[cfg(any(test, h264_backend))]
 pub fn parse_ctts(ctts: &[u8]) -> Option<Vec<CompositionOffset>> {
    let version = *ctts.first()?;
    if version > 1 {
@@ -308,6 +314,7 @@ pub fn parse_ctts(ctts: &[u8]) -> Option<Vec<CompositionOffset>> {
 /// One stts/ctts segment in decode order: `sample_count` samples starting at
 /// `first_sample` that share one sample delta and one composition offset.
 #[derive(Debug, Clone, Copy)]
+#[cfg(any(test, h264_backend))]
 struct TimingSegment {
    first_sample: u32,
    decode_tick: u64,
@@ -317,6 +324,7 @@ struct TimingSegment {
 }
 
 /// Result of advancing a [`TimingWalker`].
+#[cfg(any(test, h264_backend))]
 enum TimingStep {
    Segment(TimingSegment),
    /// All stts entries were consumed.
@@ -328,6 +336,7 @@ enum TimingStep {
 
 /// Walks the stts/ctts sample timing tables segment by segment in decode
 /// order, keeping the running sample index and decode tick.
+#[cfg(any(test, h264_backend))]
 struct TimingWalker<'a> {
    stts: &'a [u8],
    composition_offsets: Option<&'a [CompositionOffset]>,
@@ -342,6 +351,7 @@ struct TimingWalker<'a> {
    composition_offset: i64,
 }
 
+#[cfg(any(test, h264_backend))]
 impl<'a> TimingWalker<'a> {
    fn new(stts: &'a [u8], composition_offsets: Option<&'a [CompositionOffset]>) -> Option<Self> {
       let entry_count = table_entries(stts, 8)?;
@@ -494,6 +504,7 @@ fn parse_elst_media_time(elst: &[u8]) -> Option<i64> {
    Some(media_time.max(0))
 }
 
+#[cfg(h264_backend)]
 pub fn duration_to_ticks(duration: Duration, timescale: u32) -> u64 {
    let ticks = duration.as_nanos().saturating_mul(u128::from(timescale)) / 1_000_000_000;
    u64::try_from(ticks).unwrap_or(u64::MAX)
