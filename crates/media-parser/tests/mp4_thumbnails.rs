@@ -283,6 +283,18 @@ async fn test_mp4_thumbnail_index_can_be_reused_with_another_reader() {
 }
 
 #[tokio::test]
+async fn test_mp4_thumbnail_index_reports_the_automatically_selected_track() {
+   // The fixture has a single `trak`: `hdlr = vide`, `tkhd.track_ID = 1`.
+   let path = fixtures_dir().join("bframes_video.mp4");
+   let reader = FileStreamReader::new(&path).expect("open MP4 fixture");
+   let index = ThumbnailIndex::read(&reader, 0)
+      .await
+      .expect("build thumbnail index");
+
+   assert_eq!(index.track_id(), 1);
+}
+
+#[tokio::test]
 async fn test_mp4_fast_thumbnail_reports_the_keyframe_pts() {
    let path = fixtures_dir().join("multitrack_video.mp4");
    let reader = FileStreamReader::new(&path).expect("open MP4 fixture");

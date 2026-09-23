@@ -131,6 +131,12 @@ struct JobPlan {
 impl ThumbnailIndex {
    /// Reads and parses the selected video track's sample index.
    ///
+   /// A `track_id` of `0` selects the first video track (`hdlr` = `vide`), in
+   /// file order, that has `tkhd`, `mdhd`, and `stbl` boxes; [`Self::track_id`]
+   /// reports the chosen id. An error while parsing that track's sample
+   /// tables is returned without trying the next track, and the codec is
+   /// validated only when frames are extracted.
+   ///
    /// Reads the `moov` asynchronously, then builds its CPU-bound index on the
    /// blocking pool, limited to the process's available parallelism.
    pub async fn read(reader: &dyn StreamReader, track_id: u32) -> Result<Self> {
