@@ -447,11 +447,10 @@ mod tests {
 
    #[test]
    fn rejects_crop_near_the_end_of_a_short_row() {
-      let y = [0; 12];
+      let y = [0; 11];
       let u = [0; 4];
       let v = [0; 4];
       let mut source = i420(&y, &u, &v, 6, 2);
-      source.y.row_stride = 5;
       source.crop = Crop {
          x: 4,
          y: 0,
@@ -459,7 +458,10 @@ mod tests {
          height: 2,
       };
 
-      assert!(validate_visible(&source, &[0; 12]).is_err());
+      assert!(matches!(
+         validate_visible(&source, &[0; 12]),
+         Err(DecodeError::Convert(message)) if message.contains("plane is too short")
+      ));
    }
 
    #[test]

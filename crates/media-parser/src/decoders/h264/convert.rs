@@ -518,6 +518,8 @@ mod tests {
       let y = [81; 16];
       let u = [90, 128, 0, 90, 128, 0];
       let v = [240, 128, 0, 0, 240, 128, 0, 0];
+      let tight_u = [90, 128, 90, 128];
+      let tight_v = [240, 128, 240, 128];
       let source = PlanarYuv {
          y: Plane {
             data: &y,
@@ -543,10 +545,21 @@ mod tests {
             height: 4,
          },
       };
+      let tight = PlanarYuv {
+         u: Plane {
+            data: &tight_u,
+            row_stride: 2,
+            pixel_stride: 1,
+         },
+         v: Plane {
+            data: &tight_v,
+            row_stride: 2,
+            pixel_stride: 1,
+         },
+         ..source
+      };
+      let size = ThumbnailSize::new(4, 4).unwrap();
 
-      assert_eq!(
-         converted(&source, ThumbnailSize::new(4, 4).unwrap()).len(),
-         48
-      );
+      assert_eq!(converted(&source, size), converted(&tight, size));
    }
 }
