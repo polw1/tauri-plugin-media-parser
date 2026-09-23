@@ -4,8 +4,8 @@
 use super::image::{
    Aperture, FixedOffset, OutputAllocation, OutputStatus, PumpProgress, classify_output_status,
    crop_from_aperture, note_no_progress, nv12_layout, output_allocation, resize_output_copy,
-   select_contiguous_stride, timestamp_to_token, token_to_timestamp, validate_caller_buffer,
-   validate_contiguous_length, validate_process_output_status,
+   timestamp_to_token, token_to_timestamp, validate_caller_buffer, validate_contiguous_length,
+   validate_process_output_status,
 };
 use super::mfplat::{MfPlat, mfplat};
 use crate::decoders::h264::backend::{FrameSink, H264Decoder};
@@ -95,7 +95,6 @@ impl Drop for PlatformGuard {
 struct OutputGeometry {
    coded_width: usize,
    coded_height: usize,
-   stride: usize,
    crop: crate::decoders::h264::frame::Crop,
 }
 
@@ -250,25 +249,15 @@ impl WindowsDecoder {
          .map_err(|_| unsupported("coded height does not fit usize"))?;
       let aperture = self.read_aperture(media_type)?;
       let crop = crop_from_aperture(coded_width, coded_height, aperture)?;
-      let default_stride = match unsafe { media_type.GetUINT32(&MF_MT_DEFAULT_STRIDE) } {
-         Ok(value) => Some(value as i32),
-         Err(error) if error.code() == MF_E_ATTRIBUTENOTFOUND => None,
-         Err(error) => return Err(native_error("read MF_MT_DEFAULT_STRIDE", error)),
-      };
-      let width = u32::try_from(coded_width)
-         .map_err(|_| unsupported("coded width does not fit Media Foundation"))?;
-      let calculated = unsafe {
-         self
-            .mf()
-            .get_stride_for_bitmap_info_header(MFVideoFormat_NV12.data1, width)
-      }
-      .map_err(|error| native_error("MFGetStrideForBitmapInfoHeader", error))?;
-      let stride = select_contiguous_stride(default_stride, calculated, coded_width)?;
-      nv12_layout(coded_width, coded_height, stride, MAX_DECODED_NV12_BYTES)?;
+      nv12_layout(
+         coded_width,
+         coded_height,
+         coded_width,
+         MAX_DECODED_NV12_BYTES,
+      )?;
       Ok(Some(OutputGeometry {
          coded_width,
          coded_height,
-         stride,
          crop,
       }))
    }
@@ -381,7 +370,7 @@ impl WindowsDecoder {
       let required = nv12_layout(
          geometry.coded_width,
          geometry.coded_height,
-         geometry.stride,
+         geometry.coded_width,
          contiguous_length,
       )?
       .total_bytes;
@@ -429,10 +418,12 @@ impl WindowsDecoder {
          .and_then(|output| output.geometry.as_ref())
          .cloned()
          .ok_or_else(|| unsupported("decoded sample arrived before output geometry"))?;
+      // ContiguousCopyTo removes native surface padding. NV12 rows in
+      // that representation contain exactly coded_width bytes.
       let layout = nv12_layout(
          geometry.coded_width,
          geometry.coded_height,
-         geometry.stride,
+         geometry.coded_width,
          contiguous_length,
       )?;
       resize_output_copy(&mut self.output_copy, contiguous_length)?;
@@ -452,19 +443,19 @@ impl WindowsDecoder {
       let planar = PlanarYuv {
          y: Plane {
             data: y,
-            row_stride: geometry.stride,
+            row_stride: geometry.coded_width,
             pixel_stride: 1,
          },
          u: Plane {
             data: uv,
-            row_stride: geometry.stride,
+            row_stride: geometry.coded_width,
             pixel_stride: 2,
          },
          v: Plane {
             data: uv
                .get(1..)
                .ok_or_else(|| unsupported("output chroma region is empty"))?,
-            row_stride: geometry.stride,
+            row_stride: geometry.coded_width,
             pixel_stride: 2,
          },
          coded_width: geometry.coded_width,
@@ -634,5 +625,84 @@ impl H264Decoder for WindowsDecoder {
       .map_err(|error| native_error("drain transform", error))?;
       self.pump_until_need_input(sink)?;
       Ok(())
+   }
+}
+
+#[cfg(test)]
+mod tests {
+   use super::*;
+
+   #[test]
+   fn contiguous_output_uses_width_despite_larger_default_stride() {
+      let mut decoder = WindowsDecoder {
+         transform: None,
+         output: None,
+         headers: Vec::new(),
+         annex_b: Vec::new(),
+         length_size: 4,
+         input_stream_id: 0,
+         output_stream_id: 0,
+         first_input: true,
+         output_copy: Vec::new(),
+         platform: PlatformGuard::initialize().unwrap(),
+      };
+      let (width, height) = (144usize, 80usize);
+      let media_type = unsafe { decoder.mf().create_media_type() }.unwrap();
+      unsafe {
+         media_type
+            .SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video)
+            .unwrap();
+         media_type
+            .SetGUID(&MF_MT_SUBTYPE, &MFVideoFormat_NV12)
+            .unwrap();
+         media_type
+            .SetUINT64(&MF_MT_FRAME_SIZE, ((width as u64) << 32) | height as u64)
+            .unwrap();
+         // Fault injection: a larger default stride is not a naturally
+         // observed negotiation from the inbox decoder.
+         media_type.SetUINT32(&MF_MT_DEFAULT_STRIDE, 272).unwrap();
+      }
+      let geometry = decoder.read_output_geometry(&media_type).unwrap().unwrap();
+      decoder.output = Some(OutputConfig {
+         _media_type: media_type,
+         stream_info: MFT_OUTPUT_STREAM_INFO::default(),
+         geometry: Some(geometry),
+      });
+      let sample = decoder
+         .output_placeholder()
+         .expect("allocate compact NV12")
+         .unwrap();
+      let buffer = unsafe { sample.GetBufferByIndex(0) }.unwrap();
+      let buffer_2d: IMF2DBuffer = buffer.cast().unwrap();
+      let length = unsafe { buffer_2d.GetContiguousLength() }.unwrap() as usize;
+      assert_eq!(length, width * height * 3 / 2);
+      let expected: Vec<u8> = (0..length).map(|index| (index % 251) as u8).collect();
+      unsafe {
+         buffer_2d.ContiguousCopyFrom(&expected).unwrap();
+         let mut base = ptr::null_mut();
+         let mut pitch = 0;
+         buffer_2d.Lock2D(&mut base, &mut pitch).unwrap();
+         buffer_2d.Unlock2D().unwrap();
+         assert!(pitch > width as i32, "exercise native surface padding");
+         sample
+            .SetSampleTime(token_to_timestamp(FrameToken::new(7)).unwrap())
+            .unwrap();
+      }
+      let mut delivered = false;
+      decoder
+         .deliver_sample(&sample, &mut |token, frame| {
+            assert_eq!(token, FrameToken::new(7));
+            assert_eq!((frame.coded_width, frame.coded_height), (width, height));
+            assert_eq!(frame.y.row_stride, width);
+            assert_eq!(frame.u.row_stride, width);
+            assert_eq!(frame.v.row_stride, width);
+            assert_eq!(frame.y.data, &expected[..width * height]);
+            assert_eq!(frame.u.data, &expected[width * height..]);
+            assert_eq!(frame.v.data, &expected[width * height + 1..]);
+            delivered = true;
+            Ok(())
+         })
+         .unwrap();
+      assert!(delivered);
    }
 }

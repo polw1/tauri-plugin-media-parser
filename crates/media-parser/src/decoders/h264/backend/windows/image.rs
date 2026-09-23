@@ -142,21 +142,6 @@ pub(super) fn crop_from_aperture(
    }
 }
 
-pub(super) fn select_contiguous_stride(
-   default_stride: Option<i32>,
-   calculated_stride: i32,
-   coded_width: usize,
-) -> Result<usize, DecodeError> {
-   let raw = default_stride.unwrap_or(calculated_stride);
-   let stride = usize::try_from(raw).map_err(|_| unsupported("contiguous stride is negative"))?;
-   if stride == 0 || stride < coded_width {
-      return Err(unsupported(
-         "contiguous stride is zero or smaller than coded width",
-      ));
-   }
-   Ok(stride)
-}
-
 pub(super) fn nv12_layout(
    coded_width: usize,
    coded_height: usize,
@@ -434,23 +419,13 @@ mod tests {
    }
 
    #[test]
-   fn selects_and_validates_the_contiguous_nv12_stride() {
-      assert_eq!(select_contiguous_stride(Some(2048), 1920, 1920), Ok(2048));
-      assert_eq!(select_contiguous_stride(None, 1920, 1920), Ok(1920));
-      for invalid in [Some(-1920), Some(0), Some(1919)] {
-         assert!(select_contiguous_stride(invalid, 1920, 1920).is_err());
-      }
-      assert!(select_contiguous_stride(None, -1, 1920).is_err());
-   }
-
-   #[test]
    fn computes_nv12_regions_and_rejects_short_or_odd_surfaces() {
-      let layout = nv12_layout(1920, 1088, 2048, 3_342_336).expect("valid NV12");
-      assert_eq!(layout.y_bytes, 2_228_224);
-      assert_eq!(layout.total_bytes, 3_342_336);
-      assert!(nv12_layout(1919, 1088, 2048, usize::MAX).is_err());
-      assert!(nv12_layout(1920, 1087, 2048, usize::MAX).is_err());
-      assert!(nv12_layout(1920, 1088, 2048, 3_342_335).is_err());
+      let layout = nv12_layout(1920, 1088, 1920, 3_133_440).expect("valid NV12");
+      assert_eq!(layout.y_bytes, 2_088_960);
+      assert_eq!(layout.total_bytes, 3_133_440);
+      assert!(nv12_layout(1919, 1088, 1919, usize::MAX).is_err());
+      assert!(nv12_layout(1920, 1087, 1920, usize::MAX).is_err());
+      assert!(nv12_layout(1920, 1088, 1920, 3_133_439).is_err());
       assert!(nv12_layout(usize::MAX - 1, 2, usize::MAX - 1, usize::MAX).is_err());
    }
 

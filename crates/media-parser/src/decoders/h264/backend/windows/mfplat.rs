@@ -23,7 +23,6 @@ type CreateObjectFn = unsafe extern "system" fn(*mut *mut c_void) -> HRESULT;
 type CreateMemoryBufferFn = unsafe extern "system" fn(u32, *mut *mut c_void) -> HRESULT;
 type Create2DMediaBufferFn =
    unsafe extern "system" fn(u32, u32, u32, BOOL, *mut *mut c_void) -> HRESULT;
-type GetStrideFn = unsafe extern "system" fn(u32, u32, *mut i32) -> HRESULT;
 
 pub(super) struct MfPlat {
    startup: StartupFn,
@@ -32,7 +31,6 @@ pub(super) struct MfPlat {
    create_sample: CreateObjectFn,
    create_memory_buffer: CreateMemoryBufferFn,
    create_2d_media_buffer: Create2DMediaBufferFn,
-   get_stride_for_bitmap_info_header: GetStrideFn,
 }
 
 /// Returns the process-wide function table, loading `mfplat.dll` from
@@ -72,7 +70,6 @@ fn load() -> Result<MfPlat, String> {
       create_sample: export!("MFCreateSample" as CreateObjectFn),
       create_memory_buffer: export!("MFCreateMemoryBuffer" as CreateMemoryBufferFn),
       create_2d_media_buffer: export!("MFCreate2DMediaBuffer" as Create2DMediaBufferFn),
-      get_stride_for_bitmap_info_header: export!("MFGetStrideForBitmapInfoHeader" as GetStrideFn),
    })
 }
 
@@ -123,15 +120,5 @@ impl MfPlat {
             raw,
          )
       }
-   }
-
-   pub(super) unsafe fn get_stride_for_bitmap_info_header(
-      &self,
-      format: u32,
-      width: u32,
-   ) -> WindowsResult<i32> {
-      let mut stride = 0;
-      unsafe { (self.get_stride_for_bitmap_info_header)(format, width, &mut stride) }.ok()?;
-      Ok(stride)
    }
 }
