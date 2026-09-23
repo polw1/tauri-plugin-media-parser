@@ -494,7 +494,7 @@ impl AndroidDecoder {
       attempt: usize,
    ) -> Result<Option<Self>, DecodeError> {
       let name = match attempt {
-         0 => None,
+         0 => return Self::open(config).map(Some),
          1 => Some(c"c2.android.avc.decoder"),
          2 => Some(c"OMX.google.h264.decoder"),
          _ => return Ok(None),
@@ -505,9 +505,7 @@ impl AndroidDecoder {
 
 impl H264Decoder for AndroidDecoder {
    fn open(config: &AvcConfig) -> Result<Self, DecodeError> {
-      Self::open_attempt(config, 0)?.ok_or_else(|| {
-         DecodeError::UnsupportedFormat("Android MediaCodec has no H.264 decoder".to_string())
-      })
+      Self::open_candidate(config, None)
    }
 
    fn decode(

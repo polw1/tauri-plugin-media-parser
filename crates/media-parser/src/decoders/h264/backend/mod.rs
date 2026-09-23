@@ -44,11 +44,7 @@ pub(crate) fn open_decoder(
    config: &AvcConfig,
    attempt: usize,
 ) -> Result<Option<SelectedDecoder>, DecodeError> {
-   if attempt == 0 {
-      SelectedDecoder::open(config).map(Some)
-   } else {
-      SelectedDecoder::open_attempt(config, attempt)
-   }
+   SelectedDecoder::open_attempt(config, attempt)
 }
 
 #[cfg(any(
