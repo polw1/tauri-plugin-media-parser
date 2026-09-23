@@ -275,7 +275,7 @@ cargo test \
    --features thumbnails,android-mediacodec \
    --lib --test android_mediacodec --test mp4_thumbnails \
    --no-run \
-   --message-format=json >"$build_output"
+   --message-format=json-render-diagnostics >"$build_output"
 
 run_test() {
    target_name=$1

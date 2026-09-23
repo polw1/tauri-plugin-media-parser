@@ -3,7 +3,7 @@ import PackageDescription
 
 let package = Package(
   name: "tauri-plugin-media-parser",
-  platforms: [.iOS(.v14)],
+  platforms: [.iOS(.v13)],
   products: [.library(name: "tauri-plugin-media-parser", type: .static, targets: ["tauri-plugin-media-parser"])],
   targets: [.target(name: "tauri-plugin-media-parser", path: "Sources")]
 )
