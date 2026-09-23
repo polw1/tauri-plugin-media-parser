@@ -170,11 +170,15 @@
 //! }
 //! ```
 
-#[cfg(all(feature = "thumbnails", not(h264_backend), not(h264_backend_conflict)))]
+#[cfg(all(
+   feature = "thumbnails",
+   not(h264_backend),
+   not(h264_backend_wrong_target)
+))]
 compile_error!("feature `thumbnails` requires exactly one H.264 decoder backend");
 
-#[cfg(h264_backend_conflict)]
-compile_error!("feature `thumbnails` requires exactly one H.264 decoder backend");
+#[cfg(h264_backend_wrong_target)]
+compile_error!("a native H.264 backend feature is enabled for a target that cannot use it");
 
 #[cfg(h264_backend)]
 mod decoders;

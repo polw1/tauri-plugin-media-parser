@@ -21,7 +21,7 @@ use media_parser::{
 use std::time::Duration;
 
 #[tokio::test]
-async fn media_foundation_reports_a_decode_error_for_a_corrupt_sample() {
+async fn media_foundation_reports_a_dropped_corrupt_sample() {
    let original = include_bytes!("fixtures/bframes_video.mp4");
    let frames = read_frames(
       &EmbeddedReader::new(original),
@@ -40,9 +40,13 @@ async fn media_foundation_reports_a_decode_error_for_a_corrupt_sample() {
       ThumbnailOptions::default(),
    )
    .await
-   .expect_err("the corrupt sample must fail inside the native decoder");
-
-   assert!(matches!(error, MediaParserError::Decode(_)));
+   .expect_err("the corrupt sample must not produce a frame");
+   // The decoder drops the corrupt IDR without reporting an error, so the
+   // pipeline is what notices the missing frame.
+   let MediaParserError::Decode(message) = error else {
+      panic!("expected a decode error, got {error:?}");
+   };
+   assert_eq!(message, "backend omitted one or more submitted tokens");
 }
 
 #[tokio::test]

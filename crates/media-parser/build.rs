@@ -6,16 +6,16 @@
 //!
 //! - `h264_backend`: thumbnails are enabled and exactly one permitted backend
 //!   is usable, so the thumbnail code paths compile.
-//! - `h264_backend_conflict`: thumbnails are enabled and several backends are
-//!   usable at once.
+//! - `h264_backend_wrong_target`: thumbnails are enabled and a native backend
+//!   feature is enabled for a target that cannot use it.
 //!
 //! The crate turns the remaining two cases — thumbnails without any backend,
-//! and `h264_backend_conflict` — into the same `compile_error!`.
+//! and `h264_backend_wrong_target` — into two distinct `compile_error!`s.
 
 fn main() {
    println!("cargo::rerun-if-changed=build.rs");
    println!("cargo::rustc-check-cfg=cfg(h264_backend)");
-   println!("cargo::rustc-check-cfg=cfg(h264_backend_conflict)");
+   println!("cargo::rustc-check-cfg=cfg(h264_backend_wrong_target)");
    println!("cargo::rustc-check-cfg=cfg(apple_videotoolbox_backend)");
 
    let feature = |name: &str| std::env::var_os(name).is_some();
@@ -44,7 +44,7 @@ fn main() {
    if videotoolbox {
       println!("cargo::rustc-cfg=apple_videotoolbox_backend");
    }
-   if thumbnails && (backend_count > 1 || invalid_native_backend) {
-      println!("cargo::rustc-cfg=h264_backend_conflict");
+   if thumbnails && invalid_native_backend {
+      println!("cargo::rustc-cfg=h264_backend_wrong_target");
    }
 }
