@@ -10,8 +10,9 @@ mod common;
 
 use common::native_h264::{
    BFRAME_REFERENCES, EmbeddedReader, MAX_COMPONENT_ERROR, MAX_MEAN_COMPONENT_ERROR,
-   assert_matches_reference, avc3_with_in_band_parameter_sets, bt709_rgb_interpreted_as_bt601,
-   comparison_errors, corrupt_first_idr_sample, decode_jpeg, reduced_rgb,
+   assert_matches_reference, avc3_with_in_band_parameter_sets,
+   bt709_full_range_rgb_interpreted_as_limited, bt709_rgb_interpreted_as_bt601, comparison_errors,
+   corrupt_first_idr_sample, decode_jpeg, reduced_rgb,
 };
 use media_parser::{
    MediaParserError, PixelFormat,
@@ -138,5 +139,25 @@ async fn media_foundation_accepts_empty_avc3_configuration_with_in_band_headers(
       "Media Foundation",
       &frames[0],
       include_bytes!("fixtures/bframes_frame0_reference.jpg"),
+   );
+}
+
+#[tokio::test]
+async fn media_foundation_decodes_bt709_full_range_without_limited_range_expansion() {
+   let reader = EmbeddedReader::new(include_bytes!("fixtures/bt709_full_range.mp4"));
+   let frames = read_frames(&reader, 0, &[Duration::ZERO], ThumbnailOptions::default())
+      .await
+      .expect("Media Foundation decodes the BT.709 full-range fixture");
+   assert_eq!(frames.len(), 1);
+   let reference_jpeg = include_bytes!("fixtures/bt709_full_range_frame0_reference.jpg");
+   assert_matches_reference("Media Foundation", &frames[0], reference_jpeg);
+
+   let actual = decode_jpeg(&frames[0].data);
+   let reference = decode_jpeg(reference_jpeg);
+   let wrong_range = bt709_full_range_rgb_interpreted_as_limited(&reference);
+   let (maximum, mean) = comparison_errors(&reduced_rgb(&actual), &reduced_rgb(&wrong_range));
+   assert!(
+      maximum > MAX_COMPONENT_ERROR || mean > MAX_MEAN_COMPONENT_ERROR,
+      "the RGB tolerance must reject deliberately limited-range interpretation"
    );
 }

@@ -253,10 +253,8 @@ fn create_session(
    let session =
       unsafe { adopt_create_result("VTDecompressionSessionCreate", status, raw_session)? };
    if let Err(error) = record_hardware_acceleration(&session) {
-      // SAFETY: A successfully-created session must be invalidated before its
-      // retained ownership is released on this initialization error.
-      unsafe { session.invalidate() };
-      return Err(error);
+      // The acceleration query only feeds diagnostics; the session is usable.
+      tracing::warn!(%error, "failed to query Apple VideoToolbox decoder acceleration");
    }
    Ok(ReadySession { session, format })
 }

@@ -397,6 +397,37 @@ mod tests {
    }
 
    #[test]
+   fn bt709_full_range_matches_independent_rgb_vectors() {
+      // Independently evaluated full-range BT.709 inverse matrix:
+      // R = Y + 1.574800*(V-128)
+      // G = Y - 0.187324*(U-128) - 0.468124*(V-128)
+      // B = Y + 1.855600*(U-128)
+      // Clamp to [0, 255] and truncate, as required by the RGB output contract.
+      // Unclipped channels and Y=128 passthrough reject limited-range expansion.
+      let color = GopColor {
+         matrix: MatrixCoefficients::Bt709,
+         full_range: true,
+      };
+      for (u, v, expected) in [
+         (128, 192, [228, 98, 128]),
+         (128, 64, [27, 157, 128]),
+         (192, 128, [128, 116, 246]),
+         (64, 128, [128, 139, 9]),
+      ] {
+         let y = [128; 8];
+         let u = [u; 2];
+         let v = [v; 2];
+         let uv = [u[0], v[0], u[1], v[1]];
+         let source = layouts(&y, &u, &v, &uv)[0];
+         for (width, height) in [(4, 2), (2, 1)] {
+            let mut rgb = vec![0; width * height * 3];
+            write_rgb_with_color(&source, &mut rgb, width, height, color).unwrap();
+            assert_eq!(rgb, expected.repeat(width * height), "U={u:?}, V={v:?}");
+         }
+      }
+   }
+
+   #[test]
    fn i420_nv12_and_nv21_are_identical_without_scaling() {
       let y = [32, 64, 96, 128, 48, 80, 112, 144];
       let u = [70, 180];
