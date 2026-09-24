@@ -61,10 +61,15 @@ fn encode_jpeg(
       let mut output = FallibleJpegWriter::new(MAX_JPEG_BYTES);
       #[cfg(apple_videotoolbox_backend)]
       let result = apple::encode_jpeg(rgb, width, height, quality, &mut output);
+      // Without a native backend no decoder produces frames, so this is unreachable
+      // outside tests that exercise the shared validation above.
       #[cfg(not(apple_videotoolbox_backend))]
-      let result = jpeg_encoder::Encoder::new(&mut output, quality.get())
-         .encode(rgb, width_u16, height_u16, jpeg_encoder::ColorType::Rgb)
-         .map_err(|error| DecodeError::Convert(error.to_string()));
+      let result = {
+         let _ = quality;
+         Err(DecodeError::UnsupportedFormat(
+            "JPEG encoding requires a native platform encoder".into(),
+         ))
+      };
       output.finish(result)
    }
 }

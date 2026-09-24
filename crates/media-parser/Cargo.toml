@@ -8,7 +8,7 @@ rust-version = "1.94.0"
 
 [features]
 default = []
-thumbnails = ["dep:jpeg-encoder"]
+thumbnails = []
 android-mediacodec = ["dep:libc", "dep:ndk-sys", "dep:jni"]
 android-jvm-test-harness = ["thumbnails", "android-mediacodec", "dep:jpeg-decoder", "dep:tempfile"]
 windows-media-foundation = ["dep:windows", "dep:windows-core"]
@@ -31,7 +31,6 @@ bytes = "1.10.1"
 futures = "0.3.31"
 tracing = "0.1.44"
 serde = { version = "1.0.228", features = ["derive"] }
-jpeg-encoder = { version = "0.7.1", features = ["simd"], optional = true }
 
 [target.'cfg(target_os = "android")'.dependencies]
 jni = { version = "0.21.1", optional = true }

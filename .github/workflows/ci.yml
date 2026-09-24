@@ -43,7 +43,7 @@ jobs:
 
          # `npm run standards` lints every target with clippy, so no `cargo check`.
          - name: Run cargo tests
-           run: cargo test --workspace
+           run: cargo test --locked --workspace -- --show-output
 
    native-thumbnails:
       name: Native thumbnails (${{ matrix.os }})
@@ -65,18 +65,18 @@ jobs:
               cache: true
          # `cargo clippy` and `cargo test` already build every target, so no `cargo check`.
          - name: Lint native backend
-           run: cargo clippy --workspace --all-targets -- -D warnings
+           run: cargo clippy --locked --workspace --all-targets -- -D warnings
          - name: Test native backend
-           run: cargo test --workspace
+           run: cargo test --locked --workspace -- --show-output
          - name: Install iOS check target
            if: matrix.os == 'macos-15'
            run: rustup target add aarch64-apple-ios
          - name: Build iOS plugin
            if: matrix.os == 'macos-15'
-           run: cargo build -p tauri-plugin-media-parser --target aarch64-apple-ios
+           run: cargo build --locked -p tauri-plugin-media-parser --target aarch64-apple-ios
          - name: Check iOS backend
            if: matrix.os == 'macos-15'
-           run: cargo check -p media-parser --all-targets --target aarch64-apple-ios --features thumbnails,apple-videotoolbox
+           run: cargo check --locked -p media-parser --all-targets --target aarch64-apple-ios --features thumbnails,apple-videotoolbox
 
    android:
       name: Android
@@ -106,12 +106,12 @@ jobs:
               echo "CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=$NDK_BIN/aarch64-linux-android24-clang" >> "$GITHUB_ENV"
 
          - name: Lint Android backend
-           run: cargo clippy -p media-parser --all-targets --target aarch64-linux-android --no-default-features --features thumbnails,android-mediacodec -- -D warnings
+           run: cargo clippy --locked -p media-parser --all-targets --target aarch64-linux-android --no-default-features --features thumbnails,android-mediacodec -- -D warnings
 
          # The ARM64 suites cannot run on the x86_64 emulator, so this step only compiles
          # and links them. The following x86_64 step executes the runtime tests.
          - name: Build Android test executables
-           run: cargo test -p media-parser --target aarch64-linux-android --no-default-features --features thumbnails,android-mediacodec --no-run
+           run: cargo test --locked -p media-parser --target aarch64-linux-android --no-default-features --features thumbnails,android-mediacodec --no-run
 
          - name: Enable KVM
            run: |

@@ -100,10 +100,8 @@ export interface ThumbnailsOptions extends MetadataOptions {
    /**
     * JPEG quality of the returned frames, from 1 to 100. Defaults to 60.
     *
-    * This trades size, not time: a 1080p frame costs about the same to encode
-    * at 40 as at 85, while the output grows roughly 4×. Note that the encoder
-    * drops to 4:2:0 chroma subsampling below 90, so 89 → 90 is a step rather
-    * than a smooth increase.
+    * The platform's native encoder interprets this value, so output size and
+    * chroma subsampling at a given quality differ between platforms.
     */
    quality?: number;
    /**

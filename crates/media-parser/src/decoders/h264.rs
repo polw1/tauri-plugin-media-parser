@@ -102,21 +102,19 @@ impl Default for ThumbnailSize {
    }
 }
 
-/// JPEG quality for encoded thumbnails, constrained to the encoder's 1–100
-/// range so an out-of-range value cannot reach `jpeg_encoder`.
+/// JPEG quality for encoded thumbnails, constrained to 1–100 so an
+/// out-of-range value cannot reach the platform encoder.
 ///
-/// This knob trades size, not time: encoding a 1080p frame costs ~11 ms at
-/// q40 and ~14 ms at q85, while the output grows from ~47 KiB to ~201 KiB.
-/// Note that `jpeg_encoder` switches to 4:2:0 chroma subsampling below q90,
-/// so 89 → 90 is a visible step rather than a smooth one.
+/// Each platform's native encoder (ImageIO, WIC or `Bitmap.compress`) maps
+/// this value to its own quantization and chroma subsampling, so output size
+/// and appearance at a given quality differ between platforms.
 #[cfg(feature = "thumbnails")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct JpegQuality(u8);
 
 #[cfg(feature = "thumbnails")]
 impl JpegQuality {
-   /// Thumbnail-grade default: ~64 KiB for a 1080p frame, where the size
-   /// curve is still cheap.
+   /// Thumbnail-grade default.
    pub const DEFAULT: Self = Self(60);
 
    /// Returns `None` unless `quality` is within the encoder's 1–100 range.
