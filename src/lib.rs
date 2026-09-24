@@ -47,6 +47,8 @@
 use std::collections::HashMap;
 use tauri::{Manager, Runtime, plugin::TauriPlugin};
 
+#[cfg(target_os = "android")]
+mod android_jpeg;
 mod commands;
 mod envelope;
 mod error;
@@ -155,7 +157,10 @@ impl Builder {
       unsafe {
          tauri_plugin_media_parser_link_videotoolbox();
       }
-      tauri::plugin::Builder::new("media-parser")
+      let plugin = tauri::plugin::Builder::new("media-parser");
+      #[cfg(target_os = "android")]
+      let plugin = plugin.on_webview_ready(android_jpeg::on_webview_ready);
+      plugin
          .setup(move |app, _api| {
             app.manage(self.into_default_headers()?);
             #[cfg(native_h264_backend)]

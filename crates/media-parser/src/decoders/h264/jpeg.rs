@@ -2,7 +2,10 @@ use super::color::GopColor;
 use super::convert::yuv_to_rgb;
 use super::frame::PlanarYuv;
 use super::{DecodeError, DecodedImage, JpegQuality, ThumbnailSize};
-use std::io::{self, Write};
+#[cfg(any(test, not(target_os = "android")))]
+mod sink;
+#[cfg(not(target_os = "android"))]
+use sink::FallibleJpegWriter;
 
 const MAX_JPEG_BYTES: usize = 64 * 1024 * 1024;
 
@@ -14,119 +17,111 @@ pub(crate) fn yuv_to_jpeg(
    color: GopColor,
 ) -> Result<DecodedImage, DecodeError> {
    let (width, height) = yuv_to_rgb(yuv, rgb, size, color)?;
-   let width_u16 = u16::try_from(width)
-      .map_err(|_| DecodeError::Convert("frame width exceeds JPEG limits".to_string()))?;
-   let height_u16 = u16::try_from(height)
-      .map_err(|_| DecodeError::Convert("frame height exceeds JPEG limits".to_string()))?;
-   let mut output = FallibleJpegWriter::new(MAX_JPEG_BYTES);
-   if let Err(error) = jpeg_encoder::Encoder::new(&mut output, quality.get()).encode(
-      rgb,
-      width_u16,
-      height_u16,
-      jpeg_encoder::ColorType::Rgb,
-   ) {
-      return Err(match output.failure {
-         Some(WriterFailure::OutputLimit) => {
-            DecodeError::OutputLimit("JPEG output is too large".to_string())
-         }
-         Some(WriterFailure::Allocation) => {
-            DecodeError::ResourceLimit("JPEG output allocation failed".to_string())
-         }
-         None => DecodeError::Convert(error.to_string()),
-      });
-   }
+   let data = encode_jpeg(rgb, width as usize, height as usize, quality)?;
    Ok(DecodedImage {
       width,
       height,
-      data: output.into_inner(),
+      data,
    })
 }
 
-#[derive(Debug, Clone, Copy)]
-enum WriterFailure {
-   OutputLimit,
-   Allocation,
-}
-
-/// Grows with the compressed stream instead of reserving the much larger raw
-/// RGB size. Allocation failures are surfaced through the encoder's I/O error.
-pub(crate) struct FallibleJpegWriter {
-   data: Vec<u8>,
-   max_len: usize,
-   failure: Option<WriterFailure>,
-}
-
-impl FallibleJpegWriter {
-   pub(crate) fn new(max_len: usize) -> Self {
-      Self {
-         data: Vec::new(),
-         max_len,
-         failure: None,
-      }
+fn encode_jpeg(
+   rgb: &mut [u8],
+   width: usize,
+   height: usize,
+   quality: JpegQuality,
+) -> Result<Vec<u8>, DecodeError> {
+   let width_u16 = u16::try_from(width)
+      .map_err(|_| DecodeError::Convert("frame width exceeds JPEG limits".into()))?;
+   let height_u16 = u16::try_from(height)
+      .map_err(|_| DecodeError::Convert("frame height exceeds JPEG limits".into()))?;
+   if width == 0
+      || height == 0
+      || rgb.len() != super::convert::rgb_buffer_len(u32::from(width_u16), u32::from(height_u16))?
+   {
+      return Err(DecodeError::Convert(
+         "invalid JPEG RGB dimensions or buffer length".into(),
+      ));
    }
-
-   fn into_inner(self) -> Vec<u8> {
-      self.data
-   }
-}
-
-impl Write for FallibleJpegWriter {
-   fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-      let Some(required_len) = self.data.len().checked_add(bytes.len()) else {
-         self.failure = Some(WriterFailure::OutputLimit);
-         return Err(io::Error::other("JPEG output is too large"));
-      };
-      if required_len > self.max_len {
-         self.failure = Some(WriterFailure::OutputLimit);
-         return Err(io::Error::other("JPEG output is too large"));
-      }
-      if required_len > self.data.capacity() {
-         let target_capacity = self
-            .data
-            .capacity()
-            .saturating_mul(2)
-            .max(required_len)
-            .min(self.max_len);
-         if self
-            .data
-            .try_reserve_exact(target_capacity - self.data.len())
-            .is_err()
-         {
-            self.failure = Some(WriterFailure::Allocation);
-            return Err(io::Error::other("JPEG output allocation failed"));
-         }
-      }
-      self.data.extend_from_slice(bytes);
-      Ok(bytes.len())
-   }
-
-   fn flush(&mut self) -> io::Result<()> {
-      Ok(())
+   #[cfg(target_os = "android")]
+   return android::encode_jpeg(rgb, width, height, quality, MAX_JPEG_BYTES);
+   #[cfg(all(target_os = "windows", feature = "windows-media-foundation"))]
+   return windows::encode_jpeg(
+      rgb,
+      width,
+      height,
+      quality,
+      FallibleJpegWriter::new(MAX_JPEG_BYTES),
+   );
+   #[cfg(not(any(
+      target_os = "android",
+      all(target_os = "windows", feature = "windows-media-foundation")
+   )))]
+   {
+      let mut output = FallibleJpegWriter::new(MAX_JPEG_BYTES);
+      #[cfg(apple_videotoolbox_backend)]
+      let result = apple::encode_jpeg(rgb, width, height, quality, &mut output);
+      #[cfg(not(apple_videotoolbox_backend))]
+      let result = jpeg_encoder::Encoder::new(&mut output, quality.get())
+         .encode(rgb, width_u16, height_u16, jpeg_encoder::ColorType::Rgb)
+         .map_err(|error| DecodeError::Convert(error.to_string()));
+      output.finish(result)
    }
 }
+
+#[cfg(any(
+   test,
+   apple_videotoolbox_backend,
+   all(target_os = "windows", feature = "windows-media-foundation")
+))]
+fn quality_unit(quality: JpegQuality) -> f32 {
+   f32::from(quality.get()) / 100.0
+}
+
+#[cfg(apple_videotoolbox_backend)]
+mod apple;
+
+#[cfg(all(target_os = "windows", feature = "windows-media-foundation"))]
+mod windows;
+#[cfg(all(target_os = "windows", feature = "windows-media-foundation"))]
+mod windows_stream;
 
 #[cfg(test)]
 mod tests {
    use super::*;
-   use std::io::Write;
+
+   #[cfg(target_os = "android")]
+   #[test]
+   fn android_requires_bootstrap() {
+      assert!(
+         matches!(encode_jpeg(&mut [255, 0, 0], 1, 1, JpegQuality::default()),
+         Err(DecodeError::Convert(message)) if message.contains("runtime is not initialized"))
+      );
+   }
 
    #[test]
-   fn writer_grows_geometrically_and_preserves_data_at_the_limit() {
-      let mut output = FallibleJpegWriter::new(8);
-      let mut capacity_changes = 0;
-      let mut capacity = output.data.capacity();
-
-      for byte in 0..8 {
-         output.write_all(&[byte]).expect("write within limit");
-         if output.data.capacity() != capacity {
-            capacity_changes += 1;
-            capacity = output.data.capacity();
-         }
+   fn quality_uses_unit_interval() {
+      for (quality, expected) in [(1, 0.01), (60, 0.6), (100, 1.0)] {
+         assert_eq!(quality_unit(JpegQuality::new(quality).unwrap()), expected);
       }
+   }
 
-      assert_eq!(output.data, (0..8).collect::<Vec<_>>());
-      assert!(capacity_changes <= 4);
-      assert!(output.write_all(&[8]).is_err());
-      assert_eq!(output.data, (0..8).collect::<Vec<_>>());
+   #[test]
+   fn encoder_rejects_invalid_rgb() {
+      for (width, height, len) in [
+         (0, 1, 0),
+         (1, 0, 0),
+         (1, 1, 2),
+         (1, 1, 4),
+         (usize::MAX, 1, 3),
+      ] {
+         assert!(matches!(
+            encode_jpeg(&mut vec![0; len], width, height, JpegQuality::default()),
+            Err(DecodeError::Convert(_))
+         ));
+      }
    }
 }
+
+#[cfg(target_os = "android")]
+pub(crate) mod android;

@@ -1001,7 +1001,7 @@ mod tests {
       assert_eq!(returned.num_permits(), MAX_CONCURRENT_THUMBNAIL_EXTRACTIONS);
    }
 
-   struct InMemoryReader(Vec<u8>);
+   use super::native_test_cases::InMemoryReader;
 
    #[tokio::test]
    async fn cancelled_decode_keeps_its_permit_until_the_worker_finishes() {
@@ -1039,22 +1039,6 @@ mod tests {
       .await;
       assert!(result.is_err());
       assert_eq!(semaphore.available_permits(), 1);
-   }
-
-   #[async_trait::async_trait]
-   impl StreamReader for InMemoryReader {
-      async fn read_at(&self, offset: u64, buf: &mut [u8]) -> Result<usize> {
-         let start = usize::try_from(offset)
-            .unwrap_or(usize::MAX)
-            .min(self.0.len());
-         let read = buf.len().min(self.0.len() - start);
-         buf[..read].copy_from_slice(&self.0[start..start + read]);
-         Ok(read)
-      }
-
-      async fn size(&self) -> Result<u64> {
-         Ok(self.0.len() as u64)
-      }
    }
 
    fn empty_moov_file() -> Vec<u8> {
@@ -1517,8 +1501,36 @@ mod tests {
       assert_eq!(target.presentation_tick, 0);
    }
 
+   #[cfg(not(target_os = "android"))]
    #[tokio::test]
    async fn real_decode_job_produces_an_image_from_a_shared_sample_region() {
+      native_test_cases::real_decode_job_produces_an_image_from_a_shared_sample_region_case().await;
+   }
+}
+
+#[cfg(any(test, all(target_os = "android", feature = "android-jvm-test-harness")))]
+// On Android these cases run through the JVM harness, so the native test binary
+// compiles them without calling them.
+#[cfg_attr(all(test, target_os = "android"), allow(dead_code))]
+pub(crate) mod native_test_cases {
+   use super::*;
+   pub(super) struct InMemoryReader(pub(super) Vec<u8>);
+   #[async_trait::async_trait]
+   impl StreamReader for InMemoryReader {
+      async fn read_at(&self, offset: u64, buf: &mut [u8]) -> Result<usize> {
+         let start = usize::try_from(offset)
+            .unwrap_or(usize::MAX)
+            .min(self.0.len());
+         let read = buf.len().min(self.0.len() - start);
+         buf[..read].copy_from_slice(&self.0[start..start + read]);
+         Ok(read)
+      }
+
+      async fn size(&self) -> Result<u64> {
+         Ok(self.0.len() as u64)
+      }
+   }
+   pub(crate) async fn real_decode_job_produces_an_image_from_a_shared_sample_region_case() {
       let reader =
          InMemoryReader(include_bytes!("../../../tests/fixtures/bframes_video.mp4").to_vec());
       let moov = find_and_read_moov_box(&reader).await.unwrap();

@@ -45,6 +45,10 @@ struct ThumbnailSession {
 #[cfg(native_h264_backend)]
 pub(crate) struct ThumbnailSessions {
    pool: SessionPool<ThumbnailSessionKey, ThumbnailSession>,
+   /// Tauri commands cannot take cfg-gated arguments, so the JPEG bootstrap
+   /// travels with the thumbnail state.
+   #[cfg(target_os = "android")]
+   pub(crate) android_jpeg: crate::android_jpeg::AndroidJpeg,
 }
 
 #[cfg(native_h264_backend)]
@@ -52,6 +56,8 @@ impl Default for ThumbnailSessions {
    fn default() -> Self {
       Self {
          pool: SessionPool::new(MAX_THUMBNAIL_SESSIONS, SESSION_REAPER_INTERVAL),
+         #[cfg(target_os = "android")]
+         android_jpeg: Default::default(),
       }
    }
 }
@@ -183,6 +189,8 @@ pub(crate) async fn get_thumbnails(
    let headers = defaults.merge(&source, headers)?;
    let (unique_timestamps, order) = prepare_thumbnail_timestamps(&timestamps)?;
    let options = thumbnail_options(quality, max_width, max_height)?;
+   #[cfg(target_os = "android")]
+   sessions.android_jpeg.wait().await?;
    let frames = thumbnail_frames(
       &sessions,
       &source,

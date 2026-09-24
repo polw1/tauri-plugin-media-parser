@@ -253,7 +253,7 @@ fn decode_compatible_frame_batches_to_jpeg_with<D: H264Decoder, S: AsRef<[u8]>>(
    )
 }
 
-#[cfg(test)]
+#[cfg(any(test, all(target_os = "android", feature = "android-jvm-test-harness")))]
 pub(crate) fn decode_batches_with_decoder<D: H264Decoder, S: AsRef<[u8]>>(
    decoder: &mut D,
    batches: &[DecodeBatch<'_, S>],
@@ -476,7 +476,7 @@ fn validate_decode_inputs<S: AsRef<[u8]>>(
    Ok(())
 }
 
-#[cfg(test)]
+#[cfg(any(test, all(target_os = "android", feature = "android-jvm-test-harness")))]
 #[allow(clippy::too_many_arguments)] // Mirrors the public orchestration inputs for test injection.
 pub(crate) fn decode_frames_to_jpeg_with<D: H264Decoder, S: AsRef<[u8]>>(
    decoder: &mut D,
@@ -503,258 +503,19 @@ pub(crate) fn decode_frames_to_jpeg_with<D: H264Decoder, S: AsRef<[u8]>>(
 #[cfg(test)]
 mod tests {
    use super::*;
-   use crate::decoders::h264::AvcColorMetadata;
 
-   fn fake_decode(
-      mut decoder: backend::fake::FakeDecoder,
-      tokens: &[FrameToken],
-      wanted: &[(FrameToken, usize)],
-   ) -> Result<Vec<(FrameToken, DecodedImage)>, DecodeError> {
-      let samples = vec![vec![0]; tokens.len()];
-      decode_frames_to_jpeg_with(
-         &mut decoder,
-         &samples,
-         tokens,
-         wanted,
-         JpegQuality::default(),
-         ThumbnailSize::default(),
-         GopColor::DEFAULT,
-         &OutputBudget::new(None),
-      )
-   }
+   use super::test_support::*;
 
-   struct ReusableFakeDecoder {
-      pending: Vec<FrameToken>,
-      drains: Arc<AtomicUsize>,
-   }
-
-   enum RetryBehavior {
-      Succeed,
-      FailBeforeBackend(&'static str),
-      FailBeforeUnsupported(&'static str),
-      FailBeforeBitstream(&'static str),
-      FailAfterFrame(&'static str),
-   }
-
-   struct RetryFakeDecoder {
-      behavior: RetryBehavior,
-      pending: Vec<FrameToken>,
-   }
-
-   impl H264Decoder for RetryFakeDecoder {
-      fn open(_config: &AvcConfig) -> Result<Self, DecodeError> {
-         Err(DecodeError::Backend(
-            "test supplies the retry decoder through a factory".to_string(),
-         ))
-      }
-
-      fn decode(
-         &mut self,
-         _sample: &[u8],
-         token: FrameToken,
-         sink: &mut backend::FrameSink<'_>,
-      ) -> Result<(), DecodeError> {
-         match self.behavior {
-            RetryBehavior::Succeed => {
-               self.pending.push(token);
-               Ok(())
-            }
-            RetryBehavior::FailBeforeBackend(message) => {
-               Err(DecodeError::Backend(message.to_string()))
-            }
-            RetryBehavior::FailBeforeUnsupported(message) => {
-               Err(DecodeError::UnsupportedFormat(message.to_string()))
-            }
-            RetryBehavior::FailBeforeBitstream(message) => {
-               Err(DecodeError::Bitstream(message.to_string()))
-            }
-            RetryBehavior::FailAfterFrame(message) => {
-               let y = [81; 4];
-               let u = [90];
-               let v = [240];
-               let frame = frame::PlanarYuv {
-                  y: frame::Plane {
-                     data: &y,
-                     row_stride: 2,
-                     pixel_stride: 1,
-                  },
-                  u: frame::Plane {
-                     data: &u,
-                     row_stride: 1,
-                     pixel_stride: 1,
-                  },
-                  v: frame::Plane {
-                     data: &v,
-                     row_stride: 1,
-                     pixel_stride: 1,
-                  },
-                  coded_width: 2,
-                  coded_height: 2,
-                  crop: frame::Crop {
-                     x: 0,
-                     y: 0,
-                     width: 2,
-                     height: 2,
-                  },
-               };
-               sink(token, &frame)?;
-               Err(DecodeError::Backend(message.to_string()))
-            }
-         }
-      }
-
-      fn drain(&mut self, sink: &mut backend::FrameSink<'_>) -> Result<(), DecodeError> {
-         let mut reusable = ReusableFakeDecoder {
-            pending: std::mem::take(&mut self.pending),
-            drains: Arc::new(AtomicUsize::new(0)),
-         };
-         reusable.drain(sink)
-      }
-   }
-
-   impl H264Decoder for ReusableFakeDecoder {
-      fn open(_config: &AvcConfig) -> Result<Self, DecodeError> {
-         Err(DecodeError::Backend(
-            "test supplies the reusable decoder through a factory".to_string(),
-         ))
-      }
-
-      fn decode(
-         &mut self,
-         _sample: &[u8],
-         token: FrameToken,
-         _sink: &mut backend::FrameSink<'_>,
-      ) -> Result<(), DecodeError> {
-         self.pending.push(token);
-         Ok(())
-      }
-
-      fn drain(&mut self, sink: &mut backend::FrameSink<'_>) -> Result<(), DecodeError> {
-         self.drains.fetch_add(1, Ordering::Relaxed);
-         let y = [81; 4];
-         let u = [90];
-         let v = [240];
-         let frame = frame::PlanarYuv {
-            y: frame::Plane {
-               data: &y,
-               row_stride: 2,
-               pixel_stride: 1,
-            },
-            u: frame::Plane {
-               data: &u,
-               row_stride: 1,
-               pixel_stride: 1,
-            },
-            v: frame::Plane {
-               data: &v,
-               row_stride: 1,
-               pixel_stride: 1,
-            },
-            coded_width: 2,
-            coded_height: 2,
-            crop: frame::Crop {
-               x: 0,
-               y: 0,
-               width: 2,
-               height: 2,
-            },
-         };
-         for token in self.pending.drain(..) {
-            sink(token, &frame)?;
-         }
-         Ok(())
-      }
-   }
-
-   fn reusable_config(width: u32) -> AvcConfig {
-      AvcConfig {
-         length_size: 1,
-         sps: Vec::new(),
-         pps: Vec::new(),
-         color: AvcColorMetadata::default(),
-         display_width: width,
-         display_height: 2,
-         max_input_size: None,
-         resolved_full_range: None,
-         resolved_codec_dimensions: None,
-      }
-   }
-
-   fn retry_batch<'a>(
-      config: &'a AvcConfig,
-      samples: &'a [Vec<u8>],
-      tokens: &'a [FrameToken],
-      wanted: &'a [(FrameToken, usize)],
-   ) -> H264DecodeBatch<'a, Vec<u8>> {
-      H264DecodeBatch {
-         config,
-         samples,
-         tokens,
-         wanted,
-      }
-   }
-
+   #[cfg(not(target_os = "android"))]
    #[test]
    fn retryable_failure_before_first_frame_replays_with_next_decoder() {
-      let config = reusable_config(2);
-      let samples = [vec![1, 0x65]];
-      let tokens = [FrameToken::new(0)];
-      let wanted = [(FrameToken::new(0), 1)];
-      let attempts = Arc::new(std::sync::Mutex::new(Vec::new()));
-
-      let output = decode_frame_batches_to_jpeg_with(
-         &[retry_batch(&config, &samples, &tokens, &wanted)],
-         JpegQuality::default(),
-         ThumbnailSize::default(),
-         &OutputBudget::new(None),
-         {
-            let attempts = Arc::clone(&attempts);
-            move |_, attempt| {
-               attempts.lock().unwrap().push(attempt);
-               Ok(Some(RetryFakeDecoder {
-                  behavior: if attempt == 0 {
-                     RetryBehavior::FailBeforeUnsupported("preferred decoder failed")
-                  } else {
-                     RetryBehavior::Succeed
-                  },
-                  pending: Vec::new(),
-               }))
-            }
-         },
-      )
-      .expect("the next decoder should replay the batch successfully");
-
-      assert_eq!(output.len(), 1);
-      assert_eq!(*attempts.lock().unwrap(), vec![0, 1]);
+      test_support::retryable_failure_before_first_frame_replays_with_next_decoder_case();
    }
 
+   #[cfg(not(target_os = "android"))]
    #[test]
    fn retryable_failure_after_first_frame_does_not_retry() {
-      let config = reusable_config(2);
-      let samples = [vec![1, 0x65]];
-      let tokens = [FrameToken::new(0)];
-      let wanted = [(FrameToken::new(0), 1)];
-      let mut attempts = Vec::new();
-
-      let error = decode_frame_batches_to_jpeg_with(
-         &[retry_batch(&config, &samples, &tokens, &wanted)],
-         JpegQuality::default(),
-         ThumbnailSize::default(),
-         &OutputBudget::new(None),
-         |_, attempt| {
-            attempts.push(attempt);
-            Ok(Some(RetryFakeDecoder {
-               behavior: RetryBehavior::FailAfterFrame("decoder failed after output"),
-               pending: Vec::new(),
-            }))
-         },
-      )
-      .expect_err("output makes replay unsafe");
-
-      assert!(
-         matches!(error, DecodeError::Backend(message) if message == "decoder failed after output")
-      );
-      assert_eq!(attempts, vec![0]);
+      test_support::retryable_failure_after_first_frame_does_not_retry_case();
    }
 
    #[test]
@@ -815,35 +576,10 @@ mod tests {
       assert_eq!(attempts, vec![0, 1, 2]);
    }
 
+   #[cfg(not(target_os = "android"))]
    #[test]
    fn retryable_open_failure_opens_the_next_decoder_once() {
-      let config = reusable_config(2);
-      let samples = [vec![1, 0x65]];
-      let tokens = [FrameToken::new(0)];
-      let wanted = [(FrameToken::new(0), 1)];
-      let mut attempts = Vec::new();
-
-      let output = decode_frame_batches_to_jpeg_with(
-         &[retry_batch(&config, &samples, &tokens, &wanted)],
-         JpegQuality::default(),
-         ThumbnailSize::default(),
-         &OutputBudget::new(None),
-         |_, attempt| {
-            attempts.push(attempt);
-            if attempt == 0 {
-               return Err(DecodeError::Backend("configure rejected".to_string()));
-            }
-            Ok(Some(RetryFakeDecoder {
-               behavior: RetryBehavior::Succeed,
-               pending: Vec::new(),
-            }))
-         },
-      )
-      .expect("the next decoder should open and decode");
-
-      assert_eq!(output.len(), 1);
-      assert_eq!(output[0].len(), 1);
-      assert_eq!(attempts, vec![0, 1]);
+      test_support::retryable_open_failure_opens_the_next_decoder_once_case();
    }
 
    #[test]
@@ -945,92 +681,16 @@ mod tests {
       ));
    }
 
+   #[cfg(not(target_os = "android"))]
    #[test]
    fn shared_pipeline_decodes_a_single_batch() {
-      let samples = vec![vec![1, 0x65]];
-      let tokens = [FrameToken::new(0)];
-      let wanted = [(FrameToken::new(0), 1)];
-      let batch = DecodeBatch {
-         samples: &samples,
-         tokens: &tokens,
-         wanted: &wanted,
-         color: GopColor::DEFAULT,
-      };
-      let drains = Arc::new(AtomicUsize::new(0));
-      let mut decoder = ReusableFakeDecoder {
-         pending: Vec::new(),
-         drains: Arc::clone(&drains),
-      };
-
-      let output = decode_batches_with_decoder(
-         &mut decoder,
-         &[batch],
-         JpegQuality::default(),
-         ThumbnailSize::default(),
-         &OutputBudget::new(None),
-      )
-      .expect("the shared pipeline decodes one batch");
-
-      assert_eq!(output.len(), 1);
-      assert_eq!(output[0].len(), 1);
-      assert_eq!(output[0][0].0, FrameToken::new(0));
-      assert_eq!(drains.load(Ordering::Relaxed), 1);
+      test_support::shared_pipeline_decodes_a_single_batch_case();
    }
 
+   #[cfg(not(target_os = "android"))]
    #[test]
    fn compatible_batches_reuse_one_decoder_with_sufficient_input_capacity() {
-      let config = reusable_config(2);
-      let first_samples = vec![vec![1, 0x65]];
-      let second_samples = vec![vec![4, 0x65, 1, 2, 3]];
-      let tokens = [FrameToken::new(0)];
-      let wanted = [(FrameToken::new(0), 1)];
-      let batches = [
-         H264DecodeBatch {
-            config: &config,
-            samples: &first_samples,
-            tokens: &tokens,
-            wanted: &wanted,
-         },
-         H264DecodeBatch {
-            config: &config,
-            samples: &second_samples,
-            tokens: &tokens,
-            wanted: &wanted,
-         },
-      ];
-      let opens = Arc::new(AtomicUsize::new(0));
-      let drains = Arc::new(AtomicUsize::new(0));
-      let opened_capacity = Arc::new(std::sync::Mutex::new(Vec::new()));
-
-      let output = decode_frame_batches_to_jpeg_with(
-         &batches,
-         JpegQuality::default(),
-         ThumbnailSize::default(),
-         &OutputBudget::new(None),
-         {
-            let opens = Arc::clone(&opens);
-            let drains = Arc::clone(&drains);
-            let opened_capacity = Arc::clone(&opened_capacity);
-            move |prepared, _| {
-               opens.fetch_add(1, Ordering::Relaxed);
-               opened_capacity
-                  .lock()
-                  .unwrap()
-                  .push(prepared.max_input_size);
-               Ok(Some(ReusableFakeDecoder {
-                  pending: Vec::new(),
-                  drains: Arc::clone(&drains),
-               }))
-            }
-         },
-      )
-      .expect("compatible batches should decode");
-
-      assert_eq!(output.len(), 2);
-      assert!(output.iter().all(|batch| batch.len() == 1));
-      assert_eq!(opens.load(Ordering::Relaxed), 1);
-      assert_eq!(drains.load(Ordering::Relaxed), 1);
-      assert_eq!(*opened_capacity.lock().unwrap(), vec![Some(8)]);
+      test_support::compatible_batches_reuse_one_decoder_with_sufficient_input_capacity_case();
    }
 
    #[test]
@@ -1077,86 +737,16 @@ mod tests {
       assert_eq!(budget.used(), 0);
    }
 
+   #[cfg(not(target_os = "android"))]
    #[test]
    fn incompatible_batches_open_separate_decoders() {
-      let mut first_config = reusable_config(2);
-      let mut second_config = reusable_config(4);
-      // Baseline SPS 0, 32x32 coded pixels, BT.601 VUI: limited then full range.
-      first_config.sps = vec![vec![
-         0x67, 0x42, 0x00, 0x1e, 0xf4, 0x4b, 0x4d, 0x40, 0x40, 0x41, 0xa0,
-      ]];
-      second_config.sps = vec![vec![
-         0x67, 0x42, 0x00, 0x1e, 0xf4, 0x4b, 0x4d, 0xc0, 0x40, 0x41, 0xa0,
-      ]];
-      first_config.pps = vec![vec![0x68, 0xe0]]; // PPS 0 references SPS 0.
-      second_config.pps = first_config.pps.clone();
-      let samples = vec![vec![2, 0x65, 0xbc]]; // IDR I-slice references PPS 0.
-      assert!(!resolve_gop_color(&first_config, &samples).full_range);
-      assert!(resolve_gop_color(&second_config, &samples).full_range);
-      let tokens = [FrameToken::new(0)];
-      let wanted = [(FrameToken::new(0), 1)];
-      let batches = [
-         H264DecodeBatch {
-            config: &first_config,
-            samples: &samples,
-            tokens: &tokens,
-            wanted: &wanted,
-         },
-         H264DecodeBatch {
-            config: &second_config,
-            samples: &samples,
-            tokens: &tokens,
-            wanted: &wanted,
-         },
-      ];
-      let opens = Arc::new(AtomicUsize::new(0));
-      let drains = Arc::new(AtomicUsize::new(0));
-
-      let output = decode_frame_batches_to_jpeg_with(
-         &batches,
-         JpegQuality::default(),
-         ThumbnailSize::default(),
-         &OutputBudget::new(None),
-         {
-            let opens = Arc::clone(&opens);
-            let drains = Arc::clone(&drains);
-            move |_, _| {
-               opens.fetch_add(1, Ordering::Relaxed);
-               Ok(Some(ReusableFakeDecoder {
-                  pending: Vec::new(),
-                  drains: Arc::clone(&drains),
-               }))
-            }
-         },
-      )
-      .expect("incompatible batches should decode independently");
-
-      assert_eq!(output.len(), 2);
-      assert_ne!(output[0][0].1.data, output[1][0].1.data);
-      assert_eq!(opens.load(Ordering::Relaxed), 2);
-      assert_eq!(drains.load(Ordering::Relaxed), 2);
+      test_support::incompatible_batches_open_separate_decoders_case();
    }
 
+   #[cfg(not(target_os = "android"))]
    #[test]
    fn orchestration_returns_reordered_callbacks_in_token_order() {
-      let tokens = [FrameToken::new(0), FrameToken::new(2), FrameToken::new(1)];
-      let wanted = [
-         (FrameToken::new(0), 1),
-         (FrameToken::new(1), 1),
-         (FrameToken::new(2), 1),
-      ];
-      let decoder = backend::fake::FakeDecoder::emitting(vec![
-         FrameToken::new(2),
-         FrameToken::new(0),
-         FrameToken::new(1),
-      ]);
-
-      let output = fake_decode(decoder, &tokens, &wanted).expect("reordering is valid");
-
-      assert_eq!(
-         output.iter().map(|(token, _)| *token).collect::<Vec<_>>(),
-         wanted.iter().map(|(token, _)| *token).collect::<Vec<_>>()
-      );
+      test_support::orchestration_returns_reordered_callbacks_in_token_order_case();
    }
 
    #[test]
@@ -1253,5 +843,457 @@ mod tests {
          .expect_err("invalid token permutation");
          assert!(matches!(error, DecodeError::BackendContract(_)));
       }
+   }
+}
+
+#[cfg(any(test, all(target_os = "android", feature = "android-jvm-test-harness")))]
+// On Android these cases run through the JVM harness, so the native test binary
+// compiles them without calling them.
+#[cfg_attr(all(test, target_os = "android"), allow(dead_code))]
+pub(crate) mod test_support {
+   use super::*;
+   use crate::decoders::h264::AvcColorMetadata;
+   pub(super) fn fake_decode(
+      mut decoder: backend::fake::FakeDecoder,
+      tokens: &[FrameToken],
+      wanted: &[(FrameToken, usize)],
+   ) -> Result<Vec<(FrameToken, DecodedImage)>, DecodeError> {
+      let samples = vec![vec![0]; tokens.len()];
+      decode_frames_to_jpeg_with(
+         &mut decoder,
+         &samples,
+         tokens,
+         wanted,
+         JpegQuality::default(),
+         ThumbnailSize::default(),
+         GopColor::DEFAULT,
+         &OutputBudget::new(None),
+      )
+   }
+
+   pub(super) struct ReusableFakeDecoder {
+      pub(super) pending: Vec<FrameToken>,
+      pub(super) drains: Arc<AtomicUsize>,
+   }
+
+   pub(super) enum RetryBehavior {
+      Succeed,
+      #[cfg(test)]
+      FailBeforeBackend(&'static str),
+      FailBeforeUnsupported(&'static str),
+      #[cfg(test)]
+      FailBeforeBitstream(&'static str),
+      FailAfterFrame(&'static str),
+   }
+
+   pub(super) struct RetryFakeDecoder {
+      pub(super) behavior: RetryBehavior,
+      pub(super) pending: Vec<FrameToken>,
+   }
+
+   impl H264Decoder for RetryFakeDecoder {
+      fn open(_config: &AvcConfig) -> Result<Self, DecodeError> {
+         Err(DecodeError::Backend(
+            "test supplies the retry decoder through a factory".to_string(),
+         ))
+      }
+
+      fn decode(
+         &mut self,
+         _sample: &[u8],
+         token: FrameToken,
+         sink: &mut backend::FrameSink<'_>,
+      ) -> Result<(), DecodeError> {
+         match self.behavior {
+            RetryBehavior::Succeed => {
+               self.pending.push(token);
+               Ok(())
+            }
+            #[cfg(test)]
+            RetryBehavior::FailBeforeBackend(message) => {
+               Err(DecodeError::Backend(message.to_string()))
+            }
+            RetryBehavior::FailBeforeUnsupported(message) => {
+               Err(DecodeError::UnsupportedFormat(message.to_string()))
+            }
+            #[cfg(test)]
+            RetryBehavior::FailBeforeBitstream(message) => {
+               Err(DecodeError::Bitstream(message.to_string()))
+            }
+            RetryBehavior::FailAfterFrame(message) => {
+               let y = [81; 4];
+               let u = [90];
+               let v = [240];
+               let frame = frame::PlanarYuv {
+                  y: frame::Plane {
+                     data: &y,
+                     row_stride: 2,
+                     pixel_stride: 1,
+                  },
+                  u: frame::Plane {
+                     data: &u,
+                     row_stride: 1,
+                     pixel_stride: 1,
+                  },
+                  v: frame::Plane {
+                     data: &v,
+                     row_stride: 1,
+                     pixel_stride: 1,
+                  },
+                  coded_width: 2,
+                  coded_height: 2,
+                  crop: frame::Crop {
+                     x: 0,
+                     y: 0,
+                     width: 2,
+                     height: 2,
+                  },
+               };
+               sink(token, &frame)?;
+               Err(DecodeError::Backend(message.to_string()))
+            }
+         }
+      }
+
+      fn drain(&mut self, sink: &mut backend::FrameSink<'_>) -> Result<(), DecodeError> {
+         let mut reusable = ReusableFakeDecoder {
+            pending: std::mem::take(&mut self.pending),
+            drains: Arc::new(AtomicUsize::new(0)),
+         };
+         reusable.drain(sink)
+      }
+   }
+
+   impl H264Decoder for ReusableFakeDecoder {
+      fn open(_config: &AvcConfig) -> Result<Self, DecodeError> {
+         Err(DecodeError::Backend(
+            "test supplies the reusable decoder through a factory".to_string(),
+         ))
+      }
+
+      fn decode(
+         &mut self,
+         _sample: &[u8],
+         token: FrameToken,
+         _sink: &mut backend::FrameSink<'_>,
+      ) -> Result<(), DecodeError> {
+         self.pending.push(token);
+         Ok(())
+      }
+
+      fn drain(&mut self, sink: &mut backend::FrameSink<'_>) -> Result<(), DecodeError> {
+         self.drains.fetch_add(1, Ordering::Relaxed);
+         let y = [81; 4];
+         let u = [90];
+         let v = [240];
+         let frame = frame::PlanarYuv {
+            y: frame::Plane {
+               data: &y,
+               row_stride: 2,
+               pixel_stride: 1,
+            },
+            u: frame::Plane {
+               data: &u,
+               row_stride: 1,
+               pixel_stride: 1,
+            },
+            v: frame::Plane {
+               data: &v,
+               row_stride: 1,
+               pixel_stride: 1,
+            },
+            coded_width: 2,
+            coded_height: 2,
+            crop: frame::Crop {
+               x: 0,
+               y: 0,
+               width: 2,
+               height: 2,
+            },
+         };
+         for token in self.pending.drain(..) {
+            sink(token, &frame)?;
+         }
+         Ok(())
+      }
+   }
+
+   pub(super) fn reusable_config(width: u32) -> AvcConfig {
+      AvcConfig {
+         length_size: 1,
+         sps: Vec::new(),
+         pps: Vec::new(),
+         color: AvcColorMetadata::default(),
+         display_width: width,
+         display_height: 2,
+         max_input_size: None,
+         resolved_full_range: None,
+         resolved_codec_dimensions: None,
+      }
+   }
+
+   pub(super) fn retry_batch<'a>(
+      config: &'a AvcConfig,
+      samples: &'a [Vec<u8>],
+      tokens: &'a [FrameToken],
+      wanted: &'a [(FrameToken, usize)],
+   ) -> H264DecodeBatch<'a, Vec<u8>> {
+      H264DecodeBatch {
+         config,
+         samples,
+         tokens,
+         wanted,
+      }
+   }
+
+   pub(crate) fn retryable_failure_before_first_frame_replays_with_next_decoder_case() {
+      let config = reusable_config(2);
+      let samples = [vec![1, 0x65]];
+      let tokens = [FrameToken::new(0)];
+      let wanted = [(FrameToken::new(0), 1)];
+      let attempts = Arc::new(std::sync::Mutex::new(Vec::new()));
+
+      let output = decode_frame_batches_to_jpeg_with(
+         &[retry_batch(&config, &samples, &tokens, &wanted)],
+         JpegQuality::default(),
+         ThumbnailSize::default(),
+         &OutputBudget::new(None),
+         {
+            let attempts = Arc::clone(&attempts);
+            move |_, attempt| {
+               attempts.lock().unwrap().push(attempt);
+               Ok(Some(RetryFakeDecoder {
+                  behavior: if attempt == 0 {
+                     RetryBehavior::FailBeforeUnsupported("preferred decoder failed")
+                  } else {
+                     RetryBehavior::Succeed
+                  },
+                  pending: Vec::new(),
+               }))
+            }
+         },
+      )
+      .expect("the next decoder should replay the batch successfully");
+
+      assert_eq!(output.len(), 1);
+      assert_eq!(*attempts.lock().unwrap(), vec![0, 1]);
+   }
+   pub(crate) fn retryable_failure_after_first_frame_does_not_retry_case() {
+      let config = reusable_config(2);
+      let samples = [vec![1, 0x65]];
+      let tokens = [FrameToken::new(0)];
+      let wanted = [(FrameToken::new(0), 1)];
+      let mut attempts = Vec::new();
+
+      let error = decode_frame_batches_to_jpeg_with(
+         &[retry_batch(&config, &samples, &tokens, &wanted)],
+         JpegQuality::default(),
+         ThumbnailSize::default(),
+         &OutputBudget::new(None),
+         |_, attempt| {
+            attempts.push(attempt);
+            Ok(Some(RetryFakeDecoder {
+               behavior: RetryBehavior::FailAfterFrame("decoder failed after output"),
+               pending: Vec::new(),
+            }))
+         },
+      )
+      .expect_err("output makes replay unsafe");
+
+      assert!(
+         matches!(error, DecodeError::Backend(message) if message == "decoder failed after output")
+      );
+      assert_eq!(attempts, vec![0]);
+   }
+   pub(crate) fn retryable_open_failure_opens_the_next_decoder_once_case() {
+      let config = reusable_config(2);
+      let samples = [vec![1, 0x65]];
+      let tokens = [FrameToken::new(0)];
+      let wanted = [(FrameToken::new(0), 1)];
+      let mut attempts = Vec::new();
+
+      let output = decode_frame_batches_to_jpeg_with(
+         &[retry_batch(&config, &samples, &tokens, &wanted)],
+         JpegQuality::default(),
+         ThumbnailSize::default(),
+         &OutputBudget::new(None),
+         |_, attempt| {
+            attempts.push(attempt);
+            if attempt == 0 {
+               return Err(DecodeError::Backend("configure rejected".to_string()));
+            }
+            Ok(Some(RetryFakeDecoder {
+               behavior: RetryBehavior::Succeed,
+               pending: Vec::new(),
+            }))
+         },
+      )
+      .expect("the next decoder should open and decode");
+
+      assert_eq!(output.len(), 1);
+      assert_eq!(output[0].len(), 1);
+      assert_eq!(attempts, vec![0, 1]);
+   }
+   pub(crate) fn shared_pipeline_decodes_a_single_batch_case() {
+      let samples = vec![vec![1, 0x65]];
+      let tokens = [FrameToken::new(0)];
+      let wanted = [(FrameToken::new(0), 1)];
+      let batch = DecodeBatch {
+         samples: &samples,
+         tokens: &tokens,
+         wanted: &wanted,
+         color: GopColor::DEFAULT,
+      };
+      let drains = Arc::new(AtomicUsize::new(0));
+      let mut decoder = ReusableFakeDecoder {
+         pending: Vec::new(),
+         drains: Arc::clone(&drains),
+      };
+
+      let output = decode_batches_with_decoder(
+         &mut decoder,
+         &[batch],
+         JpegQuality::default(),
+         ThumbnailSize::default(),
+         &OutputBudget::new(None),
+      )
+      .expect("the shared pipeline decodes one batch");
+
+      assert_eq!(output.len(), 1);
+      assert_eq!(output[0].len(), 1);
+      assert_eq!(output[0][0].0, FrameToken::new(0));
+      assert_eq!(drains.load(Ordering::Relaxed), 1);
+   }
+   pub(crate) fn compatible_batches_reuse_one_decoder_with_sufficient_input_capacity_case() {
+      let config = reusable_config(2);
+      let first_samples = vec![vec![1, 0x65]];
+      let second_samples = vec![vec![4, 0x65, 1, 2, 3]];
+      let tokens = [FrameToken::new(0)];
+      let wanted = [(FrameToken::new(0), 1)];
+      let batches = [
+         H264DecodeBatch {
+            config: &config,
+            samples: &first_samples,
+            tokens: &tokens,
+            wanted: &wanted,
+         },
+         H264DecodeBatch {
+            config: &config,
+            samples: &second_samples,
+            tokens: &tokens,
+            wanted: &wanted,
+         },
+      ];
+      let opens = Arc::new(AtomicUsize::new(0));
+      let drains = Arc::new(AtomicUsize::new(0));
+      let opened_capacity = Arc::new(std::sync::Mutex::new(Vec::new()));
+
+      let output = decode_frame_batches_to_jpeg_with(
+         &batches,
+         JpegQuality::default(),
+         ThumbnailSize::default(),
+         &OutputBudget::new(None),
+         {
+            let opens = Arc::clone(&opens);
+            let drains = Arc::clone(&drains);
+            let opened_capacity = Arc::clone(&opened_capacity);
+            move |prepared, _| {
+               opens.fetch_add(1, Ordering::Relaxed);
+               opened_capacity
+                  .lock()
+                  .unwrap()
+                  .push(prepared.max_input_size);
+               Ok(Some(ReusableFakeDecoder {
+                  pending: Vec::new(),
+                  drains: Arc::clone(&drains),
+               }))
+            }
+         },
+      )
+      .expect("compatible batches should decode");
+
+      assert_eq!(output.len(), 2);
+      assert!(output.iter().all(|batch| batch.len() == 1));
+      assert_eq!(opens.load(Ordering::Relaxed), 1);
+      assert_eq!(drains.load(Ordering::Relaxed), 1);
+      assert_eq!(*opened_capacity.lock().unwrap(), vec![Some(8)]);
+   }
+   pub(crate) fn incompatible_batches_open_separate_decoders_case() {
+      let mut first_config = reusable_config(2);
+      let mut second_config = reusable_config(4);
+      // Baseline SPS 0, 32x32 coded pixels, BT.601 VUI: limited then full range.
+      first_config.sps = vec![vec![
+         0x67, 0x42, 0x00, 0x1e, 0xf4, 0x4b, 0x4d, 0x40, 0x40, 0x41, 0xa0,
+      ]];
+      second_config.sps = vec![vec![
+         0x67, 0x42, 0x00, 0x1e, 0xf4, 0x4b, 0x4d, 0xc0, 0x40, 0x41, 0xa0,
+      ]];
+      first_config.pps = vec![vec![0x68, 0xe0]]; // PPS 0 references SPS 0.
+      second_config.pps = first_config.pps.clone();
+      let samples = vec![vec![2, 0x65, 0xbc]]; // IDR I-slice references PPS 0.
+      assert!(!resolve_gop_color(&first_config, &samples).full_range);
+      assert!(resolve_gop_color(&second_config, &samples).full_range);
+      let tokens = [FrameToken::new(0)];
+      let wanted = [(FrameToken::new(0), 1)];
+      let batches = [
+         H264DecodeBatch {
+            config: &first_config,
+            samples: &samples,
+            tokens: &tokens,
+            wanted: &wanted,
+         },
+         H264DecodeBatch {
+            config: &second_config,
+            samples: &samples,
+            tokens: &tokens,
+            wanted: &wanted,
+         },
+      ];
+      let opens = Arc::new(AtomicUsize::new(0));
+      let drains = Arc::new(AtomicUsize::new(0));
+
+      let output = decode_frame_batches_to_jpeg_with(
+         &batches,
+         JpegQuality::default(),
+         ThumbnailSize::default(),
+         &OutputBudget::new(None),
+         {
+            let opens = Arc::clone(&opens);
+            let drains = Arc::clone(&drains);
+            move |_, _| {
+               opens.fetch_add(1, Ordering::Relaxed);
+               Ok(Some(ReusableFakeDecoder {
+                  pending: Vec::new(),
+                  drains: Arc::clone(&drains),
+               }))
+            }
+         },
+      )
+      .expect("incompatible batches should decode independently");
+
+      assert_eq!(output.len(), 2);
+      assert_ne!(output[0][0].1.data, output[1][0].1.data);
+      assert_eq!(opens.load(Ordering::Relaxed), 2);
+      assert_eq!(drains.load(Ordering::Relaxed), 2);
+   }
+   pub(crate) fn orchestration_returns_reordered_callbacks_in_token_order_case() {
+      let tokens = [FrameToken::new(0), FrameToken::new(2), FrameToken::new(1)];
+      let wanted = [
+         (FrameToken::new(0), 1),
+         (FrameToken::new(1), 1),
+         (FrameToken::new(2), 1),
+      ];
+      let decoder = backend::fake::FakeDecoder::emitting(vec![
+         FrameToken::new(2),
+         FrameToken::new(0),
+         FrameToken::new(1),
+      ]);
+
+      let output = fake_decode(decoder, &tokens, &wanted).expect("reordering is valid");
+
+      assert_eq!(
+         output.iter().map(|(token, _)| *token).collect::<Vec<_>>(),
+         wanted.iter().map(|(token, _)| *token).collect::<Vec<_>>()
+      );
    }
 }

@@ -1,6 +1,9 @@
 //! Integration tests for MP4/H.264 thumbnail extraction.
 
 #![cfg(feature = "thumbnails")]
+// On Android the JVM harness includes this file and runs these cases; the
+// native test binary compiles them without libtest wrappers.
+#![cfg_attr(target_os = "android", allow(dead_code, unused_imports))]
 
 mod common;
 
@@ -68,8 +71,7 @@ impl StreamReader for CountingReader {
    }
 }
 
-#[tokio::test]
-async fn test_mp4_h264_thumbnail_extraction() {
+pub(crate) async fn test_mp4_h264_thumbnail_extraction_case() {
    let path = fixtures_dir().join("multitrack_video.mp4");
    let reader = FileStreamReader::new(&path).expect("open MP4 fixture");
 
@@ -85,8 +87,7 @@ async fn test_mp4_h264_thumbnail_extraction() {
    assert!(frames[0].data.ends_with(&[0xff, 0xd9]));
 }
 
-#[tokio::test]
-async fn test_mp4_hd_thumbnail_uses_the_area_scaler_and_the_declared_matrix() {
+pub(crate) async fn test_mp4_hd_thumbnail_uses_the_area_scaler_and_the_declared_matrix_case() {
    // 1280x720 (generated with ffmpeg, 0.3s testsrc2) carrying BT.709 limited
    // range in its SPS VUI and no `colr` box. The default 320 box makes this a
    // 4x luma reduction, which is past the bilinear threshold, so this is the
@@ -96,9 +97,17 @@ async fn test_mp4_hd_thumbnail_uses_the_area_scaler_and_the_declared_matrix() {
    let path = fixtures_dir().join("bt709_hd_video.mp4");
    let reader = FileStreamReader::new(&path).expect("open HD fixture");
 
-   let frames = read_frames(&reader, 0, &[Duration::ZERO], ThumbnailOptions::default())
-      .await
-      .expect("extract BT.709 thumbnail");
+   let frames = read_frames(
+      &reader,
+      0,
+      &[Duration::ZERO],
+      ThumbnailOptions {
+         quality: media_parser::JpegQuality::new(100).unwrap(),
+         ..ThumbnailOptions::default()
+      },
+   )
+   .await
+   .expect("extract BT.709 thumbnail");
 
    assert_eq!((frames[0].width, frames[0].height), (320, 180));
    assert_matches_reference(
@@ -108,8 +117,7 @@ async fn test_mp4_hd_thumbnail_uses_the_area_scaler_and_the_declared_matrix() {
    );
 }
 
-#[tokio::test]
-async fn test_mp4_thumbnail_jpeg_capacity_tracks_compressed_bytes() {
+pub(crate) async fn test_mp4_thumbnail_jpeg_capacity_tracks_compressed_bytes_case() {
    let path = fixtures_dir().join("multitrack_video.mp4");
    let reader = FileStreamReader::new(&path).expect("open MP4 fixture");
 
@@ -126,8 +134,7 @@ async fn test_mp4_thumbnail_jpeg_capacity_tracks_compressed_bytes() {
    );
 }
 
-#[tokio::test]
-async fn test_mp4_thumbnail_is_resized_before_jpeg_encoding() {
+pub(crate) async fn test_mp4_thumbnail_is_resized_before_jpeg_encoding_case() {
    let path = fixtures_dir().join("multitrack_video.mp4");
    let reader = FileStreamReader::new(&path).expect("open MP4 fixture");
    let options = ThumbnailOptions {
@@ -144,8 +151,7 @@ async fn test_mp4_thumbnail_is_resized_before_jpeg_encoding() {
    assert!(frames[0].data.ends_with(&[0xff, 0xd9]));
 }
 
-#[tokio::test]
-async fn test_mp4_thumbnail_quality_reaches_the_jpeg_encoder() {
+pub(crate) async fn test_mp4_thumbnail_quality_reaches_the_jpeg_encoder_case() {
    let path = fixtures_dir().join("multitrack_video.mp4");
    let reader = FileStreamReader::new(&path).expect("open MP4 fixture");
    let low = ThumbnailOptions {
@@ -175,8 +181,7 @@ async fn test_mp4_thumbnail_quality_reaches_the_jpeg_encoder() {
    assert_eq!(low_frames[0].width, high_frames[0].width);
 }
 
-#[tokio::test]
-async fn test_mp4_thumbnail_budget_counts_each_requested_output() {
+pub(crate) async fn test_mp4_thumbnail_budget_counts_each_requested_output_case() {
    let path = fixtures_dir().join("multitrack_video.mp4");
    let reader = FileStreamReader::new(&path).expect("open MP4 fixture");
    let one_frame = read_keyframes(&reader, 0, &[Duration::ZERO], ThumbnailOptions::default())
@@ -204,8 +209,7 @@ async fn test_mp4_thumbnail_budget_counts_each_requested_output() {
    ));
 }
 
-#[tokio::test]
-async fn test_mp4_h264_thumbnails_follow_presentation_order() {
+pub(crate) async fn test_mp4_h264_thumbnails_follow_presentation_order_case() {
    let path = fixtures_dir().join("multitrack_video.mp4");
    let reader = FileStreamReader::new(&path).expect("open MP4 fixture");
    let timestamps = [
@@ -233,8 +237,7 @@ async fn test_mp4_h264_thumbnails_follow_presentation_order() {
    }
 }
 
-#[tokio::test]
-async fn test_mp4_h264_thumbnails_follow_presentation_order_with_deep_b_frames() {
+pub(crate) async fn test_mp4_h264_thumbnails_follow_presentation_order_with_deep_b_frames_case() {
    let path = fixtures_dir().join("bframes_video.mp4");
    let reader = FileStreamReader::new(&path).expect("open MP4 fixture");
    // 9 frames at 100 ms with three consecutive B-frames between P-frames.
@@ -259,8 +262,7 @@ async fn test_mp4_h264_thumbnails_follow_presentation_order_with_deep_b_frames()
    }
 }
 
-#[tokio::test]
-async fn test_mp4_thumbnail_index_can_be_reused_with_another_reader() {
+pub(crate) async fn test_mp4_thumbnail_index_can_be_reused_with_another_reader_case() {
    let path = fixtures_dir().join("multitrack_video.mp4");
    let reader = FileStreamReader::new(&path).expect("open MP4 fixture");
    let index = ThumbnailIndex::read(&reader, 0)
@@ -282,8 +284,7 @@ async fn test_mp4_thumbnail_index_can_be_reused_with_another_reader() {
    assert_eq!(frames[0].timestamp, Duration::from_millis(100));
 }
 
-#[tokio::test]
-async fn test_mp4_thumbnail_index_reports_the_automatically_selected_track() {
+pub(crate) async fn test_mp4_thumbnail_index_reports_the_automatically_selected_track_case() {
    // The fixture has a single `trak`: `hdlr = vide`, `tkhd.track_ID = 1`.
    let path = fixtures_dir().join("bframes_video.mp4");
    let reader = FileStreamReader::new(&path).expect("open MP4 fixture");
@@ -294,8 +295,7 @@ async fn test_mp4_thumbnail_index_reports_the_automatically_selected_track() {
    assert_eq!(index.track_id(), 1);
 }
 
-#[tokio::test]
-async fn test_mp4_fast_thumbnail_reports_the_keyframe_pts() {
+pub(crate) async fn test_mp4_fast_thumbnail_reports_the_keyframe_pts_case() {
    let path = fixtures_dir().join("multitrack_video.mp4");
    let reader = FileStreamReader::new(&path).expect("open MP4 fixture");
    let index = ThumbnailIndex::read(&reader, 0)
@@ -315,8 +315,7 @@ async fn test_mp4_fast_thumbnail_reports_the_keyframe_pts() {
    assert_eq!(frames[0].timestamp, Duration::ZERO);
 }
 
-#[tokio::test]
-async fn test_mp4_fast_thumbnails_read_each_keyframe_once() {
+pub(crate) async fn test_mp4_fast_thumbnails_read_each_keyframe_once_case() {
    let path = fixtures_dir().join("multitrack_video.mp4");
    let reader = CountingReader::new(&path);
    let index = ThumbnailIndex::read(&reader, 0)
@@ -341,8 +340,7 @@ async fn test_mp4_fast_thumbnails_read_each_keyframe_once() {
    assert_eq!(reader.read_count(), 1);
 }
 
-#[tokio::test]
-async fn test_mp4_exact_thumbnails_read_a_shared_gop_once() {
+pub(crate) async fn test_mp4_exact_thumbnails_read_a_shared_gop_once_case() {
    let path = fixtures_dir().join("multitrack_video.mp4");
    let reader = CountingReader::new(&path);
    let index = ThumbnailIndex::read(&reader, 0)
@@ -367,8 +365,7 @@ async fn test_mp4_exact_thumbnails_read_a_shared_gop_once() {
    assert_eq!(reader.read_count(), 1);
 }
 
-#[tokio::test]
-async fn test_mp4_exact_thumbnails_truncate_the_gop_at_the_last_target() {
+pub(crate) async fn test_mp4_exact_thumbnails_truncate_the_gop_at_the_last_target_case() {
    let path = fixtures_dir().join("bframes_video.mp4");
    let reader = CountingReader::new(&path);
    let index = ThumbnailIndex::read(&reader, 0)
@@ -409,8 +406,7 @@ async fn test_mp4_exact_thumbnails_truncate_the_gop_at_the_last_target() {
    );
 }
 
-#[tokio::test]
-async fn test_mp4_thumbnail_batch_rejects_too_many_outputs() {
+pub(crate) async fn test_mp4_thumbnail_batch_rejects_too_many_outputs_case() {
    let path = fixtures_dir().join("multitrack_video.mp4");
    let reader = FileStreamReader::new(&path).expect("open MP4 fixture");
    let index = ThumbnailIndex::read(&reader, 0)
@@ -429,8 +425,7 @@ async fn test_mp4_thumbnail_batch_rejects_too_many_outputs() {
    ));
 }
 
-#[tokio::test]
-async fn test_mp4_frames_rejects_any_timestamp_outside_track_duration() {
+pub(crate) async fn test_mp4_frames_rejects_any_timestamp_outside_track_duration_case() {
    let path = fixtures_dir().join("multitrack_video.mp4");
    let reader = FileStreamReader::new(&path).expect("open MP4 fixture");
 
@@ -449,8 +444,7 @@ async fn test_mp4_frames_rejects_any_timestamp_outside_track_duration() {
    ));
 }
 
-#[tokio::test]
-async fn test_mp4_thumbnail_rejects_non_h264_video() {
+pub(crate) async fn test_mp4_thumbnail_rejects_non_h264_video_case() {
    let mut tkhd = vec![0; 84];
    tkhd[12..16].copy_from_slice(&1u32.to_be_bytes());
    let mut mdhd = vec![0; 24];
@@ -512,4 +506,106 @@ async fn test_mp4_thumbnail_rejects_non_h264_video() {
       error,
       media_parser::MediaParserError::UnsupportedCodec(_)
    ));
+}
+
+#[cfg(not(target_os = "android"))]
+#[tokio::test]
+async fn test_mp4_h264_thumbnail_extraction() {
+   test_mp4_h264_thumbnail_extraction_case().await;
+}
+
+#[cfg(not(target_os = "android"))]
+#[tokio::test]
+async fn test_mp4_hd_thumbnail_uses_the_area_scaler_and_the_declared_matrix() {
+   test_mp4_hd_thumbnail_uses_the_area_scaler_and_the_declared_matrix_case().await;
+}
+
+#[cfg(not(target_os = "android"))]
+#[tokio::test]
+async fn test_mp4_thumbnail_jpeg_capacity_tracks_compressed_bytes() {
+   test_mp4_thumbnail_jpeg_capacity_tracks_compressed_bytes_case().await;
+}
+
+#[cfg(not(target_os = "android"))]
+#[tokio::test]
+async fn test_mp4_thumbnail_is_resized_before_jpeg_encoding() {
+   test_mp4_thumbnail_is_resized_before_jpeg_encoding_case().await;
+}
+
+#[cfg(not(target_os = "android"))]
+#[tokio::test]
+async fn test_mp4_thumbnail_quality_reaches_the_jpeg_encoder() {
+   test_mp4_thumbnail_quality_reaches_the_jpeg_encoder_case().await;
+}
+
+#[cfg(not(target_os = "android"))]
+#[tokio::test]
+async fn test_mp4_thumbnail_budget_counts_each_requested_output() {
+   test_mp4_thumbnail_budget_counts_each_requested_output_case().await;
+}
+
+#[cfg(not(target_os = "android"))]
+#[tokio::test]
+async fn test_mp4_h264_thumbnails_follow_presentation_order() {
+   test_mp4_h264_thumbnails_follow_presentation_order_case().await;
+}
+
+#[cfg(not(target_os = "android"))]
+#[tokio::test]
+async fn test_mp4_h264_thumbnails_follow_presentation_order_with_deep_b_frames() {
+   test_mp4_h264_thumbnails_follow_presentation_order_with_deep_b_frames_case().await;
+}
+
+#[cfg(not(target_os = "android"))]
+#[tokio::test]
+async fn test_mp4_thumbnail_index_can_be_reused_with_another_reader() {
+   test_mp4_thumbnail_index_can_be_reused_with_another_reader_case().await;
+}
+
+#[cfg(not(target_os = "android"))]
+#[tokio::test]
+async fn test_mp4_thumbnail_index_reports_the_automatically_selected_track() {
+   test_mp4_thumbnail_index_reports_the_automatically_selected_track_case().await;
+}
+
+#[cfg(not(target_os = "android"))]
+#[tokio::test]
+async fn test_mp4_fast_thumbnail_reports_the_keyframe_pts() {
+   test_mp4_fast_thumbnail_reports_the_keyframe_pts_case().await;
+}
+
+#[cfg(not(target_os = "android"))]
+#[tokio::test]
+async fn test_mp4_fast_thumbnails_read_each_keyframe_once() {
+   test_mp4_fast_thumbnails_read_each_keyframe_once_case().await;
+}
+
+#[cfg(not(target_os = "android"))]
+#[tokio::test]
+async fn test_mp4_exact_thumbnails_read_a_shared_gop_once() {
+   test_mp4_exact_thumbnails_read_a_shared_gop_once_case().await;
+}
+
+#[cfg(not(target_os = "android"))]
+#[tokio::test]
+async fn test_mp4_exact_thumbnails_truncate_the_gop_at_the_last_target() {
+   test_mp4_exact_thumbnails_truncate_the_gop_at_the_last_target_case().await;
+}
+
+#[cfg(not(target_os = "android"))]
+#[tokio::test]
+async fn test_mp4_thumbnail_batch_rejects_too_many_outputs() {
+   test_mp4_thumbnail_batch_rejects_too_many_outputs_case().await;
+}
+
+#[cfg(not(target_os = "android"))]
+#[tokio::test]
+async fn test_mp4_frames_rejects_any_timestamp_outside_track_duration() {
+   test_mp4_frames_rejects_any_timestamp_outside_track_duration_case().await;
+}
+
+#[cfg(not(target_os = "android"))]
+#[tokio::test]
+async fn test_mp4_thumbnail_rejects_non_h264_video() {
+   test_mp4_thumbnail_rejects_non_h264_video_case().await;
 }

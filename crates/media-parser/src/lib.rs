@@ -254,3 +254,15 @@ impl<R: StreamReader> MediaParser<R> {
       is_supported(extension)
    }
 }
+
+#[cfg(all(
+   target_os = "android",
+   feature = "thumbnails",
+   feature = "android-mediacodec"
+))]
+pub use decoders::h264::initialize_android_jpeg;
+
+#[cfg(all(target_os = "android", feature = "android-jvm-test-harness"))]
+extern crate self as media_parser;
+#[cfg(all(target_os = "android", feature = "android-jvm-test-harness"))]
+mod android_jvm_harness;

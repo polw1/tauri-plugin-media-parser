@@ -85,9 +85,17 @@ async fn videotoolbox_preserves_deep_b_frame_presentation_order() {
 async fn videotoolbox_decodes_bt709_through_the_area_scaler() {
    let reader = EmbeddedReader::new(include_bytes!("fixtures/bt709_hd_video.mp4"));
 
-   let frames = read_frames(&reader, 0, &[Duration::ZERO], ThumbnailOptions::default())
-      .await
-      .expect("VideoToolbox decodes the BT.709 fixture");
+   let frames = read_frames(
+      &reader,
+      0,
+      &[Duration::ZERO],
+      ThumbnailOptions {
+         quality: media_parser::JpegQuality::new(100).unwrap(),
+         ..ThumbnailOptions::default()
+      },
+   )
+   .await
+   .expect("VideoToolbox decodes the BT.709 fixture");
 
    assert_eq!(frames.len(), 1);
    assert_eq!((frames[0].width, frames[0].height), (320, 180));
@@ -108,9 +116,17 @@ async fn videotoolbox_decodes_bt709_through_the_area_scaler() {
 async fn videotoolbox_matches_the_public_crop_fixture_reference() {
    let reader = EmbeddedReader::new(include_bytes!("fixtures/android_crop_bt709.mp4"));
 
-   let frames = read_frames(&reader, 0, &[Duration::ZERO], ThumbnailOptions::default())
-      .await
-      .expect("VideoToolbox decodes the 322x182 crop fixture");
+   let frames = read_frames(
+      &reader,
+      0,
+      &[Duration::ZERO],
+      ThumbnailOptions {
+         quality: media_parser::JpegQuality::new(100).unwrap(),
+         ..ThumbnailOptions::default()
+      },
+   )
+   .await
+   .expect("VideoToolbox decodes the 322x182 crop fixture");
 
    assert_eq!(frames.len(), 1);
    assert_eq!((frames[0].width, frames[0].height), (320, 180));

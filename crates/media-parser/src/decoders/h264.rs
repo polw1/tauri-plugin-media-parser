@@ -40,9 +40,9 @@ mod error;
 #[cfg(feature = "thumbnails")]
 mod frame;
 #[cfg(feature = "thumbnails")]
-mod jpeg;
+pub(crate) mod jpeg;
 #[cfg(feature = "thumbnails")]
-mod pipeline;
+pub(crate) mod pipeline;
 
 #[cfg(not(any(
    apple_videotoolbox_backend,
@@ -572,3 +572,10 @@ mod tests {
       assert!(prepare_apple_max_input_size(&config, &[vec![1, 0x65]]).is_ok());
    }
 }
+
+#[cfg(all(
+   target_os = "android",
+   feature = "thumbnails",
+   feature = "android-mediacodec"
+))]
+pub use jpeg::android::initialize_android_jpeg;

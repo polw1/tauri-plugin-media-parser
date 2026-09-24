@@ -5,6 +5,9 @@
    feature = "thumbnails",
    feature = "android-mediacodec"
 ))]
+// On Android the JVM harness includes this file and runs these cases; the
+// native test binary compiles them without libtest wrappers.
+#![allow(dead_code, unused_imports)]
 
 mod common;
 
@@ -20,8 +23,7 @@ use media_parser::{
 };
 use std::time::Duration;
 
-#[tokio::test]
-async fn mediacodec_reports_a_dropped_corrupt_sample() {
+pub(crate) async fn mediacodec_reports_a_dropped_corrupt_sample_case() {
    let original = include_bytes!("fixtures/bframes_video.mp4");
    let frames = read_frames(
       &EmbeddedReader::new(original),
@@ -49,8 +51,7 @@ async fn mediacodec_reports_a_dropped_corrupt_sample() {
    assert_eq!(message, "backend omitted one or more submitted tokens");
 }
 
-#[tokio::test]
-async fn mediacodec_preserves_deep_b_frame_presentation_order() {
+pub(crate) async fn mediacodec_preserves_deep_b_frame_presentation_order_case() {
    let reader = EmbeddedReader::new(include_bytes!("fixtures/bframes_video.mp4"));
    let timestamps = (0..9)
       .map(|index| Duration::from_millis(index * 100))
@@ -78,13 +79,20 @@ async fn mediacodec_preserves_deep_b_frame_presentation_order() {
    }
 }
 
-#[tokio::test]
-async fn mediacodec_decodes_bt709_through_the_area_scaler() {
+pub(crate) async fn mediacodec_decodes_bt709_through_the_area_scaler_case() {
    let reader = EmbeddedReader::new(include_bytes!("fixtures/bt709_hd_video.mp4"));
 
-   let frames = read_frames(&reader, 0, &[Duration::ZERO], ThumbnailOptions::default())
-      .await
-      .expect("MediaCodec decodes the BT.709 fixture");
+   let frames = read_frames(
+      &reader,
+      0,
+      &[Duration::ZERO],
+      ThumbnailOptions {
+         quality: media_parser::JpegQuality::new(100).unwrap(),
+         ..ThumbnailOptions::default()
+      },
+   )
+   .await
+   .expect("MediaCodec decodes the BT.709 fixture");
 
    assert_eq!(frames.len(), 1);
    assert_eq!((frames[0].width, frames[0].height), (320, 180));
@@ -94,13 +102,20 @@ async fn mediacodec_decodes_bt709_through_the_area_scaler() {
    assert_matches_reference("MediaCodec", &frames[0], reference_jpeg);
 }
 
-#[tokio::test]
-async fn mediacodec_honors_media_image_crop_geometry() {
+pub(crate) async fn mediacodec_honors_media_image_crop_geometry_case() {
    let reader = EmbeddedReader::new(include_bytes!("fixtures/android_crop_bt709.mp4"));
 
-   let frames = read_frames(&reader, 0, &[Duration::ZERO], ThumbnailOptions::default())
-      .await
-      .expect("MediaCodec decodes the cropped fixture");
+   let frames = read_frames(
+      &reader,
+      0,
+      &[Duration::ZERO],
+      ThumbnailOptions {
+         quality: media_parser::JpegQuality::new(100).unwrap(),
+         ..ThumbnailOptions::default()
+      },
+   )
+   .await
+   .expect("MediaCodec decodes the cropped fixture");
 
    assert_eq!(frames.len(), 1);
    assert_eq!((frames[0].width, frames[0].height), (320, 180));
@@ -117,8 +132,7 @@ async fn mediacodec_honors_media_image_crop_geometry() {
    );
 }
 
-#[tokio::test]
-async fn mediacodec_accepts_empty_avc3_configuration_with_in_band_headers() {
+pub(crate) async fn mediacodec_accepts_empty_avc3_configuration_with_in_band_headers_case() {
    let reader = EmbeddedReader(avc3_with_in_band_parameter_sets());
 
    let frames = read_frames(&reader, 0, &[Duration::ZERO], ThumbnailOptions::default())
@@ -133,8 +147,7 @@ async fn mediacodec_accepts_empty_avc3_configuration_with_in_band_headers() {
    );
 }
 
-#[tokio::test]
-async fn mediacodec_decodes_bt709_full_range_without_limited_range_expansion() {
+pub(crate) async fn mediacodec_decodes_bt709_full_range_without_limited_range_expansion_case() {
    let reader = EmbeddedReader::new(include_bytes!("fixtures/bt709_full_range.mp4"));
 
    let frames = read_frames(&reader, 0, &[Duration::ZERO], ThumbnailOptions::default())

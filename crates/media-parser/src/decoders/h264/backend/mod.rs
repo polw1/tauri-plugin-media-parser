@@ -62,5 +62,5 @@ pub(crate) fn open_decoder(
    }
 }
 
-#[cfg(test)]
+#[cfg(any(test, all(target_os = "android", feature = "android-jvm-test-harness")))]
 pub(crate) mod fake;

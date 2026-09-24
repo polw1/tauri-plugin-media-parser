@@ -15,10 +15,12 @@ pub(crate) struct FakeDecoderProbe {
 }
 
 impl FakeDecoderProbe {
+   #[cfg(test)]
    pub(crate) fn decode_calls(&self) -> usize {
       self.decode_calls.load(Ordering::Relaxed)
    }
 
+   #[cfg(test)]
    pub(crate) fn drain_calls(&self) -> usize {
       self.drain_calls.load(Ordering::Relaxed)
    }
@@ -41,6 +43,7 @@ impl FakeDecoder {
       }
    }
 
+   #[cfg(test)]
    pub(crate) fn continuing_after_error(emissions: Vec<FrameToken>) -> Self {
       Self {
          emissions,
@@ -50,6 +53,7 @@ impl FakeDecoder {
       }
    }
 
+   #[cfg(test)]
    pub(crate) fn failing_on_decode(fail_on_decode: usize, probe: Arc<FakeDecoderProbe>) -> Self {
       Self {
          emissions: Vec::new(),

@@ -102,9 +102,17 @@ async fn media_foundation_preserves_two_frames_with_reused_staging_storage() {
 #[tokio::test]
 async fn media_foundation_decodes_bt709_through_the_area_scaler() {
    let reader = EmbeddedReader::new(include_bytes!("fixtures/bt709_hd_video.mp4"));
-   let frames = read_frames(&reader, 0, &[Duration::ZERO], ThumbnailOptions::default())
-      .await
-      .expect("Media Foundation decodes the BT.709 fixture");
+   let frames = read_frames(
+      &reader,
+      0,
+      &[Duration::ZERO],
+      ThumbnailOptions {
+         quality: media_parser::JpegQuality::new(100).unwrap(),
+         ..ThumbnailOptions::default()
+      },
+   )
+   .await
+   .expect("Media Foundation decodes the BT.709 fixture");
    assert_eq!(frames.len(), 1);
    assert_eq!((frames[0].width, frames[0].height), (320, 180));
    let reference_jpeg = include_bytes!("fixtures/bt709_frame0_reference.jpg");
@@ -114,9 +122,17 @@ async fn media_foundation_decodes_bt709_through_the_area_scaler() {
 #[tokio::test]
 async fn media_foundation_honors_the_negotiated_display_aperture() {
    let reader = EmbeddedReader::new(include_bytes!("fixtures/android_crop_bt709.mp4"));
-   let frames = read_frames(&reader, 0, &[Duration::ZERO], ThumbnailOptions::default())
-      .await
-      .expect("Media Foundation decodes the cropped fixture");
+   let frames = read_frames(
+      &reader,
+      0,
+      &[Duration::ZERO],
+      ThumbnailOptions {
+         quality: media_parser::JpegQuality::new(100).unwrap(),
+         ..ThumbnailOptions::default()
+      },
+   )
+   .await
+   .expect("Media Foundation decodes the cropped fixture");
    assert_eq!(frames.len(), 1);
    assert_eq!((frames[0].width, frames[0].height), (320, 180));
    let reference_jpeg = include_bytes!("fixtures/android_crop_frame0_reference.jpg");
