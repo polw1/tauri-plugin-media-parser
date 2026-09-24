@@ -36,9 +36,6 @@ fi
 # The NDK ships `x86_64-linux-android24-clang` (24 is `minSdk`) and `llvm-ar`, not
 # the unversioned names cc-rs probes for, so both are named in full.
 toolchain="$ndk_root/toolchains/llvm/prebuilt/linux-x86_64/bin"
-export CC_aarch64_linux_android="$toolchain/aarch64-linux-android24-clang"
-export AR_aarch64_linux_android="$toolchain/llvm-ar"
-export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$toolchain/aarch64-linux-android24-clang"
 export CC_x86_64_linux_android="$toolchain/x86_64-linux-android24-clang"
 export AR_x86_64_linux_android="$toolchain/llvm-ar"
 export CARGO_TARGET_X86_64_LINUX_ANDROID_LINKER="$toolchain/x86_64-linux-android24-clang"
@@ -165,9 +162,7 @@ if ! adb_devices=$(timeout 10 "$adb" devices); then
    echo "Unable to list Android devices" >&2
    exit 1
 fi
-if [ -n "${ANDROID_SERIAL:-}" ]; then
-   emulator_serial=$ANDROID_SERIAL
-elif [ -n "$preferred_port" ]; then
+if [ -n "$preferred_port" ]; then
    emulator_serial="emulator-$preferred_port"
 else
    emulator_serial=$(printf '%s\n' "$adb_devices" |
@@ -261,10 +256,9 @@ if ! device_abis=$(timeout 10 "$adb" -s "$emulator_serial" shell getprop ro.prod
 fi
 device_abis=$(printf '%s' "$device_abis" | tr -d '\r')
 case ",$device_abis," in
-   *,x86_64,*) android_target=x86_64-linux-android ;;
-   *,arm64-v8a,*) android_target=aarch64-linux-android ;;
+   *,x86_64,*) ;;
    *)
-      echo "Android emulator $emulator_serial does not support x86_64 or ARM64 (ABIs: ${device_abis:-empty})" >&2
+      echo "Android emulator $emulator_serial does not support x86_64 (ABIs: ${device_abis:-empty})" >&2
       exit 1
       ;;
 esac
@@ -280,7 +274,7 @@ timeout 60 "$adb" -s "$emulator_serial" push "$workspace_root/crates/media-parse
 cargo test --locked \
    --manifest-path "$workspace_root/Cargo.toml" \
    -p media-parser \
-   --target "$android_target" \
+   --target x86_64-linux-android \
    --no-default-features \
    --features thumbnails,android-mediacodec \
    --lib \
@@ -384,7 +378,7 @@ jar cf "$jvm_work/harness.jar" -C "$jvm_work/classes" .
 "$d8" --min-api 24 --lib "$android_jar" --output "$jvm_work/dex" \
    "$jvm_work/harness.jar" "$kotlin_home/lib/kotlin-stdlib.jar"
 cargo rustc --locked --manifest-path "$workspace_root/Cargo.toml" -p media-parser \
-   --target "$android_target" --lib --features thumbnails,android-mediacodec,android-jvm-test-harness \
+   --target x86_64-linux-android --lib --features thumbnails,android-mediacodec,android-jvm-test-harness \
    --message-format=json-render-diagnostics --crate-type cdylib >"$build_output"
 jvm_library=$(jq -r 'select(.target.name == "media_parser") | .filenames[]? | select(endswith(".so"))' "$build_output" | tail -n 1)
 if [ -z "$jvm_library" ]; then
