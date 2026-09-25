@@ -453,19 +453,6 @@ npm run standards
 
 MIT
 
-### Third-party notices
-
-This plugin links code whose license requires notices beyond the usual MIT and
-Apache-2.0 boilerplate: the JPEG encoder carries an Independent JPEG Group
-obligation. [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) records it, with
-the exact text the license asks for.
-
-That obligation transfers. The license requires the notice to reach the user
-with the distribution, so an application that ships a compiled binary
-containing this plugin must carry it in its own documentation, licenses
-screen, or bundled resources. This repository supplies the text; including it
-is the application's step.
-
 ## Contributing
 
 Contributions are welcome! Please follow the established coding standards and commit
