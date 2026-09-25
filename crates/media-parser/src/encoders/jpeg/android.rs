@@ -1,4 +1,4 @@
-use super::{DecodeError, JpegQuality};
+use super::{JpegError, JpegQuality};
 use jni::{
    JNIEnv, JavaVM,
    objects::{GlobalRef, JByteArray, JClass, JValue},
@@ -38,7 +38,7 @@ pub fn initialize_android_jpeg(vm: JavaVM, stream_class: GlobalRef) -> Result<()
    Ok(())
 }
 
-fn jni_error(env: &mut JNIEnv<'_>, error: jni::errors::Error) -> DecodeError {
+fn jni_error(env: &mut JNIEnv<'_>, error: jni::errors::Error) -> JpegError {
    let oom = if env.exception_check().unwrap_or(false) {
       let exception = env.exception_occurred().ok();
       let _ = env.exception_clear();
@@ -54,9 +54,9 @@ fn jni_error(env: &mut JNIEnv<'_>, error: jni::errors::Error) -> DecodeError {
       let _ = env.exception_clear();
    }
    if oom {
-      DecodeError::ResourceLimit("Android JPEG allocation failed".into())
+      JpegError::ResourceLimit("Android JPEG allocation failed".into())
    } else {
-      DecodeError::Convert(format!("Android JPEG JNI: {error}"))
+      JpegError::Encode(format!("Android JPEG JNI: {error}"))
    }
 }
 
@@ -66,14 +66,14 @@ pub(super) fn encode_jpeg(
    height: usize,
    quality: JpegQuality,
    maximum: usize,
-) -> Result<Vec<u8>, DecodeError> {
+) -> Result<Vec<u8>, JpegError> {
    let runtime = RUNTIME
       .get()
-      .ok_or_else(|| DecodeError::Convert("Android JPEG runtime is not initialized".into()))?;
+      .ok_or_else(|| JpegError::Encode("Android JPEG runtime is not initialized".into()))?;
    let mut env = runtime
       .vm
       .attach_current_thread()
-      .map_err(|error| DecodeError::Convert(error.to_string()))?;
+      .map_err(|error| JpegError::Encode(error.to_string()))?;
    let result = env.with_local_frame(32, |env| {
       Ok::<_, jni::errors::Error>((|| {
          macro_rules! call {
@@ -85,12 +85,12 @@ pub(super) fn encode_jpeg(
             };
          }
          let pixel_count = i32::try_from(rgb.len() / 3).map_err(|_| {
-            DecodeError::OutputLimit("Android JPEG pixel count exceeds JNI limits".into())
+            JpegError::OutputLimit("Android JPEG pixel count exceeds JNI limits".into())
          })?;
          let mut colors = Vec::<i32>::new();
-         colors.try_reserve_exact(rgb.len() / 3).map_err(|_| {
-            DecodeError::ResourceLimit("Android JPEG pixel allocation failed".into())
-         })?;
+         colors
+            .try_reserve_exact(rgb.len() / 3)
+            .map_err(|_| JpegError::ResourceLimit("Android JPEG pixel allocation failed".into()))?;
          colors.extend(rgb.chunks_exact(3).map(|pixel| {
             (0xff00_0000u32
                | (u32::from(pixel[0]) << 16)
@@ -146,18 +146,16 @@ pub(super) fn encode_jpeg(
                .map_err(|error| jni_error(env, error));
             let failure = call!(env.get_field(&stream, "failure", "I"));
             match call!(failure.i()) {
-               1 => return Err(DecodeError::OutputLimit("JPEG output is too large".into())),
+               1 => return Err(JpegError::OutputLimit("JPEG output is too large".into())),
                2 => {
-                  return Err(DecodeError::ResourceLimit(
+                  return Err(JpegError::ResourceLimit(
                      "JPEG output allocation failed".into(),
                   ));
                }
                _ => (),
             }
             if !compressed? {
-               return Err(DecodeError::Convert(
-                  "Android Bitmap.compress failed".into(),
-               ));
+               return Err(JpegError::Encode("Android Bitmap.compress failed".into()));
             }
             let copied = env
                .call_method(&stream, "toByteArray", "()[B", &[])
@@ -166,7 +164,7 @@ pub(super) fn encode_jpeg(
             // A final Java copy can fail as well; consult sticky failure again.
             let failure = call!(env.get_field(&stream, "failure", "I"));
             if call!(failure.i()) == 2 {
-               return Err(DecodeError::ResourceLimit(
+               return Err(JpegError::ResourceLimit(
                   "JPEG output allocation failed".into(),
                ));
             }
@@ -175,7 +173,7 @@ pub(super) fn encode_jpeg(
             let mut data = Vec::new();
             data
                .try_reserve_exact(len)
-               .map_err(|_| DecodeError::ResourceLimit("JPEG output allocation failed".into()))?;
+               .map_err(|_| JpegError::ResourceLimit("JPEG output allocation failed".into()))?;
             data.resize(len, 0u8);
             // JNI jbyte and u8 have identical layout. The destination is fully initialized.
             let target = unsafe {

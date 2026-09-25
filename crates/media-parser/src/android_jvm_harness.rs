@@ -1,5 +1,5 @@
 //! Opt-in JVM registry using the same Rust assertion bodies as native libtest.
-use crate::decoders::h264::jpeg::android::test_cases;
+use crate::encoders::jpeg::android::test_cases;
 use jni::{
    JNIEnv,
    objects::{JClass, JString},

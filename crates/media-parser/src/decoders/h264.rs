@@ -40,7 +40,7 @@ mod error;
 #[cfg(feature = "thumbnails")]
 mod frame;
 #[cfg(feature = "thumbnails")]
-pub(crate) mod jpeg;
+mod jpeg;
 #[cfg(feature = "thumbnails")]
 pub(crate) mod pipeline;
 
@@ -102,37 +102,8 @@ impl Default for ThumbnailSize {
    }
 }
 
-/// JPEG quality for encoded thumbnails, constrained to 1–100 so an
-/// out-of-range value cannot reach the platform encoder.
-///
-/// Each platform's native encoder (ImageIO, WIC or `Bitmap.compress`) maps
-/// this value to its own quantization and chroma subsampling, so output size
-/// and appearance at a given quality differ between platforms.
 #[cfg(feature = "thumbnails")]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub struct JpegQuality(u8);
-
-#[cfg(feature = "thumbnails")]
-impl JpegQuality {
-   /// Thumbnail-grade default.
-   pub const DEFAULT: Self = Self(60);
-
-   /// Returns `None` unless `quality` is within the encoder's 1–100 range.
-   pub fn new(quality: u8) -> Option<Self> {
-      (1..=100).contains(&quality).then_some(Self(quality))
-   }
-
-   pub fn get(self) -> u8 {
-      self.0
-   }
-}
-
-#[cfg(feature = "thumbnails")]
-impl Default for JpegQuality {
-   fn default() -> Self {
-      Self::DEFAULT
-   }
-}
+pub use crate::encoders::jpeg::JpegQuality;
 
 #[cfg(feature = "thumbnails")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -350,20 +321,6 @@ mod tests {
       }
    }
    #[test]
-   fn rejects_quality_outside_the_encoder_range() {
-      assert_eq!(JpegQuality::new(0), None);
-      assert_eq!(JpegQuality::new(101), None);
-      assert_eq!(JpegQuality::new(1).map(JpegQuality::get), Some(1));
-      assert_eq!(JpegQuality::new(100).map(JpegQuality::get), Some(100));
-   }
-
-   #[test]
-   fn defaults_to_thumbnail_grade_quality() {
-      assert_eq!(JpegQuality::default(), JpegQuality::DEFAULT);
-      assert_eq!(JpegQuality::default().get(), 60);
-   }
-
-   #[test]
    fn prepares_the_resolved_range_only_on_the_job_clone() {
       let config = AvcConfig {
          length_size: 1,
@@ -570,10 +527,3 @@ mod tests {
       assert!(prepare_apple_max_input_size(&config, &[vec![1, 0x65]]).is_ok());
    }
 }
-
-#[cfg(all(
-   target_os = "android",
-   feature = "thumbnails",
-   feature = "android-mediacodec"
-))]
-pub use jpeg::android::initialize_android_jpeg;

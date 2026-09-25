@@ -1,4 +1,4 @@
-use super::{DecodeError, FallibleJpegWriter, JpegQuality, quality_unit};
+use super::{FallibleJpegWriter, JpegError, JpegQuality, quality_unit};
 use objc2_core_foundation::{CFData, CFDictionary, CFNumber, CFString};
 use objc2_core_graphics::{
    CGBitmapInfo, CGColorRenderingIntent, CGColorSpace, CGDataConsumer, CGDataConsumerCallbacks,
@@ -28,14 +28,14 @@ pub(super) fn encode_jpeg(
    height: usize,
    quality: JpegQuality,
    output: &mut FallibleJpegWriter,
-) -> Result<(), DecodeError> {
+) -> Result<(), JpegError> {
    unsafe {
       let data = CFData::new(None, rgb.as_ptr(), rgb.len() as _)
-         .ok_or_else(|| DecodeError::Convert("creating JPEG source data failed".into()))?;
+         .ok_or_else(|| JpegError::Encode("creating JPEG source data failed".into()))?;
       let provider = CGDataProvider::with_cf_data(Some(&data))
-         .ok_or_else(|| DecodeError::Convert("creating JPEG data provider failed".into()))?;
+         .ok_or_else(|| JpegError::Encode("creating JPEG data provider failed".into()))?;
       let space = CGColorSpace::with_name(Some(kCGColorSpaceSRGB))
-         .ok_or_else(|| DecodeError::Convert("creating sRGB color space failed".into()))?;
+         .ok_or_else(|| JpegError::Encode("creating sRGB color space failed".into()))?;
       let image = CGImage::new(
          width,
          height,
@@ -49,16 +49,16 @@ pub(super) fn encode_jpeg(
          false,
          CGColorRenderingIntent::RenderingIntentDefault,
       )
-      .ok_or_else(|| DecodeError::Convert("creating JPEG source image failed".into()))?;
+      .ok_or_else(|| JpegError::Encode("creating JPEG source image failed".into()))?;
       let callbacks = CGDataConsumerCallbacks {
          putBytes: Some(put_bytes),
          releaseConsumer: None,
       };
       let consumer = CGDataConsumer::new((output as *mut FallibleJpegWriter).cast(), &callbacks)
-         .ok_or_else(|| DecodeError::Convert("creating JPEG data consumer failed".into()))?;
+         .ok_or_else(|| JpegError::Encode("creating JPEG data consumer failed".into()))?;
       let kind = CFString::from_static_str("public.jpeg");
       let destination = CGImageDestination::with_data_consumer(&consumer, &kind, 1, None)
-         .ok_or_else(|| DecodeError::Convert("creating JPEG destination failed".into()))?;
+         .ok_or_else(|| JpegError::Encode("creating JPEG destination failed".into()))?;
       let quality = CFNumber::new_f64(f64::from(quality_unit(quality)));
       let key: &CFString = kCGImageDestinationLossyCompressionQuality;
       let options = CFDictionary::<CFString, CFNumber>::from_slices(&[key], &[&*quality]);
@@ -66,9 +66,7 @@ pub(super) fn encode_jpeg(
       if destination.finalize() {
          Ok(())
       } else {
-         Err(DecodeError::Convert(
-            "ImageIO JPEG finalization failed".into(),
-         ))
+         Err(JpegError::Encode("ImageIO JPEG finalization failed".into()))
       }
    }
 }
@@ -113,7 +111,7 @@ mod tests {
       );
       assert!(matches!(
          output.finish(result),
-         Err(DecodeError::OutputLimit(_))
+         Err(JpegError::OutputLimit(_))
       ));
    }
 
@@ -130,7 +128,7 @@ mod tests {
       );
       assert!(matches!(
          output.finish(result),
-         Err(DecodeError::ResourceLimit(_))
+         Err(JpegError::ResourceLimit(_))
       ));
    }
 }

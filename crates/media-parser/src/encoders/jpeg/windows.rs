@@ -1,5 +1,5 @@
 use super::windows_stream::{Stream, StreamState};
-use super::{DecodeError, FallibleJpegWriter, JpegQuality, quality_unit};
+use super::{FallibleJpegWriter, JpegError, JpegQuality, quality_unit};
 use std::{cell::RefCell, rc::Rc};
 use windows::{
    Win32::{
@@ -12,14 +12,14 @@ use windows::{
 
 struct ComApartment(bool);
 impl ComApartment {
-   fn enter() -> std::result::Result<Self, DecodeError> {
+   fn enter() -> std::result::Result<Self, JpegError> {
       let result = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
       if result == RPC_E_CHANGED_MODE {
          return Ok(Self(false));
       }
       result
          .ok()
-         .map_err(|error| DecodeError::Convert(error.to_string()))?;
+         .map_err(|error| JpegError::Encode(error.to_string()))?;
       Ok(Self(true))
    }
 }
@@ -39,7 +39,7 @@ pub(super) fn encode_jpeg(
    height: usize,
    quality: JpegQuality,
    output: FallibleJpegWriter,
-) -> std::result::Result<Vec<u8>, DecodeError> {
+) -> std::result::Result<Vec<u8>, JpegError> {
    let _apartment = ComApartment::enter()?;
    let state = Rc::new(RefCell::new(StreamState {
       output,
@@ -54,15 +54,15 @@ pub(super) fn encode_jpeg(
    // Every COM reference is released before extracting bytes and before apartment teardown.
    match Rc::try_unwrap(state) {
       Ok(state) => state.into_inner().output.finish(result),
-      Err(_) => Err(DecodeError::Convert("WIC retained the JPEG stream".into())),
+      Err(_) => Err(JpegError::Encode("WIC retained the JPEG stream".into())),
    }
 }
 
-fn check_pixel_format(format: &GUID) -> std::result::Result<(), DecodeError> {
+fn check_pixel_format(format: &GUID) -> std::result::Result<(), JpegError> {
    if *format == GUID_WICPixelFormat24bppBGR {
       Ok(())
    } else {
-      Err(DecodeError::Convert(
+      Err(JpegError::Encode(
          "WIC changed the JPEG pixel format".into(),
       ))
    }
@@ -74,10 +74,10 @@ fn encode_frame(
    height: usize,
    quality: JpegQuality,
    stream: &IStream,
-) -> std::result::Result<(), DecodeError> {
+) -> std::result::Result<(), JpegError> {
    // The generated WritePixels binding unwraps its slice length conversion.
    u32::try_from(rgb.len())
-      .map_err(|_| DecodeError::Convert("RGB buffer exceeds WIC's u32 length".into()))?;
+      .map_err(|_| JpegError::Encode("RGB buffer exceeds WIC's u32 length".into()))?;
    let result = (|| -> windows::core::Result<()> {
       unsafe {
          let encoder: IWICBitmapEncoder =
@@ -107,7 +107,7 @@ fn encode_frame(
          Ok(())
       }
    })();
-   result.map_err(|error| DecodeError::Convert(error.to_string()))
+   result.map_err(|error| JpegError::Encode(error.to_string()))
 }
 
 #[cfg(test)]
@@ -161,9 +161,9 @@ mod tests {
             output,
          );
          assert!(if allocation {
-            matches!(result, Err(DecodeError::ResourceLimit(_)))
+            matches!(result, Err(JpegError::ResourceLimit(_)))
          } else {
-            matches!(result, Err(DecodeError::OutputLimit(_)))
+            matches!(result, Err(JpegError::OutputLimit(_)))
          });
          let mut output = FallibleJpegWriter::new(if allocation {
             super::super::MAX_JPEG_BYTES
@@ -198,9 +198,9 @@ mod tests {
             .output
             .finish(native);
          assert!(if allocation {
-            matches!(result, Err(DecodeError::ResourceLimit(_)))
+            matches!(result, Err(JpegError::ResourceLimit(_)))
          } else {
-            matches!(result, Err(DecodeError::OutputLimit(_)))
+            matches!(result, Err(JpegError::OutputLimit(_)))
          });
       }
    }
@@ -209,7 +209,7 @@ mod tests {
       assert!(check_pixel_format(&GUID_WICPixelFormat24bppBGR).is_ok());
       assert!(matches!(
          check_pixel_format(&GUID_WICPixelFormat8bppGray),
-         Err(DecodeError::Convert(_))
+         Err(JpegError::Encode(_))
       ));
    }
 
@@ -242,7 +242,7 @@ mod tests {
       );
       assert!(matches!(
          state.output.finish(native),
-         Err(DecodeError::OutputLimit(_))
+         Err(JpegError::OutputLimit(_))
       ));
    }
 

@@ -182,6 +182,8 @@ compile_error!("a native H.264 backend feature is enabled for a target that cann
 
 #[cfg(h264_backend)]
 mod decoders;
+#[cfg(h264_backend)]
+mod encoders;
 pub mod errors;
 pub mod format;
 pub mod helpers;
@@ -190,7 +192,7 @@ pub mod types;
 
 // Public API
 #[cfg(h264_backend)]
-pub use decoders::h264::JpegQuality;
+pub use encoders::jpeg::JpegQuality;
 pub use errors::{MediaParserError, Result};
 pub use format::mp4::atoms::Mp4Nav;
 pub use format::registry::{
@@ -260,7 +262,7 @@ impl<R: StreamReader> MediaParser<R> {
    feature = "thumbnails",
    feature = "android-mediacodec"
 ))]
-pub use decoders::h264::initialize_android_jpeg;
+pub use encoders::jpeg::android::initialize_android_jpeg;
 
 #[cfg(all(target_os = "android", feature = "android-jvm-test-harness"))]
 extern crate self as media_parser;

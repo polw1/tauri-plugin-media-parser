@@ -36,7 +36,7 @@ pub(crate) fn output_limit() {
    let rgb = vec![127; 128 * 128 * 3];
    assert_eq!(
       encode_jpeg(&rgb, 128, 128, JpegQuality::default(), 20),
-      Err(DecodeError::OutputLimit("JPEG output is too large".into()))
+      Err(JpegError::OutputLimit("JPEG output is too large".into()))
    );
 }
 
@@ -52,7 +52,7 @@ pub(crate) fn allocation_failures() {
          .unwrap();
       assert_eq!(
          result,
-         Err(DecodeError::ResourceLimit(
+         Err(JpegError::ResourceLimit(
             "JPEG output allocation failed".into()
          ))
       );
@@ -83,7 +83,7 @@ pub(crate) fn concurrent_encoding() {
 pub(crate) fn missing_runtime() {
    assert_eq!(
       encode_jpeg(&[255, 0, 0], 1, 1, JpegQuality::default(), 64 << 20),
-      Err(DecodeError::Convert(
+      Err(JpegError::Encode(
          "Android JPEG runtime is not initialized".into()
       ))
    );

@@ -271,7 +271,7 @@ mod tests {
             .into_inner()
             .output
             .finish(Ok(())),
-         Err(super::super::DecodeError::OutputLimit(_))
+         Err(super::super::JpegError::OutputLimit(_))
       ));
    }
 
@@ -312,9 +312,9 @@ mod tests {
             .output
             .finish(Ok(()));
          assert!(if allocation {
-            matches!(result, Err(super::super::DecodeError::ResourceLimit(_)))
+            matches!(result, Err(super::super::JpegError::ResourceLimit(_)))
          } else {
-            matches!(result, Err(super::super::DecodeError::OutputLimit(_)))
+            matches!(result, Err(super::super::JpegError::OutputLimit(_)))
          });
       }
    }

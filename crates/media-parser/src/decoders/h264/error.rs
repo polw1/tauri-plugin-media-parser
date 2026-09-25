@@ -17,3 +17,14 @@ pub(crate) enum DecodeError {
    #[error("{0}")]
    ResourceLimit(String),
 }
+
+impl From<crate::encoders::jpeg::JpegError> for DecodeError {
+   fn from(error: crate::encoders::jpeg::JpegError) -> Self {
+      use crate::encoders::jpeg::JpegError;
+      match error {
+         JpegError::Encode(message) => Self::Convert(message),
+         JpegError::OutputLimit(message) => Self::OutputLimit(message),
+         JpegError::ResourceLimit(message) => Self::ResourceLimit(message),
+      }
+   }
+}

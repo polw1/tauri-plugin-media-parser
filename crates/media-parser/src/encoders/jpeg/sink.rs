@@ -1,4 +1,4 @@
-use super::DecodeError;
+use super::JpegError;
 use std::io::{self, Write};
 
 #[derive(Debug, Clone, Copy)]
@@ -29,15 +29,12 @@ impl FallibleJpegWriter {
 
    /// Consult the callback's failure even when the native API reports success.
    /// Native objects must have been released before calling this method.
-   pub(super) fn finish(
-      self,
-      native_result: Result<(), DecodeError>,
-   ) -> Result<Vec<u8>, DecodeError> {
+   pub(super) fn finish(self, native_result: Result<(), JpegError>) -> Result<Vec<u8>, JpegError> {
       match self.failure {
          Some(WriterFailure::OutputLimit) => {
-            Err(DecodeError::OutputLimit("JPEG output is too large".into()))
+            Err(JpegError::OutputLimit("JPEG output is too large".into()))
          }
-         Some(WriterFailure::Allocation) => Err(DecodeError::ResourceLimit(
+         Some(WriterFailure::Allocation) => Err(JpegError::ResourceLimit(
             "JPEG output allocation failed".into(),
          )),
          None => native_result.map(|()| self.data),
@@ -144,7 +141,7 @@ mod tests {
       assert_eq!(output.bytes(), [7, 9, 0, 0]);
       assert!(matches!(
          output.finish(Ok(())),
-         Err(DecodeError::OutputLimit(_))
+         Err(JpegError::OutputLimit(_))
       ));
    }
 
@@ -156,7 +153,7 @@ mod tests {
       assert_eq!(output.data, [1]);
       assert!(matches!(
          output.finish(Ok(())),
-         Err(DecodeError::OutputLimit(_))
+         Err(JpegError::OutputLimit(_))
       ));
    }
 
@@ -170,7 +167,7 @@ mod tests {
       assert_eq!(output.data, [1, 2]);
       assert!(matches!(
          output.finish(Ok(())),
-         Err(DecodeError::ResourceLimit(_))
+         Err(JpegError::ResourceLimit(_))
       ));
    }
 
@@ -194,11 +191,11 @@ mod tests {
          let native = if native_success {
             Ok(())
          } else {
-            Err(DecodeError::Convert("native failure".into()))
+            Err(JpegError::Encode("native failure".into()))
          };
          assert!(matches!(
             output.finish(native),
-            Err(DecodeError::OutputLimit(_))
+            Err(JpegError::OutputLimit(_))
          ));
       }
    }
