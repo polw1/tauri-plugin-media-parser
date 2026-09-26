@@ -217,6 +217,22 @@ For example, a standalone Windows application can depend on:
 media-parser = { path = "../media-parser", features = ["thumbnails", "windows-media-foundation"] }
 ```
 
+On Android, call `media_parser::initialize_android_jpeg` before extracting
+thumbnails, passing the process `JavaVM` and a `GlobalRef` to the JPEG output
+stream class obtained through the application's class loader. Native worker
+threads cannot resolve application classes. Without this call, extraction reads
+the index and decodes up to the first requested frame, then fails with "Android
+JPEG runtime is not initialized".
+
+The class must extend `java.io.OutputStream` and provide `<init>(I)V`,
+`write(I)V`, `write([BII)V`, `toByteArray()[B`, and the `int` fields `failure`
+(1 = output limit, 2 = allocation failure) and `size`. Standalone applications
+must include
+`android/src/main/java/com/plugin/mediaparser/BoundedJpegOutputStream.kt` from
+the plugin and apply the R8 keep rules in `android/consumer-rules.pro`. The
+Tauri plugin performs this bootstrap automatically
+(`src/android_jpeg.rs::on_webview_ready`).
+
 The Tauri plugin selects these features automatically. Use `ThumbnailIndex` for
 repeated requests over the same immutable file:
 

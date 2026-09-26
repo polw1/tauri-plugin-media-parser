@@ -11,8 +11,18 @@ struct Runtime {
 }
 static RUNTIME: OnceLock<Runtime> = OnceLock::new();
 
-/// Initializes Android JPEG encoding for this process. Obtain the class through the
-/// application's class loader; attached native worker threads cannot resolve it.
+/// Initializes Android JPEG encoding for this process. Call it before extracting
+/// thumbnails on Android; until then every encode fails with "Android JPEG runtime is
+/// not initialized". Obtain the class through the application's class loader; attached
+/// native worker threads cannot resolve it.
+///
+/// The class must extend `java.io.OutputStream` and provide `<init>(I)V`, `write(I)V`,
+/// `write([BII)V`, `toByteArray()[B`, and the `int` fields `failure` (1 = output limit,
+/// 2 = allocation failure) and `size`. Standalone applications must include the plugin's
+/// `android/src/main/java/com/plugin/mediaparser/BoundedJpegOutputStream.kt` and apply
+/// the R8 keep rules in `android/consumer-rules.pro`. The Tauri plugin performs this
+/// bootstrap itself (`src/android_jpeg.rs::on_webview_ready`).
+///
 /// Repeated successful initialization leaves the original runtime in place.
 pub fn initialize_android_jpeg(vm: JavaVM, stream_class: GlobalRef) -> Result<(), String> {
    if RUNTIME.get().is_some() {
