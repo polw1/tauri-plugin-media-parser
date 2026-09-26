@@ -108,6 +108,9 @@ jobs:
          - name: Lint Android backend
            run: cargo clippy --locked -p media-parser --all-targets --target aarch64-linux-android --no-default-features --features thumbnails,android-mediacodec -- -D warnings
 
+         - name: Lint Android plugin
+           run: cargo clippy --locked -p tauri-plugin-media-parser --all-targets --target aarch64-linux-android -- -D warnings
+
          # The ARM64 suites cannot run on the x86_64 emulator, so this step only compiles
          # and links them. The following x86_64 step executes the runtime tests.
          - name: Build Android test executables
