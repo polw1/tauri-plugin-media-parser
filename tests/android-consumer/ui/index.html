@@ -1,0 +1,37 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Native JPEG validation</title>
+<pre id="result">Running native JPEG consumer tests…</pre>
+<script>
+const invoke = window.__TAURI__.core.invoke;
+async function checkThumbnail(source) {
+  const response = await invoke('plugin:media-parser|get_thumbnails', {
+    source, timestamps: [0], accurate: true, quality: 80, maxWidth: 320, maxHeight: 180
+  });
+  const bytes = response instanceof ArrayBuffer ? new Uint8Array(response) : new Uint8Array(response);
+  const size = new DataView(bytes.buffer).getUint32(0, true);
+  const header = JSON.parse(new TextDecoder().decode(bytes.subarray(4, 4 + size)));
+  if (header.version !== 1 || header.entries.length !== 1) throw new Error('invalid envelope');
+  const entry = header.entries[0];
+  if (entry.width !== 320 || entry.height !== 180) throw new Error('invalid dimensions');
+  const jpeg = bytes.subarray(4 + size + entry.offset, 4 + size + entry.offset + entry.length);
+  if (jpeg[0] !== 255 || jpeg[1] !== 216 || jpeg[jpeg.length-2] !== 255 || jpeg[jpeg.length-1] !== 217) throw new Error('invalid JPEG');
+  const bitmap = await createImageBitmap(new Blob([jpeg], {type: 'image/jpeg'}));
+  if (bitmap.width !== 320 || bitmap.height !== 180) throw new Error('undecodable dimensions');
+  bitmap.close();
+  return jpeg.length;
+}
+(async () => {
+  try {
+    const source = await invoke('fixture_path');
+    const sizes = [await checkThumbnail(source), ...await Promise.all([checkThumbnail(source), checkThumbnail(source)])];
+    const result = 'PASS native JPEG consumer sequential+concurrent bytes=' + sizes.join(',');
+    document.querySelector('#result').textContent = result;
+    await invoke('report_result', { result });
+  } catch (error) {
+    const result = 'FAIL native JPEG consumer: ' + String(error);
+    document.querySelector('#result').textContent = result;
+    await invoke('report_result', { result });
+  }
+})();
+</script>

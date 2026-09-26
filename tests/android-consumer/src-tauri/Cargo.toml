@@ -1,0 +1,21 @@
+[package]
+name = "native-jpeg-consumer"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.94.0"
+
+[workspace]
+
+[lib]
+name = "native_jpeg_consumer"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2.5.1", features = [] }
+tauri-plugin-media-parser = { path = "../../.." }
+
+[profile.release]
+opt-level = 2

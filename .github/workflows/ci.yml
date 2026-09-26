@@ -86,6 +86,13 @@ jobs:
          - name: Checkout repository
            uses: actions/checkout@v4
 
+         - name: Setup Node.js
+           uses: actions/setup-node@v4
+           with:
+              node-version-file: '.nvmrc'
+              cache: 'npm'
+              cache-dependency-path: tests/android-consumer/package-lock.json
+
          - name: Setup Rust toolchain
            uses: actions-rust-lang/setup-rust-toolchain@v1
            with:
@@ -93,6 +100,9 @@ jobs:
               target: aarch64-linux-android,x86_64-linux-android
               components: clippy
               cache: true
+              cache-workspaces: |
+                 . -> target
+                 tests/android-consumer/src-tauri -> target
 
          # A transitive dependency compiles C through cc-rs. The NDK ships
          # `aarch64-linux-android24-clang` (24 is `minSdk`) and `llvm-ar`, not the
@@ -104,6 +114,7 @@ jobs:
               echo "CC_aarch64_linux_android=$NDK_BIN/aarch64-linux-android24-clang" >> "$GITHUB_ENV"
               echo "AR_aarch64_linux_android=$NDK_BIN/llvm-ar" >> "$GITHUB_ENV"
               echo "CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=$NDK_BIN/aarch64-linux-android24-clang" >> "$GITHUB_ENV"
+              echo "NDK_HOME=$ANDROID_NDK_LATEST_HOME" >> "$GITHUB_ENV"
 
          - name: Lint Android backend
            run: cargo clippy --locked -p media-parser --all-targets --target aarch64-linux-android --no-default-features --features thumbnails,android-mediacodec -- -D warnings
@@ -115,6 +126,11 @@ jobs:
          # and links them. The following x86_64 step executes the runtime tests.
          - name: Build Android test executables
            run: cargo test --locked -p media-parser --target aarch64-linux-android --no-default-features --features thumbnails,android-mediacodec --no-run
+
+         # A release consumer app with R8 and only the plugin's keep rules. Built here so
+         # the emulator step below only installs and launches it.
+         - name: Build minified Android consumer
+           run: python3 tests/android-consumer/run.py --build-only --target x86_64
 
          - name: Enable KVM
            run: |
@@ -128,4 +144,6 @@ jobs:
               api-level: 35
               target: google_apis
               arch: x86_64
-              script: crates/media-parser/tests/run_android_mediacodec.sh
+              script: |
+                 crates/media-parser/tests/run_android_mediacodec.sh
+                 python3 tests/android-consumer/run.py --skip-build --target x86_64
