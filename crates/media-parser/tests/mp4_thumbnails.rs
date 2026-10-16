@@ -12,11 +12,12 @@ use common::{
    native_h264::{BFRAME_REFERENCES, MULTITRACK_REFERENCES, assert_matches_reference},
 };
 use media_parser::{
-   FileStreamReader, JpegQuality, PixelFormat, StreamReader,
+   FileStreamReader, Frame, JpegQuality, MediaParserError, PixelFormat, StreamReader,
    format::mp4::{ThumbnailIndex, ThumbnailOptions, ThumbnailSize, read_frames, read_keyframes},
 };
 use std::io::Write;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 fn mp4_box(fourcc: &[u8; 4], payload: &[u8]) -> Vec<u8> {
@@ -365,6 +366,128 @@ pub(crate) async fn test_mp4_exact_thumbnails_read_a_shared_gop_once_case() {
    assert_eq!(reader.read_count(), 1);
 }
 
+/// Streamed calls, plus the frames placed back in request order.
+#[derive(Default)]
+struct Streamed {
+   calls: Vec<Vec<usize>>,
+   slots: Vec<Option<Frame>>,
+}
+
+impl Streamed {
+   fn frames(&self) -> Vec<Frame> {
+      self
+         .slots
+         .iter()
+         .cloned()
+         .map(|slot| slot.expect("every position is answered"))
+         .collect()
+   }
+}
+
+fn stream_into(
+   streamed: &Arc<Mutex<Streamed>>,
+) -> impl FnMut(&[usize], Frame) -> media_parser::Result<()> + Send + 'static {
+   let streamed = Arc::clone(streamed);
+   move |indices: &[usize], frame: Frame| {
+      let mut streamed = streamed.lock().unwrap();
+      streamed.calls.push(indices.to_vec());
+      for &index in indices {
+         if streamed.slots.len() <= index {
+            streamed.slots.resize(index + 1, None);
+         }
+         let previous = streamed.slots[index].replace(frame.clone());
+         assert!(previous.is_none(), "position {index} answered twice");
+      }
+      Ok(())
+   }
+}
+
+pub(crate) async fn test_mp4_streamed_thumbnails_match_the_collected_ones_case() {
+   let path = fixtures_dir().join("multitrack_video.mp4");
+   let reader = FileStreamReader::new(&path).expect("open MP4 fixture");
+   let index = ThumbnailIndex::read(&reader, 0)
+      .await
+      .expect("build thumbnail index");
+   let timestamps = [
+      Duration::from_millis(200),
+      Duration::ZERO,
+      Duration::from_millis(100),
+      Duration::ZERO,
+   ];
+
+   let expected = index
+      .frames(&reader, &timestamps, ThumbnailOptions::default())
+      .await
+      .expect("collect exact frames");
+   let streamed = Arc::new(Mutex::new(Streamed::default()));
+   index
+      .frames_each(
+         &reader,
+         &timestamps,
+         ThumbnailOptions::default(),
+         stream_into(&streamed),
+      )
+      .await
+      .expect("stream exact frames");
+   // One call per decoded frame, in presentation order.
+   assert_eq!(
+      streamed.lock().unwrap().calls,
+      vec![vec![1, 3], vec![2], vec![0]]
+   );
+   assert_eq!(streamed.lock().unwrap().frames(), expected);
+
+   let expected = index
+      .keyframes(&reader, &timestamps, ThumbnailOptions::default())
+      .await
+      .expect("collect keyframes");
+   let streamed = Arc::new(Mutex::new(Streamed::default()));
+   index
+      .keyframes_each(
+         &reader,
+         &timestamps,
+         ThumbnailOptions::default(),
+         stream_into(&streamed),
+      )
+      .await
+      .expect("stream keyframes");
+   // Every timestamp falls back to the single leading keyframe.
+   assert_eq!(streamed.lock().unwrap().calls, vec![vec![0, 1, 2, 3]]);
+   assert_eq!(streamed.lock().unwrap().frames(), expected);
+}
+
+pub(crate) async fn test_mp4_streamed_thumbnails_return_the_consumer_error_case() {
+   let path = fixtures_dir().join("multitrack_video.mp4");
+   let reader = FileStreamReader::new(&path).expect("open MP4 fixture");
+   let index = ThumbnailIndex::read(&reader, 0)
+      .await
+      .expect("build thumbnail index");
+   let calls = Arc::new(AtomicUsize::new(0));
+   let seen = Arc::clone(&calls);
+
+   let error = index
+      .frames_each(
+         &reader,
+         &[
+            Duration::ZERO,
+            Duration::from_millis(100),
+            Duration::from_millis(200),
+         ],
+         ThumbnailOptions::default(),
+         move |_, _| {
+            seen.fetch_add(1, Ordering::Relaxed);
+            Err(std::io::Error::new(std::io::ErrorKind::BrokenPipe, "webview went away").into())
+         },
+      )
+      .await
+      .expect_err("the consumer error stops the stream");
+
+   assert!(
+      matches!(&error, MediaParserError::Io(io) if io.kind() == std::io::ErrorKind::BrokenPipe),
+      "unexpected error: {error}"
+   );
+   assert_eq!(calls.load(Ordering::Relaxed), 1);
+}
+
 pub(crate) async fn test_mp4_exact_thumbnails_truncate_the_gop_at_the_last_target_case() {
    let path = fixtures_dir().join("bframes_video.mp4");
    let reader = CountingReader::new(&path);
@@ -584,6 +707,18 @@ async fn test_mp4_fast_thumbnails_read_each_keyframe_once() {
 #[tokio::test]
 async fn test_mp4_exact_thumbnails_read_a_shared_gop_once() {
    test_mp4_exact_thumbnails_read_a_shared_gop_once_case().await;
+}
+
+#[cfg(not(target_os = "android"))]
+#[tokio::test]
+async fn test_mp4_streamed_thumbnails_match_the_collected_ones() {
+   test_mp4_streamed_thumbnails_match_the_collected_ones_case().await;
+}
+
+#[cfg(not(target_os = "android"))]
+#[tokio::test]
+async fn test_mp4_streamed_thumbnails_return_the_consumer_error() {
+   test_mp4_streamed_thumbnails_return_the_consumer_error_case().await;
 }
 
 #[cfg(not(target_os = "android"))]

@@ -15,7 +15,6 @@ pub(crate) struct FakeDecoderProbe {
 }
 
 impl FakeDecoderProbe {
-   #[cfg(test)]
    pub(crate) fn decode_calls(&self) -> usize {
       self.decode_calls.load(Ordering::Relaxed)
    }
@@ -30,6 +29,7 @@ pub(crate) struct FakeDecoder {
    emissions: Vec<FrameToken>,
    continue_after_error: bool,
    fail_on_decode: Option<usize>,
+   emit_on_decode: bool,
    probe: Option<Arc<FakeDecoderProbe>>,
 }
 
@@ -39,16 +39,17 @@ impl FakeDecoder {
          emissions,
          continue_after_error: false,
          fail_on_decode: None,
+         emit_on_decode: false,
          probe: None,
       }
    }
 
-   #[cfg(test)]
    pub(crate) fn continuing_after_error(emissions: Vec<FrameToken>) -> Self {
       Self {
          emissions,
          continue_after_error: true,
          fail_on_decode: None,
+         emit_on_decode: false,
          probe: None,
       }
    }
@@ -59,37 +60,24 @@ impl FakeDecoder {
          emissions: Vec::new(),
          continue_after_error: false,
          fail_on_decode: Some(fail_on_decode),
+         emit_on_decode: false,
          probe: Some(probe),
       }
    }
-}
 
-impl H264Decoder for FakeDecoder {
-   fn open(_config: &AvcConfig) -> Result<Self, DecodeError> {
-      Err(DecodeError::Backend(
-         "tests construct FakeDecoder with explicit behavior".to_string(),
-      ))
+   /// Emits each frame from `decode` as soon as its sample arrives, like a
+   /// backend with no reordering delay.
+   pub(crate) fn emitting_on_decode(probe: Arc<FakeDecoderProbe>) -> Self {
+      Self {
+         emissions: Vec::new(),
+         continue_after_error: false,
+         fail_on_decode: None,
+         emit_on_decode: true,
+         probe: Some(probe),
+      }
    }
 
-   fn decode(
-      &mut self,
-      _sample: &[u8],
-      _token: FrameToken,
-      _sink: &mut FrameSink<'_>,
-   ) -> Result<(), DecodeError> {
-      if let Some(probe) = &self.probe {
-         let call = probe.decode_calls.fetch_add(1, Ordering::Relaxed);
-         if self.fail_on_decode == Some(call) {
-            return Err(DecodeError::Backend("injected decode failure".to_string()));
-         }
-      }
-      Ok(())
-   }
-
-   fn drain(&mut self, sink: &mut FrameSink<'_>) -> Result<(), DecodeError> {
-      if let Some(probe) = &self.probe {
-         probe.drain_calls.fetch_add(1, Ordering::Relaxed);
-      }
+   fn emit(&self, tokens: &[FrameToken], sink: &mut FrameSink<'_>) -> Result<(), DecodeError> {
       let y = [81; 4];
       let u = [90];
       let v = [240];
@@ -119,7 +107,7 @@ impl H264Decoder for FakeDecoder {
          },
       };
       let mut first_error = None;
-      for token in self.emissions.iter().copied() {
+      for token in tokens.iter().copied() {
          if let Err(error) = sink(token, &frame) {
             if !self.continue_after_error {
                return Err(error);
@@ -128,5 +116,38 @@ impl H264Decoder for FakeDecoder {
          }
       }
       first_error.map_or(Ok(()), Err)
+   }
+}
+
+impl H264Decoder for FakeDecoder {
+   fn open(_config: &AvcConfig) -> Result<Self, DecodeError> {
+      Err(DecodeError::Backend(
+         "tests construct FakeDecoder with explicit behavior".to_string(),
+      ))
+   }
+
+   fn decode(
+      &mut self,
+      _sample: &[u8],
+      token: FrameToken,
+      sink: &mut FrameSink<'_>,
+   ) -> Result<(), DecodeError> {
+      if let Some(probe) = &self.probe {
+         let call = probe.decode_calls.fetch_add(1, Ordering::Relaxed);
+         if self.fail_on_decode == Some(call) {
+            return Err(DecodeError::Backend("injected decode failure".to_string()));
+         }
+      }
+      if self.emit_on_decode {
+         return self.emit(&[token], sink);
+      }
+      Ok(())
+   }
+
+   fn drain(&mut self, sink: &mut FrameSink<'_>) -> Result<(), DecodeError> {
+      if let Some(probe) = &self.probe {
+         probe.drain_calls.fetch_add(1, Ordering::Relaxed);
+      }
+      self.emit(&self.emissions, sink)
    }
 }

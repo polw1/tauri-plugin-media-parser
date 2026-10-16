@@ -415,7 +415,7 @@ run_jvm() {
          "$workspace_root/crates/media-parser/tests/mp4_thumbnails.rs" \
          "$workspace_root/crates/media-parser/src/decoders/h264/pipeline.rs" \
          "$workspace_root/crates/media-parser/src/format/mp4/thumbnails.rs" | sort >"$jvm_work/original"
-      test "$(wc -l <"$jvm_work/original" | tr -d ' ')" = 31
+      test "$(wc -l <"$jvm_work/original" | tr -d ' ')" = 36
       sed 's/.*:://' "$jvm_work/actual" | sort >"$jvm_work/short-names"
       while IFS= read -r case_name; do
          if ! grep -qx "$case_name" "$jvm_work/short-names"; then

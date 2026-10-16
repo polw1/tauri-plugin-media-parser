@@ -14,7 +14,7 @@ use super::index_build_parallelism;
 use super::sample_io::{SampleData, SampleReadBudget, SampleReadLimits, read_samples_coalesced};
 use crate::decoders::h264::{
    AvcConfig, DecodeError, DecodedImage, FrameToken, H264DecodeBatch, JpegQuality, OutputBudget,
-   ThumbnailSize, decode_native_frame_batches_to_jpeg,
+   ThumbnailSize, decode_native_frame_batches_to_jpeg, decode_native_frame_batches_to_jpeg_each,
 };
 use crate::errors::{MediaParserError, Result};
 use crate::stream::StreamReader;
@@ -67,7 +67,7 @@ pub struct ThumbnailOptions {
    pub max_output_bytes: Option<usize>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 struct VideoTrack {
    id: u32,
    timescale: u32,
@@ -193,6 +193,39 @@ impl ThumbnailIndex {
       timestamps: &[Duration],
       options: ThumbnailOptions,
    ) -> Result<Vec<Frame>> {
+      let (targets, plans) = self.exact_plans(timestamps)?;
+      self
+         .execute_job_plans(reader, targets, plans, options, "too many thumbnail GOPs")
+         .await
+   }
+
+   /// Like [`Self::frames`], but hands each decoded frame to `on_frame` as
+   /// soon as it is ready, with the positions in `timestamps` it answers.
+   ///
+   /// Frames arrive in GOP order and, within a GOP, in presentation order. If
+   /// `on_frame` fails, decoding stops and that error is returned; frames
+   /// already handed over stay valid.
+   pub async fn frames_each(
+      &self,
+      reader: &dyn StreamReader,
+      timestamps: &[Duration],
+      options: ThumbnailOptions,
+      on_frame: impl FnMut(&[usize], Frame) -> Result<()> + Send + 'static,
+   ) -> Result<()> {
+      let (targets, plans) = self.exact_plans(timestamps)?;
+      self
+         .execute_job_plans_each(
+            reader,
+            targets,
+            plans,
+            options,
+            "too many thumbnail GOPs",
+            on_frame,
+         )
+         .await
+   }
+
+   fn exact_plans(&self, timestamps: &[Duration]) -> Result<(Vec<ExactTarget>, Vec<JobPlan>)> {
       self.validate_timestamps(timestamps)?;
       let mut targets = timestamps
          .iter()
@@ -217,10 +250,7 @@ impl ThumbnailIndex {
             &mut targets,
          )?);
       }
-
-      self
-         .execute_job_plans(reader, targets, plans, options, "too many thumbnail GOPs")
-         .await
+      Ok((targets, plans))
    }
 
    async fn execute_job_plans(
@@ -249,6 +279,60 @@ impl ThumbnailIndex {
       assemble_frames(&self.track, targets, images)
    }
 
+   async fn execute_job_plans_each(
+      &self,
+      reader: &dyn StreamReader,
+      targets: Vec<ExactTarget>,
+      plans: Vec<JobPlan>,
+      options: ThumbnailOptions,
+      reserve_error: &'static str,
+      mut on_frame: impl FnMut(&[usize], Frame) -> Result<()> + Send + 'static,
+   ) -> Result<()> {
+      let permit = Arc::new(
+         Arc::clone(&EXTRACTION_PERMITS)
+            .acquire_owned()
+            .await
+            .expect("the thumbnail-extraction semaphore is never closed"),
+      );
+      let jobs = load_decode_jobs(reader, plans, &self.tables, reserve_error).await?;
+      let mut answers = HashMap::<(Gop, FrameToken), (u64, Vec<usize>)>::new();
+      for (index, target) in targets.iter().enumerate() {
+         answers
+            .entry((target.gop, target.token))
+            .or_insert_with(|| (target.presentation_tick, Vec::new()))
+            .1
+            .push(index);
+      }
+      let track = self.track;
+      spawn_decode_task(Arc::clone(&permit), move || {
+         let output_budget = OutputBudget::new(options.max_output_bytes);
+         let batches = decode_batches(&jobs);
+         // The pipeline only carries `DecodeError`; keep the caller's own error.
+         let mut consumer_error = None;
+         let decoded = decode_native_frame_batches_to_jpeg_each(
+            &batches,
+            options.quality,
+            options.size,
+            &output_budget,
+            |batch, token, image| {
+               let (tick, indices) =
+                  answers.remove(&(jobs[batch].gop, token)).ok_or_else(|| {
+                     DecodeError::BackendContract("decoded an unrequested thumbnail".to_string())
+                  })?;
+               on_frame(&indices, frame_from_image(&track, tick, image)).map_err(|error| {
+                  consumer_error = Some(error);
+                  DecodeError::OutputLimit("thumbnail consumer stopped".to_string())
+               })
+            },
+         );
+         match consumer_error {
+            Some(error) => Err(error),
+            None => decoded.map_err(map_decode_error),
+         }
+      })
+      .await
+   }
+
    /// Extracts the nearest preceding keyframe for each timestamp.
    pub async fn keyframes(
       &self,
@@ -256,6 +340,41 @@ impl ThumbnailIndex {
       timestamps: &[Duration],
       options: ThumbnailOptions,
    ) -> Result<Vec<Frame>> {
+      let (targets, plans) = self.keyframe_plans(timestamps)?;
+      self
+         .execute_job_plans(
+            reader,
+            targets,
+            plans,
+            options,
+            "too many thumbnail keyframes",
+         )
+         .await
+   }
+
+   /// Like [`Self::keyframes`], streaming each keyframe as in
+   /// [`Self::frames_each`].
+   pub async fn keyframes_each(
+      &self,
+      reader: &dyn StreamReader,
+      timestamps: &[Duration],
+      options: ThumbnailOptions,
+      on_frame: impl FnMut(&[usize], Frame) -> Result<()> + Send + 'static,
+   ) -> Result<()> {
+      let (targets, plans) = self.keyframe_plans(timestamps)?;
+      self
+         .execute_job_plans_each(
+            reader,
+            targets,
+            plans,
+            options,
+            "too many thumbnail keyframes",
+            on_frame,
+         )
+         .await
+   }
+
+   fn keyframe_plans(&self, timestamps: &[Duration]) -> Result<(Vec<ExactTarget>, Vec<JobPlan>)> {
       self.validate_timestamps(timestamps)?;
       let targets = timestamps
          .iter()
@@ -289,16 +408,7 @@ impl ThumbnailIndex {
             wanted: vec![(FrameToken::new(0), output_count_by_sample[&sample_index])],
          });
       }
-
-      self
-         .execute_job_plans(
-            reader,
-            targets,
-            plans,
-            options,
-            "too many thumbnail keyframes",
-         )
-         .await
+      Ok((targets, plans))
    }
 
    fn validate_timestamps(&self, timestamps: &[Duration]) -> Result<()> {
@@ -381,15 +491,7 @@ async fn run_decode_jobs(
 ) -> Result<HashMap<(Gop, FrameToken), DecodedImage>> {
    let decoded = spawn_decode_task(permit, move || {
       let output_budget = OutputBudget::new(max_output_bytes);
-      let batches = jobs
-         .iter()
-         .map(|job| H264DecodeBatch {
-            config: &job.avc_config,
-            samples: &job.samples,
-            tokens: &job.tokens,
-            wanted: &job.wanted,
-         })
-         .collect::<Vec<_>>();
+      let batches = decode_batches(&jobs);
       let outputs = decode_native_frame_batches_to_jpeg(&batches, quality, size, &output_budget)
          .map_err(map_decode_error)?;
       drop(batches);
@@ -404,6 +506,18 @@ async fn run_decode_jobs(
    .await?;
 
    Ok(collect_decoded_images(decoded))
+}
+
+fn decode_batches(jobs: &[DecodeJob]) -> Vec<H264DecodeBatch<'_, SampleData>> {
+   jobs
+      .iter()
+      .map(|job| H264DecodeBatch {
+         config: &job.avc_config,
+         samples: &job.samples,
+         tokens: &job.tokens,
+         wanted: &job.wanted,
+      })
+      .collect()
 }
 
 /// The worker owns a permit as well as its caller: dropping the async future

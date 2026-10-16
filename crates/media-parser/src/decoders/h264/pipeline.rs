@@ -114,13 +114,49 @@ pub(crate) fn decode_frame_batches_to_jpeg_with<D: H264Decoder, S: AsRef<[u8]>>(
    quality: JpegQuality,
    size: ThumbnailSize,
    output_budget: &OutputBudget,
-   mut open: impl FnMut(&AvcConfig, usize) -> Result<Option<D>, DecodeError>,
+   open: impl FnMut(&AvcConfig, usize) -> Result<Option<D>, DecodeError>,
 ) -> Result<Vec<Vec<(FrameToken, DecodedImage)>>, DecodeError> {
+   let mut output = empty_batch_outputs(batches.len())?;
+   decode_frame_batches_to_jpeg_each_with(
+      batches,
+      quality,
+      size,
+      output_budget,
+      open,
+      |batch, token, image| {
+         output[batch].push((token, image));
+         Ok(())
+      },
+   )?;
+   Ok(output)
+}
+
+#[cfg(any(test, h264_backend))]
+fn empty_batch_outputs(len: usize) -> Result<Vec<Vec<(FrameToken, DecodedImage)>>, DecodeError> {
    let mut output = Vec::new();
    output
-      .try_reserve_exact(batches.len())
+      .try_reserve_exact(len)
       .map_err(|_| DecodeError::ResourceLimit("too many H.264 decode batches".to_string()))?;
+   output.resize_with(len, Vec::new);
+   Ok(output)
+}
 
+/// Decodes like [`decode_frame_batches_to_jpeg_with`], but hands each wanted
+/// image to `on_image` as soon as it and every earlier wanted image are ready.
+///
+/// Images arrive in batch order, then token (presentation) order within a
+/// batch; the `usize` is the batch's index in `batches`. A decoder candidate
+/// is only retried while no frame of its group has been delivered, so
+/// `on_image` never sees an image twice.
+#[cfg(any(test, h264_backend))]
+pub(crate) fn decode_frame_batches_to_jpeg_each_with<D: H264Decoder, S: AsRef<[u8]>>(
+   batches: &[H264DecodeBatch<'_, S>],
+   quality: JpegQuality,
+   size: ThumbnailSize,
+   output_budget: &OutputBudget,
+   mut open: impl FnMut(&AvcConfig, usize) -> Result<Option<D>, DecodeError>,
+   mut on_image: impl FnMut(usize, FrameToken, DecodedImage) -> Result<(), DecodeError>,
+) -> Result<(), DecodeError> {
    let mut metadata = Vec::new();
    metadata
       .try_reserve_exact(batches.len())
@@ -192,11 +228,9 @@ pub(crate) fn decode_frame_batches_to_jpeg_with<D: H264Decoder, S: AsRef<[u8]>>(
             size,
             output_budget,
             &mut delivered_frame,
+            &mut |batch, token, image| on_image(group_start + batch, token, image),
          ) {
-            Ok(group_output) => {
-               output.extend(group_output);
-               break;
-            }
+            Ok(()) => break,
             Err(error) if retryable_decoder_error(&error) && !delivered_frame => {
                first_error.get_or_insert(error);
                attempt = attempt.checked_add(1).ok_or_else(|| {
@@ -208,8 +242,10 @@ pub(crate) fn decode_frame_batches_to_jpeg_with<D: H264Decoder, S: AsRef<[u8]>>(
       }
       group_start = group_end;
    }
-   Ok(output)
+   Ok(())
 }
+
+type ImageSink<'a> = dyn FnMut(usize, FrameToken, DecodedImage) -> Result<(), DecodeError> + 'a;
 
 fn retryable_decoder_error(error: &DecodeError) -> bool {
    matches!(
@@ -219,6 +255,7 @@ fn retryable_decoder_error(error: &DecodeError) -> bool {
 }
 
 #[cfg(any(test, h264_backend))]
+#[allow(clippy::too_many_arguments)] // Retry state and the image sink are threaded through one group.
 fn decode_compatible_frame_batches_to_jpeg_with<D: H264Decoder, S: AsRef<[u8]>>(
    mut decoder: D,
    batches: &[H264DecodeBatch<'_, S>],
@@ -227,7 +264,8 @@ fn decode_compatible_frame_batches_to_jpeg_with<D: H264Decoder, S: AsRef<[u8]>>(
    size: ThumbnailSize,
    output_budget: &OutputBudget,
    delivered_frame: &mut bool,
-) -> Result<Vec<Vec<(FrameToken, DecodedImage)>>, DecodeError> {
+   on_image: &mut ImageSink<'_>,
+) -> Result<(), DecodeError> {
    let mut decode_batches = Vec::new();
    decode_batches
       .try_reserve_exact(batches.len())
@@ -250,6 +288,7 @@ fn decode_compatible_frame_batches_to_jpeg_with<D: H264Decoder, S: AsRef<[u8]>>(
       size,
       output_budget,
       delivered_frame,
+      on_image,
    )
 }
 
@@ -262,6 +301,7 @@ pub(crate) fn decode_batches_with_decoder<D: H264Decoder, S: AsRef<[u8]>>(
    output_budget: &OutputBudget,
 ) -> Result<Vec<Vec<(FrameToken, DecodedImage)>>, DecodeError> {
    let mut delivered_frame = false;
+   let mut output = empty_batch_outputs(batches.len())?;
    decode_batches_with_decoder_tracking(
       decoder,
       batches,
@@ -269,7 +309,33 @@ pub(crate) fn decode_batches_with_decoder<D: H264Decoder, S: AsRef<[u8]>>(
       size,
       output_budget,
       &mut delivered_frame,
-   )
+      &mut |batch, token, image| {
+         output[batch].push((token, image));
+         Ok(())
+      },
+   )?;
+   Ok(output)
+}
+
+/// Hands over the ready prefix of `selected`, in batch then wanted order.
+fn release_ready_images(
+   selected: &mut [Vec<Option<(FrameToken, DecodedImage)>>],
+   cursor: &mut (usize, usize),
+   on_image: &mut ImageSink<'_>,
+) -> Result<(), DecodeError> {
+   loop {
+      while cursor.0 < selected.len() && cursor.1 == selected[cursor.0].len() {
+         *cursor = (cursor.0 + 1, 0);
+      }
+      let Some((token, image)) = selected
+         .get_mut(cursor.0)
+         .and_then(|batch| batch[cursor.1].take())
+      else {
+         return Ok(());
+      };
+      on_image(cursor.0, token, image)?;
+      cursor.1 += 1;
+   }
 }
 
 fn decode_batches_with_decoder_tracking<D: H264Decoder, S: AsRef<[u8]>>(
@@ -279,7 +345,8 @@ fn decode_batches_with_decoder_tracking<D: H264Decoder, S: AsRef<[u8]>>(
    size: ThumbnailSize,
    output_budget: &OutputBudget,
    delivered_frame: &mut bool,
-) -> Result<Vec<Vec<(FrameToken, DecodedImage)>>, DecodeError> {
+   on_image: &mut ImageSink<'_>,
+) -> Result<(), DecodeError> {
    let total_samples = batches.iter().try_fold(0usize, |total, batch| {
       total.checked_add(batch.samples.len()).ok_or_else(|| {
          DecodeError::ResourceLimit("too many H.264 samples in decode batch".to_string())
@@ -309,6 +376,7 @@ fn decode_batches_with_decoder_tracking<D: H264Decoder, S: AsRef<[u8]>>(
    }
 
    let mut rgb = Vec::new();
+   let mut cursor = (0usize, 0usize);
    let mut first_sink_error = None::<String>;
    let mut callback_after_error = false;
    let backend_result = {
@@ -339,6 +407,7 @@ fn decode_batches_with_decoder_tracking<D: H264Decoder, S: AsRef<[u8]>>(
                   planar_yuv_to_jpeg(planar, &mut rgb, quality, size, batches[batch_index].color)?;
                output_budget.reserve(image.data.len(), output_count)?;
                selected[batch_index][wanted_index] = Some((local_token, image));
+               release_ready_images(&mut selected, &mut cursor, on_image)?;
             }
             Ok(())
          })();
@@ -392,19 +461,14 @@ fn decode_batches_with_decoder_tracking<D: H264Decoder, S: AsRef<[u8]>>(
       ));
    }
 
-   selected
-      .into_iter()
-      .map(|batch| {
-         batch
-            .into_iter()
-            .map(|image| {
-               image.ok_or_else(|| {
-                  DecodeError::BackendContract("wanted token has no decoded image".to_string())
-               })
-            })
-            .collect()
-      })
-      .collect()
+   // Steps over trailing batches that want no image.
+   release_ready_images(&mut selected, &mut cursor, on_image)?;
+   if cursor.0 != selected.len() {
+      return Err(DecodeError::BackendContract(
+         "wanted token has no decoded image".to_string(),
+      ));
+   }
+   Ok(())
 }
 
 #[cfg(h264_backend)]
@@ -417,6 +481,24 @@ pub(crate) fn decode_native_frame_batches_to_jpeg<S: AsRef<[u8]>>(
    decode_frame_batches_to_jpeg_with(batches, quality, size, output_budget, |config, attempt| {
       backend::open_decoder(config, attempt)
    })
+}
+
+#[cfg(h264_backend)]
+pub(crate) fn decode_native_frame_batches_to_jpeg_each<S: AsRef<[u8]>>(
+   batches: &[H264DecodeBatch<'_, S>],
+   quality: JpegQuality,
+   size: ThumbnailSize,
+   output_budget: &OutputBudget,
+   on_image: impl FnMut(usize, FrameToken, DecodedImage) -> Result<(), DecodeError>,
+) -> Result<(), DecodeError> {
+   decode_frame_batches_to_jpeg_each_with(
+      batches,
+      quality,
+      size,
+      output_budget,
+      backend::open_decoder,
+      on_image,
+   )
 }
 
 fn validate_decode_inputs<S: AsRef<[u8]>>(
@@ -516,6 +598,24 @@ mod tests {
    #[test]
    fn retryable_failure_after_first_frame_does_not_retry() {
       test_support::retryable_failure_after_first_frame_does_not_retry_case();
+   }
+
+   #[cfg(not(target_os = "android"))]
+   #[test]
+   fn images_are_handed_over_while_later_batches_still_decode() {
+      test_support::images_are_handed_over_while_later_batches_still_decode_case();
+   }
+
+   #[cfg(not(target_os = "android"))]
+   #[test]
+   fn reordered_images_are_released_in_token_order_once_ready() {
+      test_support::reordered_images_are_released_in_token_order_once_ready_case();
+   }
+
+   #[cfg(not(target_os = "android"))]
+   #[test]
+   fn consumer_error_stops_delivery_and_is_returned() {
+      test_support::consumer_error_stops_delivery_and_is_returned_case();
    }
 
    #[test]
@@ -1044,6 +1144,116 @@ pub(crate) mod test_support {
          tokens,
          wanted,
       }
+   }
+
+   fn decode_each_with(
+      decoder: backend::fake::FakeDecoder,
+      batches: &[H264DecodeBatch<'_, Vec<u8>>],
+      mut on_image: impl FnMut(usize, FrameToken) -> Result<(), DecodeError>,
+   ) -> Result<(), DecodeError> {
+      let mut decoder = Some(decoder);
+      decode_frame_batches_to_jpeg_each_with(
+         batches,
+         JpegQuality::default(),
+         ThumbnailSize::default(),
+         &OutputBudget::new(None),
+         |_, _| Ok(decoder.take()),
+         |batch, token, _| on_image(batch, token),
+      )
+   }
+
+   pub(crate) fn images_are_handed_over_while_later_batches_still_decode_case() {
+      let config = reusable_config(2);
+      let samples = [vec![1, 0x65]];
+      let tokens = [FrameToken::new(0)];
+      let wanted = [(FrameToken::new(0), 1)];
+      let batches = [
+         retry_batch(&config, &samples, &tokens, &wanted),
+         retry_batch(&config, &samples, &tokens, &wanted),
+      ];
+      let probe = Arc::new(backend::fake::FakeDecoderProbe::default());
+      let mut seen = Vec::new();
+
+      decode_each_with(
+         backend::fake::FakeDecoder::emitting_on_decode(Arc::clone(&probe)),
+         &batches,
+         |batch, _| {
+            seen.push((batch, probe.decode_calls()));
+            Ok(())
+         },
+      )
+      .expect("both batches decode");
+
+      assert_eq!(seen, vec![(0, 1), (1, 2)]);
+   }
+
+   pub(crate) fn reordered_images_are_released_in_token_order_once_ready_case() {
+      let config = reusable_config(2);
+      let samples = vec![vec![1, 0x65]; 3];
+      let tokens = [FrameToken::new(0), FrameToken::new(2), FrameToken::new(1)];
+      let wanted = [
+         (FrameToken::new(0), 1),
+         (FrameToken::new(1), 1),
+         (FrameToken::new(2), 1),
+      ];
+      let probe = Arc::new(backend::fake::FakeDecoderProbe::default());
+      let mut seen = Vec::new();
+
+      decode_each_with(
+         backend::fake::FakeDecoder::emitting_on_decode(Arc::clone(&probe)),
+         &[retry_batch(&config, &samples, &tokens, &wanted)],
+         |_, token| {
+            seen.push((token, probe.decode_calls()));
+            Ok(())
+         },
+      )
+      .expect("reordering is valid");
+
+      assert_eq!(
+         seen,
+         vec![
+            (FrameToken::new(0), 1),
+            (FrameToken::new(1), 3),
+            (FrameToken::new(2), 3),
+         ]
+      );
+   }
+
+   pub(crate) fn consumer_error_stops_delivery_and_is_returned_case() {
+      let config = reusable_config(2);
+      let samples = vec![vec![1, 0x65]; 3];
+      let tokens = [FrameToken::new(0), FrameToken::new(1), FrameToken::new(2)];
+      let wanted = [
+         (FrameToken::new(0), 1),
+         (FrameToken::new(1), 1),
+         (FrameToken::new(2), 1),
+      ];
+      let batch = [retry_batch(&config, &samples, &tokens, &wanted)];
+      let consumer_error = || DecodeError::OutputLimit("consumer stopped".to_string());
+      let run = |decoder| {
+         let mut calls = 0;
+         let error = decode_each_with(decoder, &batch, |_, _| {
+            calls += 1;
+            if calls == 2 {
+               Err(consumer_error())
+            } else {
+               Ok(())
+            }
+         })
+         .expect_err("the consumer failure stops decoding");
+         (calls, error)
+      };
+
+      let (calls, error) = run(backend::fake::FakeDecoder::emitting(tokens.to_vec()));
+      assert_eq!(calls, 2);
+      assert_eq!(error, consumer_error());
+
+      // A backend that keeps calling the sink never reaches the consumer again.
+      let (calls, error) = run(backend::fake::FakeDecoder::continuing_after_error(
+         tokens.to_vec(),
+      ));
+      assert_eq!(calls, 2);
+      assert!(matches!(error, DecodeError::BackendContract(_)));
    }
 
    pub(crate) fn retryable_failure_before_first_frame_replays_with_next_decoder_case() {
