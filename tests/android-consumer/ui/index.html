@@ -1,6 +1,8 @@
 <!doctype html>
 <meta charset="utf-8">
 <title>Native JPEG validation</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<p><a href="manual.html" style="font:20px sans-serif;padding:16px;display:inline-block">Open manual streaming test →</a></p>
 <pre id="result">Running native JPEG consumer tests…</pre>
 <script>
 const invoke = window.__TAURI__.core.invoke;
@@ -29,11 +31,57 @@ async function checkThumbnail(source) {
   bitmap.close();
   return jpeg.length;
 }
+async function checkStream(source) {
+  const timestamps = [0, 200, 0];
+  const answered = timestamps.map(() => false);
+  let received = 0;
+  const jpegs = [];
+  let allReceived;
+  const done = new Promise((resolve) => { allReceived = resolve; });
+  const channel = new window.__TAURI__.core.Channel((raw) => {
+    const bytes = new Uint8Array(raw);
+    const size = new DataView(bytes.buffer).getUint32(0, true);
+    const header = JSON.parse(new TextDecoder().decode(bytes.subarray(4, 4 + size)));
+    const entry = header.entries[0];
+    const jpeg = bytes.subarray(4 + size + entry.offset, 4 + size + entry.offset + entry.length);
+    if (header.entries.length !== 1 || jpeg[0] !== 255 || jpeg[1] !== 216) {
+      throw new Error('invalid stream message');
+    }
+    for (const index of entry.indices) {
+      if (answered[index]) throw new Error('position answered twice');
+      answered[index] = true;
+    }
+    jpegs.push(new Blob([jpeg], {type: 'image/jpeg'}));
+    received += 1;
+    if (received === sent) allReceived();
+  });
+  let sent;
+  sent = await invoke('plugin:media-parser|stream_thumbnails', {
+    source, timestamps, accurate: true, maxWidth: 320, maxHeight: 180, onThumbnail: channel
+  });
+  if (received === sent) allReceived();
+  await done;
+  if (sent !== 2 || answered.includes(false)) {
+    throw new Error('stream sent ' + sent + ' messages, answered ' + answered);
+  }
+  for (const jpeg of jpegs) {
+    const bitmap = await createImageBitmap(jpeg);
+    try {
+      if (bitmap.width !== 320 || bitmap.height !== 180) {
+        throw new Error('undecodable stream dimensions');
+      }
+    } finally {
+      bitmap.close();
+    }
+  }
+  return 'stream=' + sent;
+}
 (async () => {
   try {
     const source = await invoke('fixture_path');
     const sizes = [await checkThumbnail(source), ...await Promise.all([checkThumbnail(source), checkThumbnail(source)])];
-    const result = 'PASS native JPEG consumer sequential+concurrent bytes=' + sizes.join(',');
+    const stream = await checkStream(source);
+    const result = 'PASS native JPEG consumer sequential+concurrent bytes=' + sizes.join(',') + ' ' + stream;
     document.querySelector('#result').textContent = result;
     await invoke('report_result', { result });
   } catch (error) {

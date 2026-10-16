@@ -34,3 +34,15 @@ Tauri requests Jackson 2.15.3, which crashes on API 24 and 25 before the plugin
 initializes
 ([upstream report](https://github.com/FasterXML/jackson-databind/issues/4653)).
 Run this test on API 26 or newer.
+
+## Manual streaming
+
+After installing, open **Native JPEG Consumer** and tap **Open manual streaming test**.
+The manual screen calls the public `streamThumbnails` wrapper, displays each received
+image and its arrival time, and supports either the included 30-second synthetic
+H.264 video or an HTTP(S) MP4 URL. Requests are never artificially delayed.
+
+The runner builds the root JavaScript package and prepares `ui/manual-api.js`
+using Tauri's global core API. Install the root npm dependencies before building.
+To refresh only this generated module, run `npm run prepare:manual` here.
+The demo clip is generated test content (640×360, 30 fps, one keyframe per second).

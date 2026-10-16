@@ -23,6 +23,7 @@ sdk = Path(os.environ.get("ANDROID_HOME") or os.environ.get("ANDROID_SDK_ROOT") 
 
 if not args.skip_build:
     subprocess.run(["npm", "ci"], cwd=root, check=True)
+    subprocess.run(["npm", "run", "prepare:manual"], cwd=root, check=True)
     subprocess.run(["npm", "run", "tauri", "--", "android", "init", "--ci"], cwd=root, check=True)
     app = generated / "app"
     app_gradle = (app / "build.gradle.kts").read_text()

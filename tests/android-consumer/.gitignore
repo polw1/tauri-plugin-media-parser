@@ -1,3 +1,5 @@
 /src-tauri/gen/
 /src-tauri/target/
 /node_modules/
+
+/ui/manual-api.js

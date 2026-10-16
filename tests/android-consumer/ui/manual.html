@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Thumbnail streaming</title>
+<style>
+*{box-sizing:border-box}body{margin:0;background:#101722;color:#edf2fb;font:16px system-ui,sans-serif;padding:36px 18px 28px}main{max-width:850px;margin:auto}h1{font-size:26px;margin:8px 0}p{color:#bac6d8;line-height:1.5}label{display:block;margin:16px 0 6px}input,select,button{font:inherit;border-radius:10px;padding:13px;width:100%;border:1px solid #455168;background:#192536;color:inherit}button{background:#5fe0b2;color:#08251b;font-weight:700;border:0;margin:20px 0 12px}button:disabled{opacity:.5}input[type=checkbox]{width:auto}.row{display:flex;gap:12px}.row>div{flex:1}#status{padding:14px;background:#1a2738;border-radius:10px;overflow-wrap:anywhere}#stats{font-size:14px;line-height:1.7;color:#b9d7ed;white-space:pre-line}progress{width:100%;height:12px;accent-color:#5fe0b2}#frames{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin:18px 0}figure{margin:0;background:#1a2738;border-radius:10px;overflow:hidden}img{width:100%;aspect-ratio:16/9;object-fit:contain;background:#060b12}figcaption{padding:8px;font-size:12px}#events{font-size:12px;white-space:pre-wrap;color:#a9bed5;max-height:180px;overflow:auto}a{color:#5fe0b2}
+</style>
+<main>
+<h1>Thumbnail streaming</h1>
+<p>Images appear as the plugin delivers them. The bundled video has 30 seconds of moving shapes and colors.</p>
+<label for="source">Video</label><select id="source"><option value="demo">Bundled demo · 30 seconds</option><option value="url">URL of another MP4 / H.264 video</option></select>
+<div id="remote" hidden><label for="url">MP4 URL</label><input id="url" type="url" placeholder="https://…/video.mp4" autocomplete="off"><p>The server must support range requests. The initial read may delay the first image.</p></div>
+<div class="row"><div><label for="duration">Duration in seconds</label><input id="duration" type="number" min="1" max="3600" value="30"></div><div><label for="count">Thumbnails</label><input id="count" type="number" min="2" max="300" value="60"></div></div>
+<label><input id="accurate" type="checkbox" checked> Seek to the exact frame</label>
+<button id="start" type="button">Start streaming</button>
+<div id="status" role="status" aria-live="polite">Ready to start.</div>
+<p id="stats">No test started.</p><progress id="progress" value="0" max="60"></progress>
+<div id="frames"></div><details><summary>Arrival order and times</summary><pre id="events"></pre></details>
+<p>Times are measured on actual arrival, with no artificial delay. With short local videos, several images may appear almost together.</p>
+<a href="index.html">Run automated test</a>
+</main>
+<script type="module">
+import { streamThumbnails } from './manual-api.js';
+const $ = (id) => document.getElementById(id);
+let urls = [];
+$('source').onchange = () => { $('remote').hidden = $('source').value !== 'url'; };
+$('start').onclick = async () => {
+  const count = Number($('count').value), seconds = Number($('duration').value);
+  if (!Number.isInteger(count) || count < 2 || count > 300 || !Number.isFinite(seconds) || seconds < 1 || seconds > 3600) {
+    $('status').textContent = 'Use between 2 and 300 thumbnails and a duration of 1 to 3600 seconds.'; return;
+  }
+  const demo = $('source').value === 'demo';
+  if (demo && seconds > 30) { $('status').textContent = 'The demo is only 30 seconds long.'; return; }
+  const remote = $('url').value.trim();
+  if (!demo && !/^https?:\/\//i.test(remote)) { $('status').textContent = 'Enter an HTTP or HTTPS URL.'; return; }
+  urls.forEach(URL.revokeObjectURL); urls = [];
+  $('frames').replaceChildren(); $('events').textContent = '';
+  $('progress').max = count; $('progress').value = 0;
+  document.querySelectorAll('input, select, button').forEach((el) => { el.disabled = true; });
+  $('status').textContent = 'Preparing video…';
+  let began = 0, first, received = 0, answered = 0;
+  const stats = () => { $('stats').textContent = `${answered}/${count} positions · ${received} images received\nFirst image: ${first === undefined ? 'waiting' : first.toFixed(0) + ' ms'} · Elapsed: ${(performance.now()-began).toFixed(0)} ms`; };
+  let timer;
+  try {
+    const source = demo ? await window.__TAURI__.core.invoke('fixture_path', {demo:true}) : remote;
+    const timestamps = Array.from({length:count}, (_, i) => Math.floor(i * seconds * 1000 / count));
+    began = performance.now(); timer = setInterval(stats, 100);
+    $('status').textContent = 'Streaming in progress…';
+    await streamThumbnails(source, {
+      timestamps, accurate:$('accurate').checked, maxWidth:320, maxHeight:180,
+      onThumbnail(thumbnail) {
+        const elapsed = performance.now()-began;
+        first ??= elapsed; received++; answered += thumbnail.indices.length;
+        const url = URL.createObjectURL(new Blob([thumbnail.data], {type:thumbnail.mimeType})); urls.push(url);
+        const figure = document.createElement('figure'), img = document.createElement('img'), caption = document.createElement('figcaption');
+        img.src = url; img.alt = `Thumbnail at ${thumbnail.timestampSec.toFixed(2)} seconds`;
+        caption.textContent = `#${received} · ${thumbnail.timestampSec.toFixed(2)} s · arrived at ${elapsed.toFixed(0)} ms`;
+        figure.append(img, caption); $('frames').append(figure);
+        $('events').textContent += `#${received}: indices [${thumbnail.indices.join(', ')}], ${elapsed.toFixed(1)} ms\n`;
+        $('progress').value = answered; stats();
+      }
+    });
+    stats(); $('status').textContent = `Done: ${answered}/${count} positions received.`;
+    await window.__TAURI__.core.invoke('report_result', {result:`PASS manual stream received=${received} answered=${answered}/${count} firstMs=${first?.toFixed(1)} totalMs=${(performance.now()-began).toFixed(1)}`});
+  } catch (error) {
+    $('status').textContent = 'Failed: ' + (typeof error === 'string' ? error : error?.message || JSON.stringify(error));
+  } finally {
+    clearInterval(timer);
+    document.querySelectorAll('input, select, button').forEach((el) => { el.disabled = false; });
+  }
+};
+</script>
+</html>

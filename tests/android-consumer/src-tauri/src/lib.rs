@@ -1,15 +1,22 @@
 use tauri::Manager;
 
 #[tauri::command]
-fn fixture_path(app: tauri::AppHandle) -> Result<String, String> {
+fn fixture_path(app: tauri::AppHandle, demo: Option<bool>) -> Result<String, String> {
    let directory = app.path().app_cache_dir().map_err(|e| e.to_string())?;
    std::fs::create_dir_all(&directory).map_err(|e| e.to_string())?;
-   let path = directory.join("bt709_hd_video.mp4");
-   std::fs::write(
-      &path,
-      include_bytes!("../../../../crates/media-parser/tests/fixtures/bt709_hd_video.mp4"),
-   )
-   .map_err(|e| e.to_string())?;
+   let (name, bytes): (&str, &[u8]) = if demo.unwrap_or(false) {
+      (
+         "streaming-demo.mp4",
+         include_bytes!("../../fixtures/streaming-demo.mp4"),
+      )
+   } else {
+      (
+         "bt709_hd_video.mp4",
+         include_bytes!("../../../../crates/media-parser/tests/fixtures/bt709_hd_video.mp4"),
+      )
+   };
+   let path = directory.join(name);
+   std::fs::write(&path, bytes).map_err(|e| e.to_string())?;
    Ok(path.to_string_lossy().into_owned())
 }
 
