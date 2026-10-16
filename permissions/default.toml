@@ -7,5 +7,6 @@ permissions = [
    "allow-get-tracks",
    "allow-get-cover",
    "allow-get-thumbnails",
+   "allow-stream-thumbnails",
    "allow-get-subtitles",
 ]

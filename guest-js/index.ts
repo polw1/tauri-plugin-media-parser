@@ -1,4 +1,4 @@
-import { invoke } from '@tauri-apps/api/core';
+import { Channel, invoke } from '@tauri-apps/api/core';
 
 import { decodeEnvelope } from './envelope';
 import { decodeSubtitleEnvelope } from './subtitle-envelope';
@@ -8,6 +8,8 @@ import type {
    CoverInfo,
    Metadata,
    MetadataOptions,
+   StreamedThumbnailInfo,
+   StreamThumbnailsOptions,
    SubtitleInfo,
    SubtitleOptions,
    ThumbnailInfo,
@@ -147,6 +149,115 @@ export async function getThumbnails(
    });
 
    return decodeThumbnailEnvelope(raw);
+}
+
+/**
+ * Like {@link getThumbnails}, but hands each thumbnail to
+ * `options.onThumbnail` as soon as its GOP is decoded instead of waiting for
+ * all of them.
+ *
+ * Thumbnails arrive in file order; each carries `indices`, the positions in
+ * `timestamps` it answers. The promise resolves once every position has been
+ * answered. It rejects if the backend fails, a message is malformed, or
+ * `onThumbnail` throws; thumbnails already delivered stay valid and no more
+ * are delivered. Samples are still read before the first decode, so a remote
+ * URL waits before the first thumbnail.
+ *
+ * If the webview drops a channel message (for example, when the window closes
+ * mid-stream), the promise can stay pending: Tauri does not report that loss.
+ *
+ * @param source - Absolute path to a local file or URL of a remote media file
+ * @param options - The {@link getThumbnails} options plus `onThumbnail`
+ * @throws TypeError for the same invalid options as {@link getThumbnails}
+ */
+export async function streamThumbnails(
+   source: string,
+   options: StreamThumbnailsOptions,
+): Promise<void> {
+   validateTimestamps(options.timestamps);
+   validateQuality(options.quality);
+   validateThumbnailDimensions(options.maxWidth, options.maxHeight);
+
+   const total = options.timestamps.length;
+   const answered = new Array<boolean>(total).fill(false);
+   let received = 0;
+   let expected: number | undefined;
+   let failed = false;
+   let settle!: () => void;
+   let fail!: (reason: unknown) => void;
+   const done = new Promise<void>((resolve, reject) => {
+      settle = resolve;
+      fail = (reason) => {
+         failed = true;
+         reject(reason);
+      };
+   });
+   const finishWhenComplete = (): void => {
+      if (failed || expected === undefined || received < expected) {
+         return;
+      }
+      if (received > expected || answered.includes(false)) {
+         fail(new TypeError('Thumbnail stream did not answer every timestamp exactly once.'));
+         return;
+      }
+      settle();
+   };
+
+   // The Channel handler must return normally, or later messages stall.
+   const channel = new Channel<ArrayBuffer>((raw) => {
+      if (failed) {
+         return;
+      }
+      try {
+         const thumbnail = decodeStreamedThumbnail(raw, answered);
+         received += 1;
+         options.onThumbnail(thumbnail);
+         finishWhenComplete();
+      } catch (error) {
+         fail(error);
+      }
+   });
+
+   // Not awaited: a failed message must reject `done` while the command runs.
+   invoke<number>('plugin:media-parser|stream_thumbnails', {
+      source,
+      timestamps: options.timestamps,
+      trackId: options.trackId,
+      accurate: options.accurate,
+      quality: options.quality,
+      maxWidth: options.maxWidth,
+      maxHeight: options.maxHeight,
+      headers: options.headers,
+      onThumbnail: channel,
+   }).then((sent) => {
+      expected = sent;
+      finishWhenComplete();
+   }, fail);
+   return done;
+}
+
+/**
+ * Decodes one stream message and marks the positions it answers, rejecting
+ * anything but a single entry with fresh, in-range `indices`.
+ */
+function decodeStreamedThumbnail(
+   raw: ArrayBuffer | Uint8Array,
+   answered: boolean[],
+): StreamedThumbnailInfo {
+   const entries = decodeEnvelope<Omit<StreamedThumbnailInfo, 'data'>>(raw);
+   const [thumbnail] = entries;
+   if (entries.length !== 1 || !Array.isArray(thumbnail.indices) ||
+       thumbnail.indices.length === 0) {
+      throw new TypeError('Thumbnail stream message must hold one entry with indices.');
+   }
+   for (const index of thumbnail.indices) {
+      if (!Number.isSafeInteger(index) || index < 0 || index >= answered.length ||
+          answered[index]) {
+         throw new TypeError(`Thumbnail stream sent an invalid index: ${String(index)}.`);
+      }
+      answered[index] = true;
+   }
+   return thumbnail;
 }
 
 /**

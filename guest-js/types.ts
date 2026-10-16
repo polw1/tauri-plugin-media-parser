@@ -114,6 +114,21 @@ export interface ThumbnailsOptions extends MetadataOptions {
    maxHeight?: number;
 }
 
+/** One thumbnail delivered by {@link streamThumbnails}. */
+export type StreamedThumbnailInfo = ThumbnailInfo & {
+   /** Positions in `timestamps` that this thumbnail answers, ascending. */
+   indices: number[];
+};
+
+/** Options for {@link streamThumbnails}. */
+export interface StreamThumbnailsOptions extends ThumbnailsOptions {
+   /**
+    * Called synchronously once per decoded thumbnail, in file order. Use
+    * `indices` to place each one; a thrown error rejects the stream.
+    */
+   onThumbnail(thumbnail: StreamedThumbnailInfo): void;
+}
+
 /** One timed subtitle cue decoded from the binary IPC response. */
 export interface SubtitleCueInfo {
    cueId: number;

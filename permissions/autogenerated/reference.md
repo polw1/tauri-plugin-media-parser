@@ -8,6 +8,7 @@ Default permissions for the media-parser plugin
 - `allow-get-tracks`
 - `allow-get-cover`
 - `allow-get-thumbnails`
+- `allow-stream-thumbnails`
 - `allow-get-subtitles`
 
 ## Permission Table
@@ -145,6 +146,32 @@ Enables the get_tracks command without any pre-configured scope.
 <td>
 
 Denies the get_tracks command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`media-parser:allow-stream-thumbnails`
+
+</td>
+<td>
+
+Enables the stream_thumbnails command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`media-parser:deny-stream-thumbnails`
+
+</td>
+<td>
+
+Denies the stream_thumbnails command without any pre-configured scope.
 
 </td>
 </tr>

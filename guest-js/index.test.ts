@@ -3,6 +3,7 @@ import {
    getMetadata,
    getSubtitles,
    getThumbnails,
+   streamThumbnails,
    type CoverInfo,
    type Metadata,
    type SubtitleCueInfo,
@@ -32,6 +33,17 @@ expectType<Promise<ThumbnailInfo[]>>(
       maxWidth: 640,
       maxHeight: 360,
       headers: { Authorization: 'Bearer token' },
+   }),
+);
+
+expectType<Promise<void>>(
+   streamThumbnails('/video.mp4', {
+      timestamps: [0, 250],
+      accurate: true,
+      onThumbnail: (thumbnail) => {
+         expectType<number[]>(thumbnail.indices);
+         expectType<Uint8Array>(thumbnail.data);
+      },
    }),
 );
 

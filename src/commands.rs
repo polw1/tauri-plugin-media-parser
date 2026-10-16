@@ -1,8 +1,13 @@
 use std::collections::HashMap;
 #[cfg(native_h264_backend)]
-use std::sync::Arc;
+use std::sync::{
+   Arc,
+   atomic::{AtomicU32, Ordering},
+};
 #[cfg(native_h264_backend)]
 use std::time::Duration;
+#[cfg(native_h264_backend)]
+use tauri::ipc::{Channel, InvokeResponseBody};
 use tauri::{State, command};
 
 use media_parser::{BaseTrackMeta, MediaParser, Metadata, TrackType};
@@ -15,7 +20,9 @@ use media_parser::{
 use crate::Result;
 use crate::envelope::cover_envelope;
 #[cfg(native_h264_backend)]
-use crate::envelope::{encode_thumbnail_envelope, run_envelope_task};
+use crate::envelope::{
+   encode_streamed_thumbnail_envelope, encode_thumbnail_envelope, run_envelope_task,
+};
 #[cfg(native_h264_backend)]
 use crate::session_cache::SessionPool;
 use crate::source::{DefaultHeaders, open_reader};
@@ -206,6 +213,73 @@ pub(crate) async fn get_thumbnails(
    })
    .await?;
    Ok(tauri::ipc::Response::new(envelope))
+}
+
+/// Streams thumbnails through `on_thumbnail` as each one is decoded, then
+/// resolves with how many messages were sent.
+///
+/// Each message is a single-entry thumbnail envelope whose entry adds
+/// `indices`, the positions in `timestamps` it answers. All messages together
+/// stay within the same output budget as `get_thumbnails`.
+#[cfg(native_h264_backend)]
+#[command]
+#[allow(clippy::too_many_arguments)] // Tauri exposes each command field as a top-level IPC argument.
+pub(crate) async fn stream_thumbnails(
+   source: String,
+   timestamps: Vec<u64>,
+   track_id: Option<u32>,
+   accurate: Option<bool>,
+   quality: Option<u8>,
+   max_width: Option<u32>,
+   max_height: Option<u32>,
+   headers: Option<HashMap<String, String>>,
+   on_thumbnail: Channel,
+   sessions: State<'_, ThumbnailSessions>,
+   defaults: State<'_, DefaultHeaders>,
+) -> Result<u32> {
+   let headers = defaults.merge(&source, headers)?;
+   let (unique_timestamps, order) = prepare_thumbnail_timestamps(&timestamps)?;
+   let options = thumbnail_options(quality, max_width, max_height)?;
+   #[cfg(target_os = "android")]
+   sessions.android_jpeg.wait().await?;
+   if unique_timestamps.is_empty() {
+      return Ok(0);
+   }
+   let session = thumbnail_session(&sessions, &source, &headers, track_id.unwrap_or(0)).await?;
+
+   let mut positions = vec![Vec::new(); unique_timestamps.len()];
+   for (position, &unique) in order.iter().enumerate() {
+      positions[unique].push(position);
+   }
+   let sent = Arc::new(AtomicU32::new(0));
+   let sent_by_callback = Arc::clone(&sent);
+   let mut remaining = MAX_THUMBNAIL_OUTPUT_BYTES;
+   let on_frame = move |unique_indices: &[usize], frame: Frame| {
+      let mut indices = unique_indices
+         .iter()
+         .flat_map(|&unique| positions[unique].iter().copied())
+         .collect::<Vec<_>>();
+      indices.sort_unstable();
+      let envelope = encode_streamed_thumbnail_envelope(&frame, &indices, &mut remaining)
+         .map_err(|error| media_parser::MediaParserError::OutputLimit(error.to_string()))?;
+      on_thumbnail
+         .send(InvokeResponseBody::Raw(envelope))
+         .map_err(|error| media_parser::MediaParserError::Io(std::io::Error::other(error)))?;
+      sent_by_callback.fetch_add(1, Ordering::Relaxed);
+      Ok(())
+   };
+   let index = &session.index;
+   let reader = session.reader.as_ref();
+   if accurate.unwrap_or(false) {
+      index
+         .frames_each(reader, &unique_timestamps, options, on_frame)
+         .await?;
+   } else {
+      index
+         .keyframes_each(reader, &unique_timestamps, options, on_frame)
+         .await?;
+   }
+   Ok(sent.load(Ordering::Relaxed))
 }
 
 /// Validates the caller-supplied JPEG quality, if any, against the encoder's
@@ -805,6 +879,40 @@ pub(crate) async fn get_thumbnails(
 ) -> Result<tauri::ipc::Response> {
    let _ = (
       source, timestamps, track_id, accurate, quality, max_width, max_height, headers, sessions,
+      defaults,
+   );
+   Err(unsupported_thumbnail_error())
+}
+
+/// Reports the streaming thumbnail command as unavailable, like
+/// `get_thumbnails`, until this platform has a native H.264 backend.
+#[cfg(not(native_h264_backend))]
+#[command]
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn stream_thumbnails(
+   source: String,
+   timestamps: Vec<u64>,
+   track_id: Option<u32>,
+   accurate: Option<bool>,
+   quality: Option<u8>,
+   max_width: Option<u32>,
+   max_height: Option<u32>,
+   headers: Option<HashMap<String, String>>,
+   on_thumbnail: tauri::ipc::Channel,
+   sessions: State<'_, ThumbnailSessions>,
+   defaults: State<'_, DefaultHeaders>,
+) -> Result<u32> {
+   let _ = (
+      source,
+      timestamps,
+      track_id,
+      accurate,
+      quality,
+      max_width,
+      max_height,
+      headers,
+      on_thumbnail,
+      sessions,
       defaults,
    );
    Err(unsupported_thumbnail_error())

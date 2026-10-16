@@ -3,6 +3,7 @@ const COMMANDS: &[&str] = &[
    "get_tracks",
    "get_cover",
    "get_thumbnails",
+   "stream_thumbnails",
    "get_subtitles",
 ];
 

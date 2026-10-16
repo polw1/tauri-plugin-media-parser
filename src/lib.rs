@@ -176,6 +176,7 @@ impl Builder {
             commands::get_tracks,
             commands::get_cover,
             commands::get_thumbnails,
+            commands::stream_thumbnails,
             subtitle_command::get_subtitles
          ])
          .build()

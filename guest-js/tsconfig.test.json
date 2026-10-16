@@ -19,6 +19,7 @@
       "subtitle-options.test.ts",
       "index.ts",
       "thumbnail-options.ts",
-      "thumbnail-options.test.ts"
+      "thumbnail-options.test.ts",
+      "thumbnail-stream.test.ts"
    ]
 }

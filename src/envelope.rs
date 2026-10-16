@@ -76,6 +76,15 @@ struct ThumbnailEnvelopeEntry {
    length: usize,
 }
 
+/// One streamed thumbnail plus the request positions it answers.
+#[derive(Serialize)]
+#[cfg(any(test, native_h264_backend))]
+struct StreamedThumbnailEnvelopeEntry<'a> {
+   #[serde(flatten)]
+   thumbnail: ThumbnailEnvelopeEntry,
+   indices: &'a [usize],
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct SubtitleEnvelopeEntry<'a> {
@@ -185,6 +194,31 @@ pub(crate) fn encode_thumbnail_envelope(
       payloads.push(frame.data.as_slice());
    }
    encode_binary_envelope(entries, &payloads, max_output_bytes)
+}
+
+/// Encodes one streamed thumbnail as a single-entry envelope whose entry also
+/// carries `indices`, the request positions it answers, and charges its size
+/// to `remaining`, the stream's shared output budget. A rejected envelope
+/// leaves `remaining` unchanged.
+#[cfg(any(test, native_h264_backend))]
+pub(crate) fn encode_streamed_thumbnail_envelope(
+   frame: &Frame,
+   indices: &[usize],
+   remaining: &mut usize,
+) -> Result<Vec<u8>> {
+   if frame.format != PixelFormat::Jpeg {
+      return Err(crate::Error::Custom(format!(
+         "thumbnail must be JPEG, got {}",
+         frame.format.label()
+      )));
+   }
+   let entry = StreamedThumbnailEnvelopeEntry {
+      thumbnail: thumbnail_envelope_entry(frame, 0),
+      indices,
+   };
+   let envelope = encode_binary_envelope(vec![entry], &[frame.data.as_slice()], *remaining)?;
+   *remaining -= envelope.len();
+   Ok(envelope)
 }
 
 /// Encodes subtitle metadata and deduplicated UTF-8 cue text into one bounded
@@ -692,6 +726,55 @@ mod tests {
          .expect("the exact complete-envelope limit should be accepted");
 
       assert_eq!(capped, uncapped);
+   }
+
+   #[test]
+   fn streamed_thumbnail_is_one_entry_with_its_indices_and_bytes() {
+      let frame = &test_frames()[0];
+      let mut unbounded = usize::MAX;
+      let envelope = encode_streamed_thumbnail_envelope(frame, &[1, 3], &mut unbounded)
+         .expect("envelope should encode");
+      let (header, payload) = envelope_parts(&envelope);
+
+      assert_eq!(
+         header,
+         serde_json::json!({
+            "version": 1,
+            "entries": [{
+               "trackId": 3,
+               "width": 320,
+               "height": 180,
+               "timestampSec": 0.25,
+               "format": "jpeg",
+               "mimeType": "image/jpeg",
+               "offset": 0,
+               "length": 3,
+               "indices": [1, 3],
+            }],
+         })
+      );
+      assert_eq!(payload, frame.data.as_slice());
+   }
+
+   #[test]
+   fn streamed_thumbnails_share_one_cumulative_budget() {
+      let frame = &test_frames()[0];
+      let mut unbounded = usize::MAX;
+      let size = encode_streamed_thumbnail_envelope(frame, &[0], &mut unbounded)
+         .expect("test envelope should encode")
+         .len();
+
+      let mut exact = 2 * size;
+      encode_streamed_thumbnail_envelope(frame, &[0], &mut exact).expect("first fits");
+      encode_streamed_thumbnail_envelope(frame, &[1], &mut exact).expect("second fits exactly");
+      assert_eq!(exact, 0);
+
+      let mut short = 2 * size - 1;
+      encode_streamed_thumbnail_envelope(frame, &[0], &mut short).expect("first fits");
+      assert_eq!(short, size - 1);
+      encode_streamed_thumbnail_envelope(frame, &[1], &mut short)
+         .expect_err("the second exceeds what the first left");
+      assert_eq!(short, size - 1, "a rejected envelope must not be charged");
    }
 
    #[test]
