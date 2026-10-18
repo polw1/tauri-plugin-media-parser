@@ -121,6 +121,18 @@ test('rejects when the backend reports more messages than positions answered', a
    await assert.rejects(stream, /every timestamp exactly once/);
 });
 
+test('rejects with the backend error when invoke rejects', async () => {
+   const error = new Error('backend failed');
+   mockIpc(Promise.reject(error));
+
+   const stream = streamThumbnails('/video.mp4', {
+      timestamps: [0, 500],
+      onThumbnail: () => assert.fail(),
+   });
+
+   await assert.rejects(stream, (reason) => reason === error);
+});
+
 test('rejects on a bad message while the command is still running', async () => {
    const ipc = mockIpc(new Promise<number>(() => undefined));
 

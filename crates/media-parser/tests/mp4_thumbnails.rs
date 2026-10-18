@@ -403,7 +403,26 @@ fn stream_into(
 }
 
 pub(crate) async fn test_mp4_streamed_thumbnails_match_the_collected_ones_case() {
-   let path = fixtures_dir().join("multitrack_video.mp4");
+   // Every timestamp falls back to the single leading keyframe.
+   assert_streamed_thumbnails_match_the_collected_ones(
+      "multitrack_video.mp4",
+      vec![vec![0, 1, 2, 3]],
+   )
+   .await;
+   // No `stss`: every sample is its own GOP, so the decoded frames share the
+   // same frame token and only their GOP tells the answers apart.
+   assert_streamed_thumbnails_match_the_collected_ones(
+      "bt709_full_range.mp4",
+      vec![vec![1, 3], vec![2], vec![0]],
+   )
+   .await;
+}
+
+async fn assert_streamed_thumbnails_match_the_collected_ones(
+   fixture: &str,
+   keyframe_calls: Vec<Vec<usize>>,
+) {
+   let path = fixtures_dir().join(fixture);
    let reader = FileStreamReader::new(&path).expect("open MP4 fixture");
    let index = ThumbnailIndex::read(&reader, 0)
       .await
@@ -450,8 +469,7 @@ pub(crate) async fn test_mp4_streamed_thumbnails_match_the_collected_ones_case()
       )
       .await
       .expect("stream keyframes");
-   // Every timestamp falls back to the single leading keyframe.
-   assert_eq!(streamed.lock().unwrap().calls, vec![vec![0, 1, 2, 3]]);
+   assert_eq!(streamed.lock().unwrap().calls, keyframe_calls);
    assert_eq!(streamed.lock().unwrap().frames(), expected);
 }
 
