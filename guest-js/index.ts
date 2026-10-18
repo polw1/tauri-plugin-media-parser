@@ -166,6 +166,11 @@ export async function getThumbnails(
  * If the webview drops a channel message (for example, when the window closes
  * mid-stream), the promise can stay pending: Tauri does not report that loss.
  *
+ * Rejecting stops delivery to `onThumbnail` but does not cancel native
+ * extraction, and closing the webview does not either: the backend keeps
+ * decoding until it finishes or hits another error, holding one of the two
+ * extraction slots meanwhile.
+ *
  * @param source - Absolute path to a local file or URL of a remote media file
  * @param options - The {@link getThumbnails} options plus `onThumbnail`
  * @throws TypeError for the same invalid options as {@link getThumbnails}
