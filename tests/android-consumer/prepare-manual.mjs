@@ -7,6 +7,8 @@ execFileSync('npm', ['run', 'build'], {
 });
 const built = readFileSync(new URL('../../dist-js/index.js', import.meta.url), 'utf8');
 const coreImport = "import { invoke, Channel } from '@tauri-apps/api/core';";
-if (!built.includes(coreImport)) throw new Error('Inspect the generated Tauri import before bundling the manual app.');
+if (!built.includes(coreImport)) {
+  throw new Error('Inspect the generated Tauri import before bundling the manual app.');
+}
 writeFileSync(new URL('./ui/manual-api.js', import.meta.url),
   built.replace(coreImport, 'const { invoke, Channel } = window.__TAURI__.core;'));
