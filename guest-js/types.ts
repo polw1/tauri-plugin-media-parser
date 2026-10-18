@@ -124,9 +124,11 @@ export type StreamedThumbnailInfo = ThumbnailInfo & {
 export interface StreamThumbnailsOptions extends ThumbnailsOptions {
    /**
     * Called synchronously once per decoded thumbnail, in file order. Use
-    * `indices` to place each one; a thrown error rejects the stream.
+    * `indices` to place each one; a thrown error rejects the stream. The
+    * return type is `undefined` so that an `async` callback does not compile:
+    * its returned promise would be discarded.
     */
-   onThumbnail(thumbnail: StreamedThumbnailInfo): void;
+   onThumbnail(thumbnail: StreamedThumbnailInfo): undefined;
 }
 
 /** One timed subtitle cue decoded from the binary IPC response. */

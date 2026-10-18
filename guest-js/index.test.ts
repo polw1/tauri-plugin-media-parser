@@ -47,6 +47,12 @@ expectType<Promise<void>>(
    }),
 );
 
+void streamThumbnails('/video.mp4', {
+   timestamps: [0],
+   // @ts-expect-error The stream would discard the returned promise.
+   onThumbnail: async () => {},
+});
+
 declare const cover: CoverInfo;
 expectType<Uint8Array>(cover.data);
 

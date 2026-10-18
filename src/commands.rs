@@ -652,6 +652,54 @@ mod tests {
 
    #[tokio::test]
    #[cfg(native_h264_backend)]
+   async fn stream_thumbnails_fans_out_positions_and_counts_messages() {
+      use std::sync::Mutex;
+      use tauri::{
+         Manager,
+         test::{mock_builder, mock_context, noop_assets},
+      };
+      let app = mock_builder()
+         .plugin(crate::init())
+         .build(mock_context(noop_assets()))
+         .expect("plugin initializes");
+      let delivered = Arc::new(Mutex::new(Vec::new()));
+      let captured = Arc::clone(&delivered);
+      let channel = Channel::new(move |body| {
+         let InvokeResponseBody::Raw(envelope) = body else {
+            panic!("thumbnails must stream as raw envelopes")
+         };
+         let header_len = u32::from_le_bytes(envelope[..4].try_into().unwrap()) as usize;
+         let header: serde_json::Value =
+            serde_json::from_slice(&envelope[4..4 + header_len]).expect("header should be JSON");
+         let indices =
+            serde_json::from_value::<Vec<usize>>(header["entries"][0]["indices"].clone())
+               .expect("entry should carry indices");
+         captured.lock().unwrap().push(indices);
+         Ok(())
+      });
+
+      let sent = stream_thumbnails(
+         video_fixture_source(),
+         vec![0, 200, 0],
+         None,
+         Some(true),
+         None,
+         None,
+         None,
+         None,
+         channel,
+         app.state(),
+         app.state(),
+      )
+      .await
+      .expect("accurate thumbnails should stream");
+
+      assert_eq!(*delivered.lock().unwrap(), vec![vec![0, 2], vec![1]]);
+      assert_eq!(sent, 2);
+   }
+
+   #[tokio::test]
+   #[cfg(native_h264_backend)]
    async fn fast_thumbnail_mode_returns_the_actual_keyframe_timestamp() {
       let sessions = ThumbnailSessions::default();
       let frames = thumbnail_frames(

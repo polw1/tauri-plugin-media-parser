@@ -57,7 +57,9 @@ test('resolves only after late, reordered messages answer every position', async
 
    const stream = streamThumbnails('/video.mp4', {
       timestamps: [0, 500, 0],
-      onThumbnail: (thumbnail: StreamedThumbnailInfo) => seen.push(thumbnail.indices),
+      onThumbnail: (thumbnail: StreamedThumbnailInfo) => {
+         seen.push(thumbnail.indices);
+      },
    }).then(() => {
       resolved = true;
    });
