@@ -251,7 +251,12 @@ export async function streamThumbnails(
       maxHeight: options.maxHeight,
       headers: options.headers,
       onThumbnail: channel,
-   }).catch(fail);
+   }).catch((error: unknown) => {
+      // shortcut: pre-handler failures have no channel end in Tauri 2.12.0; recheck on upgrade.
+      // @ts-expect-error Tauri exposes cleanupCallback at runtime but declares it private.
+      channel.cleanupCallback();
+      fail(error);
+   });
    return done;
 }
 

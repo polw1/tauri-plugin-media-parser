@@ -269,13 +269,7 @@ impl ThumbnailIndex {
       options: ThumbnailOptions,
       reserve_error: &'static str,
    ) -> Result<Vec<Frame>> {
-      let permit = Arc::new(
-         Arc::clone(&EXTRACTION_PERMITS)
-            .acquire_owned()
-            .await
-            .expect("the thumbnail-extraction semaphore is never closed"),
-      );
-      let jobs = load_decode_jobs(reader, plans, &self.tables, reserve_error).await?;
+      let (permit, jobs) = load_decode_jobs(reader, plans, &self.tables, reserve_error).await?;
       let images = run_decode_jobs(
          Arc::clone(&permit),
          jobs,
@@ -298,13 +292,7 @@ impl ThumbnailIndex {
       stop: Arc<AtomicBool>,
       mut on_frame: impl FnMut(&[usize], Frame) -> Result<()> + Send + 'static,
    ) -> Result<()> {
-      let permit = Arc::new(
-         Arc::clone(&EXTRACTION_PERMITS)
-            .acquire_owned()
-            .await
-            .expect("the thumbnail-extraction semaphore is never closed"),
-      );
-      let jobs = load_decode_jobs(reader, plans, &self.tables, reserve_error).await?;
+      let (permit, jobs) = load_decode_jobs(reader, plans, &self.tables, reserve_error).await?;
       let mut answers = HashMap::<(Gop, FrameToken), (u64, Vec<usize>)>::new();
       for (index, target) in targets.iter().enumerate() {
          answers
@@ -444,12 +432,19 @@ impl ThumbnailIndex {
    }
 }
 
+/// Returns the permit with the jobs so callers retain admission through decode and assembly.
 async fn load_decode_jobs(
    reader: &dyn StreamReader,
    plans: Vec<JobPlan>,
    tables: &VideoSampleTables,
    reserve_error: &'static str,
-) -> Result<Vec<DecodeJob>> {
+) -> Result<(Arc<OwnedSemaphorePermit>, Vec<DecodeJob>)> {
+   let permit = Arc::new(
+      Arc::clone(&EXTRACTION_PERMITS)
+         .acquire_owned()
+         .await
+         .expect("the thumbnail-extraction semaphore is never closed"),
+   );
    let wanted_samples = samples_for_gops(plans.iter().map(|plan| plan.gop))?;
    let mut sample_read_budget = SampleReadBudget::default();
    let mut samples = read_samples_coalesced(
@@ -489,7 +484,7 @@ async fn load_decode_jobs(
          wanted: plan.wanted,
       });
    }
-   Ok(jobs)
+   Ok((permit, jobs))
 }
 
 /// Native backends keep one compatible decoder alive across
@@ -1103,6 +1098,20 @@ mod tests {
       let times = [Duration::ZERO];
       let mut exact = Box::pin(index.frames(&reader, &times, ThumbnailOptions::default()));
       let mut keyframes = Box::pin(index.keyframes(&reader, &times, ThumbnailOptions::default()));
+      let mut exact_each = Box::pin(index.frames_each(
+         &reader,
+         &times,
+         ThumbnailOptions::default(),
+         Arc::new(AtomicBool::new(false)),
+         |_, _| panic!("a failing reader must not deliver frames"),
+      ));
+      let mut keyframes_each = Box::pin(index.keyframes_each(
+         &reader,
+         &times,
+         ThumbnailOptions::default(),
+         Arc::new(AtomicBool::new(false)),
+         |_, _| panic!("a failing reader must not deliver frames"),
+      ));
       assert!(
          tokio::time::timeout(Duration::from_millis(25), &mut exact)
             .await
@@ -1114,9 +1123,22 @@ mod tests {
             .is_err()
       );
       assert_eq!(reader.0.load(std::sync::atomic::Ordering::SeqCst), 0);
+      assert!(
+         tokio::time::timeout(Duration::from_millis(25), &mut exact_each)
+            .await
+            .is_err()
+      );
+      assert!(
+         tokio::time::timeout(Duration::from_millis(25), &mut keyframes_each)
+            .await
+            .is_err()
+      );
+      assert_eq!(reader.0.load(std::sync::atomic::Ordering::SeqCst), 0);
       drop(exact); // Cancellation while queued must not consume a permit later.
+      drop(exact_each);
       drop(held);
       assert!(keyframes.await.is_err());
+      assert!(keyframes_each.await.is_err());
       assert!(reader.0.load(std::sync::atomic::Ordering::SeqCst) > 0);
       let returned = tokio::time::timeout(
          Duration::from_secs(5),
