@@ -9,6 +9,7 @@ Default permissions for the media-parser plugin
 - `allow-get-cover`
 - `allow-get-thumbnails`
 - `allow-stream-thumbnails`
+- `allow-cancel-thumbnail-stream`
 - `allow-get-subtitles`
 
 ## Permission Table
@@ -19,6 +20,32 @@ Default permissions for the media-parser plugin
 <th>Description</th>
 </tr>
 
+
+<tr>
+<td>
+
+`media-parser:allow-cancel-thumbnail-stream`
+
+</td>
+<td>
+
+Enables the cancel_thumbnail_stream command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`media-parser:deny-cancel-thumbnail-stream`
+
+</td>
+<td>
+
+Denies the cancel_thumbnail_stream command without any pre-configured scope.
+
+</td>
+</tr>
 
 <tr>
 <td>

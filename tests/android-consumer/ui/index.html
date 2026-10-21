@@ -36,11 +36,21 @@ async function checkStream(source) {
   const answered = timestamps.map(() => false);
   let received = 0;
   const jpegs = [];
+  let sent;
   let allReceived;
   let failStream;
   const done = new Promise((resolve, reject) => { allReceived = resolve; failStream = reject; });
   const channel = new window.__TAURI__.core.Channel((raw) => {
     try {
+      if (!(raw instanceof ArrayBuffer) && !Array.isArray(raw)) {
+        // The terminal: `{ done: <count> }` or `{ error: <message> }`.
+        if (raw && 'error' in raw) {
+          throw new Error(raw.error);
+        }
+        sent = raw.done;
+        allReceived();
+        return;
+      }
       const bytes = new Uint8Array(raw);
       const size = new DataView(bytes.buffer).getUint32(0, true);
       const header = JSON.parse(new TextDecoder().decode(bytes.subarray(4, 4 + size)));
@@ -57,26 +67,17 @@ async function checkStream(source) {
       }
       jpegs.push(new Blob([jpeg], {type: 'image/jpeg'}));
       received += 1;
-      if (received === sent) {
-        allReceived();
-      }
     } catch (error) {
       failStream(error);
     }
   });
-  let sent;
   await Promise.all([
     invoke('plugin:media-parser|stream_thumbnails', {
       source, timestamps, accurate: true, maxWidth: 320, maxHeight: 180, onThumbnail: channel
-    }).then((count) => {
-      sent = count;
-      if (received === sent) {
-        allReceived();
-      }
     }),
     done,
   ]);
-  if (sent !== 2 || answered.includes(false)) {
+  if (sent !== 2 || received !== sent || answered.includes(false)) {
     throw new Error('stream sent ' + sent + ' messages, answered ' + answered);
   }
   for (const jpeg of jpegs) {

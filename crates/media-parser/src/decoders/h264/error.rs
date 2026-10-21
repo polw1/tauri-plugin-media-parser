@@ -16,6 +16,9 @@ pub(crate) enum DecodeError {
    OutputLimit(String),
    #[error("{0}")]
    ResourceLimit(String),
+   /// The caller's stop flag was set; never retried with another decoder.
+   #[error("decoding was cancelled")]
+   Cancelled,
 }
 
 impl From<crate::encoders::jpeg::JpegError> for DecodeError {

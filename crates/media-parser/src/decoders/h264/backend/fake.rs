@@ -19,7 +19,6 @@ impl FakeDecoderProbe {
       self.decode_calls.load(Ordering::Relaxed)
    }
 
-   #[cfg(test)]
    pub(crate) fn drain_calls(&self) -> usize {
       self.drain_calls.load(Ordering::Relaxed)
    }
@@ -75,6 +74,12 @@ impl FakeDecoder {
          emit_on_decode: true,
          probe: Some(probe),
       }
+   }
+
+   /// Counts calls on `probe` while keeping the configured emissions.
+   pub(crate) fn with_probe(mut self, probe: Arc<FakeDecoderProbe>) -> Self {
+      self.probe = Some(probe);
+      self
    }
 
    fn emit(&self, tokens: &[FrameToken], sink: &mut FrameSink<'_>) -> Result<(), DecodeError> {

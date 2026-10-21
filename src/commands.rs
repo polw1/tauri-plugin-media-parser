@@ -2,12 +2,14 @@ use std::collections::HashMap;
 #[cfg(native_h264_backend)]
 use std::sync::{
    Arc,
-   atomic::{AtomicU32, Ordering},
+   atomic::{AtomicBool, AtomicU32, Ordering},
 };
 #[cfg(native_h264_backend)]
 use std::time::Duration;
 #[cfg(native_h264_backend)]
 use tauri::ipc::{Channel, InvokeResponseBody};
+#[cfg(native_h264_backend)]
+use tauri::{Manager, Runtime, Webview};
 use tauri::{State, command};
 
 use media_parser::{BaseTrackMeta, MediaParser, Metadata, TrackType};
@@ -30,6 +32,8 @@ use crate::source::{DefaultHeaders, open_reader};
 use crate::source::{
    MediaSourceKey, MergedHeaders, SESSION_REAPER_INTERVAL, session_expiration, source_key,
 };
+#[cfg(native_h264_backend)]
+use crate::thumbnail_streams::{ThumbnailStreams, terminal_message};
 
 #[cfg(native_h264_backend)]
 const MAX_THUMBNAIL_SESSIONS: usize = 8;
@@ -215,16 +219,20 @@ pub(crate) async fn get_thumbnails(
    Ok(tauri::ipc::Response::new(envelope))
 }
 
-/// Streams thumbnails through `on_thumbnail` as each one is decoded, then
-/// resolves with how many messages were sent.
+/// Starts streaming thumbnails through `on_thumbnail` and returns once the
+/// request is validated and scheduled.
 ///
-/// Each message is a single-entry thumbnail envelope whose entry adds
-/// `indices`, the positions in `timestamps` it answers. All messages together
-/// stay within the same output budget as `get_thumbnails`.
+/// Each thumbnail message is a single-entry thumbnail envelope whose entry
+/// adds `indices`, the positions in `timestamps` it answers. All of them
+/// together stay within the same output budget as `get_thumbnails`. The last
+/// message is JSON: `{ "done": <thumbnails sent> }`, or `{ "error": <message> }`
+/// with the error a rejected invoke would carry. `cancel_thumbnail_stream`
+/// with the channel id stops the stream without a last message.
 #[cfg(native_h264_backend)]
 #[command]
 #[allow(clippy::too_many_arguments)] // Tauri exposes each command field as a top-level IPC argument.
-pub(crate) async fn stream_thumbnails(
+pub(crate) fn stream_thumbnails<R: Runtime>(
+   webview: Webview<R>,
    source: String,
    timestamps: Vec<u64>,
    track_id: Option<u32>,
@@ -234,27 +242,93 @@ pub(crate) async fn stream_thumbnails(
    max_height: Option<u32>,
    headers: Option<HashMap<String, String>>,
    on_thumbnail: Channel,
-   sessions: State<'_, ThumbnailSessions>,
+   streams: State<'_, ThumbnailStreams>,
    defaults: State<'_, DefaultHeaders>,
-) -> Result<u32> {
+) -> Result<()> {
    let headers = defaults.merge(&source, headers)?;
    let (unique_timestamps, order) = prepare_thumbnail_timestamps(&timestamps)?;
    let options = thumbnail_options(quality, max_width, max_height)?;
+   let request = StreamRequest {
+      source,
+      unique_timestamps,
+      order,
+      track_id: track_id.unwrap_or(0),
+      accurate: accurate.unwrap_or(false),
+      headers,
+      options,
+   };
+   let app = webview.app_handle().clone();
+   streams.spawn(
+      webview.label(),
+      webview.window().label(),
+      on_thumbnail.id(),
+      move |stop| async move {
+         let sessions = app.state::<ThumbnailSessions>();
+         let result = run_thumbnail_stream(&sessions, request, &on_thumbnail, stop).await;
+         // The page may be gone; nothing is left to tell.
+         let _ = on_thumbnail.send(terminal_message(result));
+      },
+   );
+   Ok(())
+}
+
+/// Stops a stream started by the calling webview with this channel id. An
+/// unknown or finished id is not an error.
+#[cfg(native_h264_backend)]
+#[command]
+pub(crate) fn cancel_thumbnail_stream<R: Runtime>(
+   webview: Webview<R>,
+   channel_id: u32,
+   streams: State<'_, ThumbnailStreams>,
+) {
+   streams.cancel(webview.label(), channel_id);
+}
+
+#[cfg(native_h264_backend)]
+struct StreamRequest {
+   source: String,
+   unique_timestamps: Vec<Duration>,
+   order: Vec<usize>,
+   track_id: u32,
+   accurate: bool,
+   headers: MergedHeaders,
+   options: ThumbnailOptions,
+}
+
+/// Sends each thumbnail as it is decoded and returns how many were sent.
+#[cfg(native_h264_backend)]
+async fn run_thumbnail_stream(
+   sessions: &ThumbnailSessions,
+   request: StreamRequest,
+   on_thumbnail: &Channel,
+   stop: Arc<AtomicBool>,
+) -> Result<u32> {
    #[cfg(target_os = "android")]
    sessions.android_jpeg.wait().await?;
-   if unique_timestamps.is_empty() {
+   if request.unique_timestamps.is_empty() {
       return Ok(0);
    }
-   let session = thumbnail_session(&sessions, &source, &headers, track_id.unwrap_or(0)).await?;
+   let session = thumbnail_session(
+      sessions,
+      &request.source,
+      &request.headers,
+      request.track_id,
+   )
+   .await?;
 
-   let mut positions = vec![Vec::new(); unique_timestamps.len()];
-   for (position, &unique) in order.iter().enumerate() {
+   let mut positions = vec![Vec::new(); request.unique_timestamps.len()];
+   for (position, &unique) in request.order.iter().enumerate() {
       positions[unique].push(position);
    }
    let sent = Arc::new(AtomicU32::new(0));
    let sent_by_callback = Arc::clone(&sent);
+   let stopped = Arc::clone(&stop);
+   let on_thumbnail = on_thumbnail.clone();
    let mut remaining = MAX_THUMBNAIL_OUTPUT_BYTES;
    let on_frame = move |unique_indices: &[usize], frame: Frame| {
+      if stopped.load(Ordering::Relaxed) {
+         return Err(media_parser::MediaParserError::Cancelled);
+      }
       let mut indices = unique_indices
          .iter()
          .flat_map(|&unique| positions[unique].iter().copied())
@@ -270,13 +344,14 @@ pub(crate) async fn stream_thumbnails(
    };
    let index = &session.index;
    let reader = session.reader.as_ref();
-   if accurate.unwrap_or(false) {
+   let timestamps = &request.unique_timestamps;
+   if request.accurate {
       index
-         .frames_each(reader, &unique_timestamps, options, on_frame)
+         .frames_each(reader, timestamps, request.options, stop, on_frame)
          .await?;
    } else {
       index
-         .keyframes_each(reader, &unique_timestamps, options, on_frame)
+         .keyframes_each(reader, timestamps, request.options, stop, on_frame)
          .await?;
    }
    Ok(sent.load(Ordering::Relaxed))
@@ -650,10 +725,14 @@ mod tests {
       assert_eq!(frames[0].timestamp, Duration::from_millis(100));
    }
 
-   #[tokio::test]
+   /// Starts `stream_thumbnails` from a mock webview and collects the
+   /// `indices` of each thumbnail until the JSON terminal arrives.
    #[cfg(native_h264_backend)]
-   async fn stream_thumbnails_fans_out_positions_and_counts_messages() {
-      use std::sync::Mutex;
+   fn stream_from_mock_webview(
+      source: String,
+      timestamps: Vec<u64>,
+   ) -> (Vec<Vec<usize>>, serde_json::Value) {
+      use std::sync::mpsc;
       use tauri::{
          Manager,
          test::{mock_builder, mock_context, noop_assets},
@@ -662,25 +741,19 @@ mod tests {
          .plugin(crate::init())
          .build(mock_context(noop_assets()))
          .expect("plugin initializes");
-      let delivered = Arc::new(Mutex::new(Vec::new()));
-      let captured = Arc::clone(&delivered);
+      let window = tauri::WebviewWindowBuilder::new(&app, "main", Default::default())
+         .build()
+         .expect("mock webview");
+      let (messages, received) = mpsc::channel();
       let channel = Channel::new(move |body| {
-         let InvokeResponseBody::Raw(envelope) = body else {
-            panic!("thumbnails must stream as raw envelopes")
-         };
-         let header_len = u32::from_le_bytes(envelope[..4].try_into().unwrap()) as usize;
-         let header: serde_json::Value =
-            serde_json::from_slice(&envelope[4..4 + header_len]).expect("header should be JSON");
-         let indices =
-            serde_json::from_value::<Vec<usize>>(header["entries"][0]["indices"].clone())
-               .expect("entry should carry indices");
-         captured.lock().unwrap().push(indices);
+         messages.send(body).unwrap();
          Ok(())
       });
 
-      let sent = stream_thumbnails(
-         video_fixture_source(),
-         vec![0, 200, 0],
+      stream_thumbnails(
+         window.as_ref().clone(),
+         source,
+         timestamps,
          None,
          Some(true),
          None,
@@ -691,11 +764,51 @@ mod tests {
          app.state(),
          app.state(),
       )
-      .await
-      .expect("accurate thumbnails should stream");
+      .expect("the request is valid");
 
-      assert_eq!(*delivered.lock().unwrap(), vec![vec![0, 2], vec![1]]);
-      assert_eq!(sent, 2);
+      let mut thumbnails = Vec::new();
+      loop {
+         match received
+            .recv_timeout(Duration::from_secs(30))
+            .expect("the stream should end with a terminal message")
+         {
+            InvokeResponseBody::Raw(envelope) => {
+               let header_len = u32::from_le_bytes(envelope[..4].try_into().unwrap()) as usize;
+               let header: serde_json::Value =
+                  serde_json::from_slice(&envelope[4..4 + header_len]).expect("header is JSON");
+               thumbnails.push(
+                  serde_json::from_value(header["entries"][0]["indices"].clone())
+                     .expect("entry should carry indices"),
+               );
+            }
+            InvokeResponseBody::Json(terminal) => {
+               return (thumbnails, serde_json::from_str(&terminal).unwrap());
+            }
+         }
+      }
+   }
+
+   #[test]
+   #[cfg(native_h264_backend)]
+   fn stream_thumbnails_fans_out_positions_and_ends_with_the_count() {
+      let (thumbnails, terminal) =
+         stream_from_mock_webview(video_fixture_source(), vec![0, 200, 0]);
+
+      assert_eq!(thumbnails, vec![vec![0, 2], vec![1]]);
+      assert_eq!(terminal, serde_json::json!({ "done": 2 }));
+   }
+
+   #[test]
+   #[cfg(native_h264_backend)]
+   fn stream_thumbnails_ends_with_the_error_a_rejected_invoke_would_carry() {
+      let (thumbnails, terminal) =
+         stream_from_mock_webview("/file/that/does/not/exist.mp4".into(), vec![0]);
+
+      assert!(thumbnails.is_empty());
+      let message = terminal["error"]
+         .as_str()
+         .expect("the terminal carries an error");
+      assert!(message.starts_with("Media parser error: "), "{message}");
    }
 
    #[tokio::test]
@@ -937,7 +1050,7 @@ pub(crate) async fn get_thumbnails(
 #[cfg(not(native_h264_backend))]
 #[command]
 #[allow(clippy::too_many_arguments)]
-pub(crate) async fn stream_thumbnails(
+pub(crate) fn stream_thumbnails(
    source: String,
    timestamps: Vec<u64>,
    track_id: Option<u32>,
@@ -949,7 +1062,7 @@ pub(crate) async fn stream_thumbnails(
    on_thumbnail: tauri::ipc::Channel,
    sessions: State<'_, ThumbnailSessions>,
    defaults: State<'_, DefaultHeaders>,
-) -> Result<u32> {
+) -> Result<()> {
    let _ = (
       source,
       timestamps,
@@ -964,4 +1077,11 @@ pub(crate) async fn stream_thumbnails(
       defaults,
    );
    Err(unsupported_thumbnail_error())
+}
+
+/// Nothing can be streaming without a native backend, so every id is unknown.
+#[cfg(not(native_h264_backend))]
+#[command]
+pub(crate) fn cancel_thumbnail_stream(channel_id: u32) {
+   let _ = channel_id;
 }

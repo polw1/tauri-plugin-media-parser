@@ -157,19 +157,23 @@ export async function getThumbnails(
  * all of them.
  *
  * Thumbnails arrive in file order; each carries `indices`, the positions in
- * `timestamps` it answers. The promise resolves once every position has been
- * answered. It rejects if the backend fails, a message is malformed, or
- * `onThumbnail` throws; thumbnails already delivered stay valid and no more
- * are delivered. Samples are still read before the first decode, so a remote
- * URL waits before the first thumbnail.
+ * `timestamps` it answers. The promise resolves once the backend reports the
+ * end of the stream and every position has been answered. It rejects if the
+ * backend fails, a message is malformed, or `onThumbnail` throws; thumbnails
+ * already delivered stay valid and no more are delivered. Samples are still
+ * read before the first decode, so a remote URL waits before the first
+ * thumbnail.
+ *
+ * A rejection also asks the backend to cancel the extraction, without waiting
+ * for it. Cancelling stops new decoder submissions and deliveries, but work
+ * already submitted to the native decoder can still finish, so there is no
+ * bound on how soon the extraction slot is released. Reloading the page or
+ * closing its window cancels the webview's streams on a best-effort basis: a
+ * stream request from the old page that reaches the backend after the reload
+ * or close is not cancelled.
  *
  * If the webview drops a channel message (for example, when the window closes
  * mid-stream), the promise can stay pending: Tauri does not report that loss.
- *
- * Rejecting stops delivery to `onThumbnail` but does not cancel native
- * extraction, and closing the webview does not either: the backend keeps
- * decoding until it finishes or hits another error, holding one of the two
- * extraction slots meanwhile.
  *
  * @param source - Absolute path to a local file or URL of a remote media file
  * @param options - The {@link getThumbnails} options plus `onThumbnail`
@@ -186,45 +190,58 @@ export async function streamThumbnails(
    const total = options.timestamps.length;
    const answered = new Array<boolean>(total).fill(false);
    let received = 0;
-   let expected: number | undefined;
-   let failed = false;
-   let settle!: () => void;
-   let fail!: (reason: unknown) => void;
+   let settled = false;
+   let resolveDone!: () => void;
+   let rejectDone!: (reason: unknown) => void;
    const done = new Promise<void>((resolve, reject) => {
-      settle = resolve;
-      fail = (reason) => {
-         failed = true;
-         reject(reason);
-      };
+      resolveDone = resolve;
+      rejectDone = reject;
    });
-   const finishWhenComplete = (): void => {
-      if (failed || expected === undefined || received < expected) {
+
+   const fail = (reason: unknown): void => {
+      if (settled) {
          return;
       }
-      if (received > expected || answered.includes(false)) {
+      settled = true;
+      rejectDone(reason);
+      // Not awaited, and its own failure is moot: the stream has already failed.
+      invoke('plugin:media-parser|cancel_thumbnail_stream', { channelId: channel.id })
+         .catch(() => undefined);
+   };
+   const finish = (terminal: StreamTerminal): void => {
+      if ('error' in terminal) {
+         // The same serialized error a rejected invoke would carry.
+         fail(terminal.error);
+         return;
+      }
+      if (terminal.done !== received || answered.includes(false)) {
          fail(new TypeError('Thumbnail stream did not answer every timestamp exactly once.'));
          return;
       }
-      settle();
+      settled = true;
+      resolveDone();
    };
 
    // The Channel handler must return normally, or later messages stall.
-   const channel = new Channel<ArrayBuffer>((raw) => {
-      if (failed) {
+   const channel = new Channel<unknown>((message) => {
+      if (settled) {
          return;
       }
       try {
-         const thumbnail = decodeStreamedThumbnail(raw, answered);
+         if (!isStreamBytes(message)) {
+            finish(readStreamTerminal(message));
+            return;
+         }
+         const thumbnail = decodeStreamedThumbnail(streamBytes(message), answered);
          received += 1;
          options.onThumbnail(thumbnail);
-         finishWhenComplete();
       } catch (error) {
          fail(error);
       }
    });
 
-   // Not awaited: a failed message must reject `done` while the command runs.
-   invoke<number>('plugin:media-parser|stream_thumbnails', {
+   // Not awaited: the stream settles through its terminal channel message.
+   invoke<null>('plugin:media-parser|stream_thumbnails', {
       source,
       timestamps: options.timestamps,
       trackId: options.trackId,
@@ -234,11 +251,36 @@ export async function streamThumbnails(
       maxHeight: options.maxHeight,
       headers: options.headers,
       onThumbnail: channel,
-   }).then((sent) => {
-      expected = sent;
-      finishWhenComplete();
-   }, fail);
+   }).catch(fail);
    return done;
+}
+
+type StreamTerminal = { done: number } | { error: string };
+
+/**
+ * A thumbnail envelope arrives as an `ArrayBuffer`, or as a byte array on IPC
+ * fallback paths; the stream's terminal arrives as JSON.
+ */
+function isStreamBytes(message: unknown): message is ArrayBuffer | Uint8Array | number[] {
+   return message instanceof ArrayBuffer || message instanceof Uint8Array || Array.isArray(message);
+}
+
+function streamBytes(message: ArrayBuffer | Uint8Array | number[]): ArrayBuffer | Uint8Array {
+   return Array.isArray(message) ? Uint8Array.from(message) : message;
+}
+
+/** Accepts only `{ done: <count> }` or `{ error: <message> }`. */
+function readStreamTerminal(message: unknown): StreamTerminal {
+   if (typeof message === 'object' && message !== null && Object.keys(message).length === 1) {
+      const terminal = message as Record<string, unknown>;
+      if (Number.isSafeInteger(terminal.done) && (terminal.done as number) >= 0) {
+         return { done: terminal.done as number };
+      }
+      if (typeof terminal.error === 'string') {
+         return { error: terminal.error };
+      }
+   }
+   throw new TypeError('Thumbnail stream sent an unexpected message.');
 }
 
 /**

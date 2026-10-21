@@ -16,7 +16,7 @@ use media_parser::{
    format::mp4::{ThumbnailIndex, ThumbnailOptions, ThumbnailSize, read_frames, read_keyframes},
 };
 use std::io::Write;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -444,6 +444,7 @@ async fn assert_streamed_thumbnails_match_the_collected_ones(
          &reader,
          &timestamps,
          ThumbnailOptions::default(),
+         Arc::new(AtomicBool::new(false)),
          stream_into(&streamed),
       )
       .await
@@ -465,6 +466,7 @@ async fn assert_streamed_thumbnails_match_the_collected_ones(
          &reader,
          &timestamps,
          ThumbnailOptions::default(),
+         Arc::new(AtomicBool::new(false)),
          stream_into(&streamed),
       )
       .await
@@ -491,6 +493,7 @@ pub(crate) async fn test_mp4_streamed_thumbnails_return_the_consumer_error_case(
             Duration::from_millis(200),
          ],
          ThumbnailOptions::default(),
+         Arc::new(AtomicBool::new(false)),
          move |_, _| {
             seen.fetch_add(1, Ordering::Relaxed);
             Err(std::io::Error::new(std::io::ErrorKind::BrokenPipe, "webview went away").into())
@@ -501,6 +504,58 @@ pub(crate) async fn test_mp4_streamed_thumbnails_return_the_consumer_error_case(
 
    assert!(
       matches!(&error, MediaParserError::Io(io) if io.kind() == std::io::ErrorKind::BrokenPipe),
+      "unexpected error: {error}"
+   );
+   assert_eq!(calls.load(Ordering::Relaxed), 1);
+}
+
+pub(crate) async fn test_mp4_streamed_thumbnails_stop_once_the_flag_is_set_case() {
+   let path = fixtures_dir().join("multitrack_video.mp4");
+   let reader = FileStreamReader::new(&path).expect("open MP4 fixture");
+   let index = ThumbnailIndex::read(&reader, 0)
+      .await
+      .expect("build thumbnail index");
+   let timestamps = [
+      Duration::ZERO,
+      Duration::from_millis(100),
+      Duration::from_millis(200),
+   ];
+
+   let error = index
+      .frames_each(
+         &reader,
+         &timestamps,
+         ThumbnailOptions::default(),
+         Arc::new(AtomicBool::new(true)),
+         |_, _| panic!("a request cancelled up front must not deliver frames"),
+      )
+      .await
+      .expect_err("a set flag cancels before decoding");
+   assert!(
+      matches!(error, MediaParserError::Cancelled),
+      "unexpected error: {error}"
+   );
+
+   // The first frame sets the flag, as a cancel command would mid-stream.
+   let stop = Arc::new(AtomicBool::new(false));
+   let calls = Arc::new(AtomicUsize::new(0));
+   let (flag, seen) = (Arc::clone(&stop), Arc::clone(&calls));
+   let error = index
+      .frames_each(
+         &reader,
+         &timestamps,
+         ThumbnailOptions::default(),
+         stop,
+         move |_, _| {
+            seen.fetch_add(1, Ordering::Relaxed);
+            flag.store(true, Ordering::Relaxed);
+            Ok(())
+         },
+      )
+      .await
+      .expect_err("the flag stops the stream");
+   assert!(
+      matches!(error, MediaParserError::Cancelled),
       "unexpected error: {error}"
    );
    assert_eq!(calls.load(Ordering::Relaxed), 1);
@@ -737,6 +792,12 @@ async fn test_mp4_streamed_thumbnails_match_the_collected_ones() {
 #[tokio::test]
 async fn test_mp4_streamed_thumbnails_return_the_consumer_error() {
    test_mp4_streamed_thumbnails_return_the_consumer_error_case().await;
+}
+
+#[cfg(not(target_os = "android"))]
+#[tokio::test]
+async fn test_mp4_streamed_thumbnails_stop_once_the_flag_is_set() {
+   test_mp4_streamed_thumbnails_stop_once_the_flag_is_set_case().await;
 }
 
 #[cfg(not(target_os = "android"))]

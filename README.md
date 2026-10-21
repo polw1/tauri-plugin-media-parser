@@ -134,6 +134,11 @@ Add the plugin permission to your capabilities file
 }
 ```
 
+`media-parser:default` allows every command. If you grant individual permissions
+instead, `streamThumbnails` needs both `media-parser:allow-stream-thumbnails` and
+`media-parser:allow-cancel-thumbnail-stream`. Without the second, a stream that
+fails in JavaScript cannot stop its native extraction.
+
 Initialize the plugin in your Tauri app:
 
 ```rust

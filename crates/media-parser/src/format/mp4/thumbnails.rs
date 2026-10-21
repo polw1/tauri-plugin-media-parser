@@ -20,7 +20,7 @@ use crate::errors::{MediaParserError, Result};
 use crate::stream::StreamReader;
 use crate::types::{Frame, PixelFormat};
 use std::collections::{BTreeMap, HashMap};
-use std::sync::{Arc, LazyLock};
+use std::sync::{Arc, LazyLock, atomic::AtomicBool};
 use std::time::Duration;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
@@ -205,11 +205,18 @@ impl ThumbnailIndex {
    /// Frames arrive in GOP order and, within a GOP, in presentation order. If
    /// `on_frame` fails, decoding stops and that error is returned; frames
    /// already handed over stay valid.
+   ///
+   /// Setting `stop` cancels the extraction with [`MediaParserError::Cancelled`]:
+   /// no sample is submitted, no decoder is opened or drained, and no frame is
+   /// handed over after the decode worker sees it. A native call already in
+   /// progress still finishes, so there is no bound on how soon that happens.
+   /// Dropping the returned future does not stop the worker; only `stop` does.
    pub async fn frames_each(
       &self,
       reader: &dyn StreamReader,
       timestamps: &[Duration],
       options: ThumbnailOptions,
+      stop: Arc<AtomicBool>,
       on_frame: impl FnMut(&[usize], Frame) -> Result<()> + Send + 'static,
    ) -> Result<()> {
       let (targets, plans) = self.exact_plans(timestamps)?;
@@ -220,6 +227,7 @@ impl ThumbnailIndex {
             plans,
             options,
             "too many thumbnail GOPs",
+            stop,
             on_frame,
          )
          .await
@@ -279,6 +287,7 @@ impl ThumbnailIndex {
       assemble_frames(&self.track, targets, images)
    }
 
+   #[allow(clippy::too_many_arguments)] // The stop flag and consumer travel with the plans.
    async fn execute_job_plans_each(
       &self,
       reader: &dyn StreamReader,
@@ -286,6 +295,7 @@ impl ThumbnailIndex {
       plans: Vec<JobPlan>,
       options: ThumbnailOptions,
       reserve_error: &'static str,
+      stop: Arc<AtomicBool>,
       mut on_frame: impl FnMut(&[usize], Frame) -> Result<()> + Send + 'static,
    ) -> Result<()> {
       let permit = Arc::new(
@@ -314,6 +324,7 @@ impl ThumbnailIndex {
             options.quality,
             options.size,
             &output_budget,
+            &stop,
             |batch, token, image| {
                let (tick, indices) =
                   answers.remove(&(jobs[batch].gop, token)).ok_or_else(|| {
@@ -353,12 +364,13 @@ impl ThumbnailIndex {
    }
 
    /// Like [`Self::keyframes`], streaming each keyframe as in
-   /// [`Self::frames_each`].
+   /// [`Self::frames_each`], including how `stop` cancels it.
    pub async fn keyframes_each(
       &self,
       reader: &dyn StreamReader,
       timestamps: &[Duration],
       options: ThumbnailOptions,
+      stop: Arc<AtomicBool>,
       on_frame: impl FnMut(&[usize], Frame) -> Result<()> + Send + 'static,
    ) -> Result<()> {
       let (targets, plans) = self.keyframe_plans(timestamps)?;
@@ -369,6 +381,7 @@ impl ThumbnailIndex {
             plans,
             options,
             "too many thumbnail keyframes",
+            stop,
             on_frame,
          )
          .await
@@ -557,6 +570,7 @@ fn map_decode_error(error: DecodeError) -> MediaParserError {
       | DecodeError::Convert(message) => MediaParserError::Decode(message),
       DecodeError::OutputLimit(message) => MediaParserError::OutputLimit(message),
       DecodeError::ResourceLimit(message) => MediaParserError::ResourceLimit(message),
+      DecodeError::Cancelled => MediaParserError::Cancelled,
    }
 }
 

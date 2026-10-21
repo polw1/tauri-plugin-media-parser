@@ -10,7 +10,7 @@ use super::{
 };
 use std::sync::{
    Arc,
-   atomic::{AtomicUsize, Ordering},
+   atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 
 #[cfg(any(test, h264_backend))]
@@ -122,6 +122,7 @@ pub(crate) fn decode_frame_batches_to_jpeg_with<D: H264Decoder, S: AsRef<[u8]>>(
       quality,
       size,
       output_budget,
+      &AtomicBool::new(false),
       open,
       |batch, token, image| {
          output[batch].push((token, image));
@@ -148,12 +149,18 @@ fn empty_batch_outputs(len: usize) -> Result<Vec<Vec<(FrameToken, DecodedImage)>
 /// batch; the `usize` is the batch's index in `batches`. A decoder candidate
 /// is only retried while no frame of its group has been delivered, so
 /// `on_image` never sees an image twice.
+///
+/// Once `stop` is set, no decoder is opened, no sample is submitted, no
+/// decoder is drained, and no image is handed over; the call returns
+/// [`DecodeError::Cancelled`]. A native call already in progress still runs
+/// to completion.
 #[cfg(any(test, h264_backend))]
 pub(crate) fn decode_frame_batches_to_jpeg_each_with<D: H264Decoder, S: AsRef<[u8]>>(
    batches: &[H264DecodeBatch<'_, S>],
    quality: JpegQuality,
    size: ThumbnailSize,
    output_budget: &OutputBudget,
+   stop: &AtomicBool,
    mut open: impl FnMut(&AvcConfig, usize) -> Result<Option<D>, DecodeError>,
    mut on_image: impl FnMut(usize, FrameToken, DecodedImage) -> Result<(), DecodeError>,
 ) -> Result<(), DecodeError> {
@@ -201,6 +208,7 @@ pub(crate) fn decode_frame_batches_to_jpeg_each_with<D: H264Decoder, S: AsRef<[u
       let mut attempt = 0usize;
       let mut first_error = None;
       loop {
+         check_stop(stop)?;
          let decoder = match open(&prepared, attempt) {
             Ok(Some(decoder)) => decoder,
             Ok(None) => {
@@ -227,8 +235,12 @@ pub(crate) fn decode_frame_batches_to_jpeg_each_with<D: H264Decoder, S: AsRef<[u
             quality,
             size,
             output_budget,
+            stop,
             &mut delivered_frame,
-            &mut |batch, token, image| on_image(group_start + batch, token, image),
+            &mut |batch, token, image| {
+               check_stop(stop)?;
+               on_image(group_start + batch, token, image)
+            },
          ) {
             Ok(()) => break,
             Err(error) if retryable_decoder_error(&error) && !delivered_frame => {
@@ -247,6 +259,14 @@ pub(crate) fn decode_frame_batches_to_jpeg_each_with<D: H264Decoder, S: AsRef<[u
 
 type ImageSink<'a> = dyn FnMut(usize, FrameToken, DecodedImage) -> Result<(), DecodeError> + 'a;
 
+fn check_stop(stop: &AtomicBool) -> Result<(), DecodeError> {
+   if stop.load(Ordering::Relaxed) {
+      Err(DecodeError::Cancelled)
+   } else {
+      Ok(())
+   }
+}
+
 fn retryable_decoder_error(error: &DecodeError) -> bool {
    matches!(
       error,
@@ -263,6 +283,7 @@ fn decode_compatible_frame_batches_to_jpeg_with<D: H264Decoder, S: AsRef<[u8]>>(
    quality: JpegQuality,
    size: ThumbnailSize,
    output_budget: &OutputBudget,
+   stop: &AtomicBool,
    delivered_frame: &mut bool,
    on_image: &mut ImageSink<'_>,
 ) -> Result<(), DecodeError> {
@@ -287,6 +308,7 @@ fn decode_compatible_frame_batches_to_jpeg_with<D: H264Decoder, S: AsRef<[u8]>>(
       quality,
       size,
       output_budget,
+      stop,
       delivered_frame,
       on_image,
    )
@@ -308,6 +330,7 @@ pub(crate) fn decode_batches_with_decoder<D: H264Decoder, S: AsRef<[u8]>>(
       quality,
       size,
       output_budget,
+      &AtomicBool::new(false),
       &mut delivered_frame,
       &mut |batch, token, image| {
          output[batch].push((token, image));
@@ -338,12 +361,14 @@ fn release_ready_images(
    }
 }
 
+#[allow(clippy::too_many_arguments)] // The stop flag joins the group's retry state and image sink.
 fn decode_batches_with_decoder_tracking<D: H264Decoder, S: AsRef<[u8]>>(
    decoder: &mut D,
    batches: &[DecodeBatch<'_, S>],
    quality: JpegQuality,
    size: ThumbnailSize,
    output_budget: &OutputBudget,
+   stop: &AtomicBool,
    delivered_frame: &mut bool,
    on_image: &mut ImageSink<'_>,
 ) -> Result<(), DecodeError> {
@@ -430,7 +455,9 @@ fn decode_batches_with_decoder_tracking<D: H264Decoder, S: AsRef<[u8]>>(
             let global_token = FrameToken::new(u64::try_from(global_index).map_err(|_| {
                DecodeError::ResourceLimit("too many H.264 samples in decode batch".to_string())
             })?);
-            if let Err(error) = decoder.decode(sample.as_ref(), global_token, &mut sink) {
+            if let Err(error) = check_stop(stop)
+               .and_then(|()| decoder.decode(sample.as_ref(), global_token, &mut sink))
+            {
                result = Err(error);
                break 'batches;
             }
@@ -438,7 +465,7 @@ fn decode_batches_with_decoder_tracking<D: H264Decoder, S: AsRef<[u8]>>(
          sample_base += batch.samples.len();
       }
       if result.is_ok() {
-         result = decoder.drain(&mut sink);
+         result = check_stop(stop).and_then(|()| decoder.drain(&mut sink));
       }
       result
    };
@@ -489,6 +516,7 @@ pub(crate) fn decode_native_frame_batches_to_jpeg_each<S: AsRef<[u8]>>(
    quality: JpegQuality,
    size: ThumbnailSize,
    output_budget: &OutputBudget,
+   stop: &AtomicBool,
    on_image: impl FnMut(usize, FrameToken, DecodedImage) -> Result<(), DecodeError>,
 ) -> Result<(), DecodeError> {
    decode_frame_batches_to_jpeg_each_with(
@@ -496,6 +524,7 @@ pub(crate) fn decode_native_frame_batches_to_jpeg_each<S: AsRef<[u8]>>(
       quality,
       size,
       output_budget,
+      stop,
       backend::open_decoder,
       on_image,
    )
@@ -616,6 +645,44 @@ mod tests {
    #[test]
    fn consumer_error_stops_delivery_and_is_returned() {
       test_support::consumer_error_stops_delivery_and_is_returned_case();
+   }
+
+   #[cfg(not(target_os = "android"))]
+   #[test]
+   fn stop_set_between_samples_skips_later_decodes_drain_and_retries() {
+      test_support::stop_set_between_samples_skips_later_decodes_drain_and_retries_case();
+   }
+
+   #[cfg(not(target_os = "android"))]
+   #[test]
+   fn stop_set_during_drain_delivers_no_further_image() {
+      test_support::stop_set_during_drain_delivers_no_further_image_case();
+   }
+
+   #[test]
+   fn stop_set_before_decoding_opens_no_decoder() {
+      let config = reusable_config(2);
+      let samples = [vec![1, 0x65]];
+      let tokens = [FrameToken::new(0)];
+      let wanted = [(FrameToken::new(0), 1)];
+      let mut opens = 0;
+
+      let error = decode_frame_batches_to_jpeg_each_with(
+         &[retry_batch(&config, &samples, &tokens, &wanted)],
+         JpegQuality::default(),
+         ThumbnailSize::default(),
+         &OutputBudget::new(None),
+         &AtomicBool::new(true),
+         |_, _| {
+            opens += 1;
+            Ok(Some(backend::fake::FakeDecoder::emitting(tokens.to_vec())))
+         },
+         |_, _, _| panic!("a cancelled request must not deliver images"),
+      )
+      .expect_err("a set stop flag cancels the request");
+
+      assert_eq!(error, DecodeError::Cancelled);
+      assert_eq!(opens, 0);
    }
 
    #[test]
@@ -1157,6 +1224,7 @@ pub(crate) mod test_support {
          JpegQuality::default(),
          ThumbnailSize::default(),
          &OutputBudget::new(None),
+         &AtomicBool::new(false),
          |_, _| Ok(decoder.take()),
          |batch, token, _| on_image(batch, token),
       )
@@ -1254,6 +1322,84 @@ pub(crate) mod test_support {
       ));
       assert_eq!(calls, 2);
       assert!(matches!(error, DecodeError::BackendContract(_)));
+   }
+
+   pub(crate) fn stop_set_between_samples_skips_later_decodes_drain_and_retries_case() {
+      let config = reusable_config(2);
+      let samples = [vec![1, 0x65]];
+      let tokens = [FrameToken::new(0)];
+      let wanted = [(FrameToken::new(0), 1)];
+      let batches = [
+         retry_batch(&config, &samples, &tokens, &wanted),
+         retry_batch(&config, &samples, &tokens, &wanted),
+      ];
+      let probe = Arc::new(backend::fake::FakeDecoderProbe::default());
+      let stop = AtomicBool::new(false);
+      let mut opens = 0;
+      let mut delivered = 0;
+
+      let error = decode_frame_batches_to_jpeg_each_with(
+         &batches,
+         JpegQuality::default(),
+         ThumbnailSize::default(),
+         &OutputBudget::new(None),
+         &stop,
+         |_, _| {
+            opens += 1;
+            Ok(Some(backend::fake::FakeDecoder::emitting_on_decode(
+               Arc::clone(&probe),
+            )))
+         },
+         |_, _, _| {
+            delivered += 1;
+            stop.store(true, Ordering::Relaxed);
+            Ok(())
+         },
+      )
+      .expect_err("the stop flag cancels the second batch");
+
+      assert_eq!(error, DecodeError::Cancelled);
+      assert_eq!(delivered, 1);
+      assert_eq!(probe.decode_calls(), 1);
+      assert_eq!(probe.drain_calls(), 0);
+      // Cancellation is not a decoder failure, so no other candidate opens.
+      assert_eq!(opens, 1);
+   }
+
+   pub(crate) fn stop_set_during_drain_delivers_no_further_image_case() {
+      let config = reusable_config(2);
+      let samples = vec![vec![1, 0x65]; 3];
+      let tokens = [FrameToken::new(0), FrameToken::new(1), FrameToken::new(2)];
+      let wanted = [
+         (FrameToken::new(0), 1),
+         (FrameToken::new(1), 1),
+         (FrameToken::new(2), 1),
+      ];
+      let probe = Arc::new(backend::fake::FakeDecoderProbe::default());
+      let mut decoder =
+         Some(backend::fake::FakeDecoder::emitting(tokens.to_vec()).with_probe(Arc::clone(&probe)));
+      let stop = AtomicBool::new(false);
+      let mut delivered = 0;
+
+      let error = decode_frame_batches_to_jpeg_each_with(
+         &[retry_batch(&config, &samples, &tokens, &wanted)],
+         JpegQuality::default(),
+         ThumbnailSize::default(),
+         &OutputBudget::new(None),
+         &stop,
+         |_, _| Ok(decoder.take()),
+         |_, _, _| {
+            delivered += 1;
+            stop.store(true, Ordering::Relaxed);
+            Ok(())
+         },
+      )
+      .expect_err("the stop flag cancels the rest of the drain");
+
+      assert_eq!(error, DecodeError::Cancelled);
+      assert_eq!(delivered, 1);
+      assert_eq!(probe.decode_calls(), 3);
+      assert_eq!(probe.drain_calls(), 1);
    }
 
    pub(crate) fn retryable_failure_before_first_frame_replays_with_next_decoder_case() {

@@ -55,6 +55,8 @@ mod error;
 mod session_cache;
 mod source;
 mod subtitle_command;
+#[cfg(any(native_h264_backend, test))]
+mod thumbnail_streams;
 
 pub use error::{Error, Result};
 pub use media_parser;
@@ -161,11 +163,35 @@ impl Builder {
       let plugin = tauri::plugin::Builder::new("media-parser");
       #[cfg(target_os = "android")]
       let plugin = plugin.on_webview_ready(android_jpeg::on_webview_ready);
+      // Best effort: these stop streams whose page or window is gone, but an
+      // IPC call from the old page that arrives after the event still runs.
+      #[cfg(native_h264_backend)]
+      let plugin = plugin
+         .on_page_load(|webview, payload| {
+            if payload.event() == tauri::webview::PageLoadEvent::Started
+               && let Some(streams) = webview.try_state::<thumbnail_streams::ThumbnailStreams>()
+            {
+               streams.cancel_webview(webview.label());
+            }
+         })
+         .on_event(|app, event| {
+            if let tauri::RunEvent::WindowEvent {
+               label,
+               event: tauri::WindowEvent::Destroyed,
+               ..
+            } = event
+               && let Some(streams) = app.try_state::<thumbnail_streams::ThumbnailStreams>()
+            {
+               streams.cancel_window(label);
+            }
+         });
       plugin
          .setup(move |app, _api| {
             app.manage(self.into_default_headers()?);
             #[cfg(native_h264_backend)]
             app.manage(commands::ThumbnailSessions::default());
+            #[cfg(native_h264_backend)]
+            app.manage(thumbnail_streams::ThumbnailStreams::default());
             #[cfg(not(native_h264_backend))]
             app.manage(commands::ThumbnailSessions);
             app.manage(subtitle_command::SubtitleSessions::default());
@@ -177,6 +203,7 @@ impl Builder {
             commands::get_cover,
             commands::get_thumbnails,
             commands::stream_thumbnails,
+            commands::cancel_thumbnail_stream,
             subtitle_command::get_subtitles
          ])
          .build()

@@ -131,6 +131,18 @@ fn run_cases() {
          }),
       ),
       (
+         "stop_set_between_samples_skips_later_decodes_drain_and_retries",
+         Box::new(|| {
+            crate::decoders::h264::pipeline::test_support::stop_set_between_samples_skips_later_decodes_drain_and_retries_case();
+         }),
+      ),
+      (
+         "stop_set_during_drain_delivers_no_further_image",
+         Box::new(|| {
+            crate::decoders::h264::pipeline::test_support::stop_set_during_drain_delivers_no_further_image_case();
+         }),
+      ),
+      (
          "orchestration_returns_reordered_callbacks_in_token_order",
          Box::new(|| {
             crate::decoders::h264::pipeline::test_support::orchestration_returns_reordered_callbacks_in_token_order_case();
@@ -292,6 +304,14 @@ fn run_cases() {
          }),
       ),
       (
+         "test_mp4_streamed_thumbnails_stop_once_the_flag_is_set",
+         Box::new(|| {
+            runtime.block_on(
+               mp4_thumbnails::test_mp4_streamed_thumbnails_stop_once_the_flag_is_set_case(),
+            );
+         }),
+      ),
+      (
          "test_mp4_exact_thumbnails_truncate_the_gop_at_the_last_target",
          Box::new(|| {
             runtime.block_on(
@@ -334,7 +354,7 @@ fn run_cases() {
          Box::new(test_cases::concurrent_encoding),
       ),
    ];
-   assert_eq!(cases.len(), 40);
+   assert_eq!(cases.len(), 43);
    let mut expected = std::collections::HashSet::new();
    for (name, _) in &cases {
       assert!(expected.insert(*name), "duplicate case {name}");
