@@ -184,7 +184,7 @@ test('rejects a position answered twice', async () => {
    await assert.rejects(stream, /invalid index: 0/);
 });
 
-test('rejects when the terminal count disagrees with the positions answered', async () => {
+test('rejects when a position is never answered', async () => {
    const ipc = mockIpc();
 
    const stream = streamThumbnails('/video.mp4', {
@@ -193,6 +193,21 @@ test('rejects when the terminal count disagrees with the positions answered', as
    });
    ipc.deliver(0, thumbnailMessage([0]));
    ipc.deliver(1, { done: 1 });
+
+   await assert.rejects(stream, /every timestamp exactly once/);
+});
+
+test('rejects when the terminal count disagrees with the messages received', async () => {
+   const ipc = mockIpc();
+
+   // Every position is answered, so only the message count can reject.
+   const stream = streamThumbnails('/video.mp4', {
+      timestamps: [0, 500],
+      onThumbnail: () => undefined,
+   });
+   ipc.deliver(0, thumbnailMessage([0]));
+   ipc.deliver(1, thumbnailMessage([1]));
+   ipc.deliver(2, { done: 1 });
 
    await assert.rejects(stream, /every timestamp exactly once/);
 });
