@@ -731,6 +731,7 @@ mod tests {
    fn stream_from_mock_webview(
       source: String,
       timestamps: Vec<u64>,
+      accurate: bool,
    ) -> (Vec<Vec<usize>>, serde_json::Value) {
       use std::sync::mpsc;
       use tauri::{
@@ -755,7 +756,7 @@ mod tests {
          source,
          timestamps,
          None,
-         Some(true),
+         Some(accurate),
          None,
          None,
          None,
@@ -792,7 +793,7 @@ mod tests {
    #[cfg(native_h264_backend)]
    fn stream_thumbnails_fans_out_positions_and_ends_with_the_count() {
       let (thumbnails, terminal) =
-         stream_from_mock_webview(video_fixture_source(), vec![0, 200, 0]);
+         stream_from_mock_webview(video_fixture_source(), vec![0, 200, 0], true);
 
       assert_eq!(thumbnails, vec![vec![0, 2], vec![1]]);
       assert_eq!(terminal, serde_json::json!({ "done": 2 }));
@@ -800,9 +801,20 @@ mod tests {
 
    #[test]
    #[cfg(native_h264_backend)]
+   fn stream_thumbnails_in_keyframe_mode_sends_one_thumbnail_per_keyframe() {
+      // 200 ms falls back to the keyframe at 0, so all three positions share it.
+      let (thumbnails, terminal) =
+         stream_from_mock_webview(video_fixture_source(), vec![0, 200, 0], false);
+
+      assert_eq!(thumbnails, vec![vec![0, 1, 2]]);
+      assert_eq!(terminal, serde_json::json!({ "done": 1 }));
+   }
+
+   #[test]
+   #[cfg(native_h264_backend)]
    fn stream_thumbnails_ends_with_the_error_a_rejected_invoke_would_carry() {
       let (thumbnails, terminal) =
-         stream_from_mock_webview("/file/that/does/not/exist.mp4".into(), vec![0]);
+         stream_from_mock_webview("/file/that/does/not/exist.mp4".into(), vec![0], true);
 
       assert!(thumbnails.is_empty());
       let message = terminal["error"]

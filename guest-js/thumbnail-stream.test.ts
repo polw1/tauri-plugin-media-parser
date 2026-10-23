@@ -252,16 +252,22 @@ test('rejects with the backend error when invoke rejects', async () => {
 
 test('rejects on a bad message while the extraction is still running', async () => {
    const ipc = mockIpc();
+   let calls = 0;
 
    const stream = streamThumbnails('/video.mp4', {
       timestamps: [0, 500],
       onThumbnail: () => {
-         throw new Error('consumer failed');
+         calls += 1;
       },
    });
    ipc.deliver(0, thumbnailMessage([0]));
+   ipc.deliver(1, {});
 
-   await assert.rejects(stream, /consumer failed/);
+   await assert.rejects(stream, TypeError);
+   assert.equal(calls, 1);
+   assert.deepEqual(cancels(ipc.calls), [
+      { cmd: 'plugin:media-parser|cancel_thumbnail_stream', args: { channelId: CHANNEL_ID } },
+   ]);
 });
 
 test('unregisters channels when invoke rejects before entering the handler', async () => {
