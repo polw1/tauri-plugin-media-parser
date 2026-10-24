@@ -126,7 +126,9 @@ export interface StreamThumbnailsOptions extends ThumbnailsOptions {
     * Called synchronously once per decoded thumbnail, in file order. Use
     * `indices` to place each one; a thrown error rejects the stream. The
     * return type is `undefined` so that an `async` callback does not compile:
-    * its returned promise would be discarded.
+    * its returned promise would be discarded. It also rejects an
+    * expression-bodied arrow that returns a value: `(t) => list.push(t)`
+    * fails with TS2322, so use a block body, `(t) => { list.push(t); }`.
     */
    onThumbnail(thumbnail: StreamedThumbnailInfo): undefined;
 }

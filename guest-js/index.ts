@@ -177,6 +177,8 @@ export async function getThumbnails(
  *
  * @param source - Absolute path to a local file or URL of a remote media file
  * @param options - The {@link getThumbnails} options plus `onThumbnail`
+ * @returns A promise that resolves without a value after the end-of-stream
+ * message is received and every timestamp has been answered
  * @throws TypeError for the same invalid options as {@link getThumbnails}
  */
 export async function streamThumbnails(
